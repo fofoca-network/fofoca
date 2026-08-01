@@ -1,0 +1,200 @@
+[workspace]
+members = ["crates/*"]
+# Load-bearing on a *virtual* manifest: a root package on edition 2024 implies
+# `resolver = "3"`, but a virtual workspace inherits nothing from its members
+# and silently defaults to the edition-2015 `resolver = "1"`. Left implicit, the
+# split from root-package to virtual would quietly change feature unification
+# across the whole graph — notably folding the `test-fixtures` dev-dep feature
+# into the shipped binary.
+resolver = "3"
+
+# Shared package fields. Each crate opts in with `edition.workspace = true`
+# / `rust-version.workspace = true` / `version.workspace = true` so the
+# workspace stays in lockstep on toolchain expectations and moves as one
+# version. The crates are not independently versioned: they were carved out of
+# a single engine to control the dependency closure per consumer, not to be
+# released on separate cadences.
+[workspace.package]
+edition = "2024"
+rust-version = "1.93"
+version = "0.5.0"
+
+# Deps shared by the crates here, pinned once so versions stay in lockstep.
+# Each crate opts in with `dep.workspace = true` (and may union in extra
+# features). Feature sets here are the union across the workspace — cargo
+# unifies features per build anyway.
+[workspace.dependencies]
+# Lives in its own repo: it has no fofoca dependency and its audience is any
+# iroh user, not just this engine. Pinned by `rev`, not `branch` — a branch ref
+# is mutable, so a force-push would silently change what the next
+# `cargo update` builds. Bumping it is an explicit rev edit here.
+#
+# The `[patch.crates-io]` block at the bottom of this file governs the whole
+# graph *including* this git dep, so the transport builds against the forked
+# `iroh`/`iroh-base` here even though its own manifest names the crates.io
+# versions. Built standalone in its own CI it resolves upstream 1.0.2, which is
+# a useful check that it carries no hidden dependency on the fork.
+iroh-multihop-transport = { git = "https://github.com/fofoca-network/iroh-multihop-transport", rev = "93cdd76f9611a710f476675e0492d49c06888d05" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "fs", "signal", "net", "process"] }
+serde = { version = "1", features = ["derive"] }
+# `raw_value` lets the MCP `fetch_messages` result embed each event's
+# already-rendered, field-order-pinned JSON verbatim (a `RawValue`) instead of
+# re-parsing to a key-sorted `Value` — keeping MCP byte-identical to the
+# `--output json` stream.
+serde_json = { version = "1", features = ["raw_value"] }
+anyhow = "1"
+bytes = "1"
+# Cargo-style colored status output for the operator-facing commands (`plug`,
+# `unplug`, `doctor`). `anstream` resolves color support per stream at write
+# time — a pipe, a file or `NO_COLOR` gets plain bytes — so an agent capturing
+# stdout sees no ANSI without us branching on a flag or a TTY check.
+anstyle = "1"
+anstream = "0.6"
+# `tracing` is already in the lockfile transitively (iroh depends on
+# it); declaring it directly only lets us emit our own spans/events and
+# adds nothing to the build. Pinned 0.1 (the only line; 0.x is stable).
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "tracing-log"] }
+async-trait = "0.1.89"
+uuid = { version = "1", features = ["v4"] }
+# `unstable-net-report`: 1.0.0 gated `Endpoint::net_report()` behind it, and the
+# capability probe (`lookup::capability`) reads the report directly.
+iroh = { version = "1.0.2", features = ["tls-ring", "unstable-net-report", "unstable-custom-transports"] }
+# The dependency-light half of iroh: keys, endpoint addresses, relay URLs — no
+# QUIC, TLS or DNS. `fofoca-protocol` depends on this rather than `iroh`
+# so the wire vocabulary carries no network stack (docs/mesh-slimming.md). The
+# `[patch.crates-io]` entry below repoints it at the same fork as `iroh`, so
+# both halves stay one version.
+iroh-base = { version = "1.0.2", features = ["key", "relay"] }
+iroh-gossip = { version = "0.101", features = ["net"] }
+bs58 = "0.5"
+# The shared `state`/`meta` documents are automerge CRDTs: concurrent edits
+# merge without a bespoke ordered-log fold. `default-features` stays on (the
+# `storage-v2` on-disk format is unused — we carry changes on the wire).
+automerge = "0.10"
+sha2 = "0.10"
+rand = "0.9"
+libc = "0.2"
+# Shared dev-deps (unit + integration tests, benches).
+proptest = "1.6"
+insta = "1"
+divan = "0.1"
+
+# Note: there is NO `rust_2021_idioms` group. `rust_2018_idioms` is the only
+# idioms group and is still correct on edition 2021 (it bundles
+# bare_trait_objects, elided_lifetimes_in_paths, explicit_outlives_requirements,
+# unused_extern_crates, ellipsis_inclusive_range_patterns).
+# `rust_2021_compatibility` is a migration-only group, not used here.
+[workspace.lints.rust]
+rust_2018_idioms = { level = "warn", priority = -1 }
+# `deny` not `forbid`: the engine carries a few documented libc FFI blocks,
+# each with an `#[expect(unsafe_code, reason = ...)]`.
+unsafe_code = "deny"
+unreachable_pub = "warn"
+unused_qualifications = "warn"
+missing_debug_implementations = "warn"
+# Reject non-ASCII identifiers (homoglyph / supply-chain hardening;
+# matches the project's ASCII-only protocol ethos).
+non_ascii_idents = "deny"
+# Require an explicit `unsafe {}` block inside any `unsafe fn`.
+unsafe_op_in_unsafe_fn = "deny"
+# NOTE: `unused_crate_dependencies` was evaluated and rejected — it is
+# per-compilation-unit, so every `tests/*.rs` integration crate
+# false-flags deps it doesn't personally use (anyhow/clap/bs58/...).
+# Not fixable without per-test `use X as _;` source shims. The genuine
+# dead deps it surfaced (`include_dir`, `schemars`) were removed below.
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+# Prevents holding a sync `std::sync::Mutex` (or RwLock) guard across an
+# `.await` point — a recipe for deadlocks.
+await_holding_lock = "deny"
+# Cargo.toml hygiene (metadata, wildcard deps, feature names, ...).
+cargo = { level = "warn", priority = -1 }
+# cherry-picked restriction lints that aid readability
+min_ident_chars = "warn"
+shadow_unrelated = "warn"
+semicolon_inside_block = "warn"
+allow_attributes_without_reason = "warn"
+excessive_nesting = "warn"
+# Force `#[expect(...)]` over `#[allow(...)]` where the lint still fires, so a
+# suppression that goes stale (lint no longer triggers) becomes a build error
+# instead of silently lingering.
+allow_attributes = "warn"
+# Forbid `_ =>` catch-all arms on enum matches: a new variant must be
+# handled explicitly rather than silently swallowed by a wildcard.
+wildcard_enum_match_arm = "warn"
+# documented opt-out (noise / not a readability win): keep CI signal useful
+module_name_repetitions = "allow"
+# Transitive duplicate crate versions are not controllable from a leaf
+# binary (verified: ~16 dup crates, all pulled by iroh/reqwest/etc.);
+# the lint is noise here, not an actionable signal.
+multiple_crate_versions = "allow"
+
+# Dependencies get light optimization in dev/test builds; workspace members
+# stay at opt-level 0 (`package."*"` never applies to them) so incremental
+# builds stay fast. Debug-built curve/AEAD/hash math is ~10x slower and
+# inflates every connect/handshake in the subprocess test suite, so the hot
+# crypto crates get full optimization. `ring` needs no entry (C/asm core).
+[profile.dev.package."*"]
+opt-level = 1
+
+[profile.dev.package.curve25519-dalek]
+opt-level = 3
+[profile.dev.package.ed25519-dalek]
+opt-level = 3
+[profile.dev.package.x25519-dalek]
+opt-level = 3
+[profile.dev.package.chacha20]
+opt-level = 3
+[profile.dev.package.chacha20poly1305]
+opt-level = 3
+[profile.dev.package.aes]
+opt-level = 3
+[profile.dev.package.aes-gcm]
+opt-level = 3
+[profile.dev.package.sha2]
+opt-level = 3
+[profile.dev.package.blake3]
+opt-level = 3
+[profile.dev.package.argon2]
+opt-level = 3
+
+# Two deliberate divergences from upstream here:
+# - `lto = "thin"` / `codegen-units = 16` instead of fat LTO + 1 codegen unit:
+#   upstream's fat LTO costs minutes per rebuild, which is too slow for the
+#   mallorca dev loop.
+# - NO `panic = "abort"`: fofoca-ffi's `ffi.rs` relies on
+#   `catch_unwind` at the C ABI boundary so a Rust panic doesn't unwind past
+#   `extern "C"` into the Odin host. `panic = "abort"` would kill the whole
+#   mallorca process on any engine panic instead of returning an error code.
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 16
+strip = "debuginfo"
+
+[profile.release.build-override]
+opt-level = 3
+
+# Local, uncommitted patch consuming the leak fixes from our GitHub forks
+# (kept out of `main` until the upstream PRs merge, then dropped for the released
+# versions). iroh-gossip: the connection-churn leak fix.
+[patch.crates-io]
+# Pinned by `rev`, not `branch`: a branch ref is mutable, so a force-push (or
+# any later commit) on the fork would silently change what the next
+# `cargo update` builds. The rev is the tip of the named fix branch at pin
+# time; bumping a fork is an explicit rev edit here.
+#
+# iroh#4294 mapped_addrs eviction (drlukeangel's), from the fofoca-network fork
+# (branch fix/mapped-addrs-eviction-1.0.2, rebased onto v1.0.2). iroh-base/
+# iroh-dns are patched to the SAME repo+rev as `iroh` because the forked `iroh`
+# pulls its workspace-local copies of them — without these the graph carries
+# two `iroh_base`/`iroh_dns` versions (fork vs crates.io) and types from
+# iroh-gossip/lookups clash (E0308).
+iroh = { git = "https://github.com/fofoca-network/iroh", rev = "dcbdc1521caf680d483b2d8eec669a7997e9edf3" }
+iroh-base = { git = "https://github.com/fofoca-network/iroh", rev = "dcbdc1521caf680d483b2d8eec669a7997e9edf3" }
+iroh-dns = { git = "https://github.com/fofoca-network/iroh", rev = "dcbdc1521caf680d483b2d8eec669a7997e9edf3" }
+# Branch fix/superseded-conn-leak-0.101 (rebased onto v0.101.0): the
+# connection-churn leak fix (upstream PR n0-computer/iroh-gossip#147).
+iroh-gossip = { git = "https://github.com/fofoca-network/iroh-gossip", rev = "c779c0661fc9429e86852570be9bdc00fb47fdd9" }

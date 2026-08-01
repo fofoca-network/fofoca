@@ -1,0 +1,40 @@
+[package]
+name = "fofoca-blobs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors = ["Caio Gondim <me@caiogondim.com>"]
+description = "out-of-band content-addressed blob transfer for fofoca"
+license = "MIT"
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+name = "fofoca_blobs"
+path = "src/lib.rs"
+
+# The one crate that sits *above* the engine rather than below it: blob
+# transfer needs endpoint construction, which it takes from the engine's
+# quarantined `net` facade. Nothing in the engine calls back into it, so the
+# edge stays one-way and the engine no longer carries it. See
+# docs/mesh-slimming.md.
+[dependencies]
+fofoca = { path = "../fofoca" }
+fofoca-protocol = { path = "../fofoca-protocol" }
+fofoca-util = { path = "../fofoca-util" }
+iroh.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+bytes.workspace = true
+tracing.workspace = true
+bs58.workspace = true
+sha2.workspace = true
+rand.workspace = true
+
+[dev-dependencies]
+fofoca-protocol = { path = "../fofoca-protocol", features = ["test-fixtures"] }
+proptest.workspace = true

@@ -1,0 +1,34 @@
+[package]
+name = "fofoca-reassembly"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors = ["Caio Gondim <me@caiogondim.com>"]
+description = "multipart body reassembly for fofoca"
+license = "MIT"
+publish = false
+
+[features]
+# Exposes constructors the engine's adversarial suite injects with.
+adversarial = []
+
+[lints]
+workspace = true
+
+[lib]
+name = "fofoca_reassembly"
+path = "src/lib.rs"
+
+[dependencies]
+fofoca-protocol = { path = "../fofoca-protocol" }
+fofoca-util = { path = "../fofoca-util" }
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+bytes.workspace = true
+
+[dev-dependencies]
+fofoca-protocol = { path = "../fofoca-protocol", features = ["test-fixtures"] }
+proptest.workspace = true
+insta.workspace = true

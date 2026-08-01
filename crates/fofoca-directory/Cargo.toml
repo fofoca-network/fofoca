@@ -1,0 +1,32 @@
+[package]
+name = "fofoca-directory"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors = ["Caio Gondim <me@caiogondim.com>"]
+description = "discovery-mesh advertisement codec for fofoca"
+license = "MIT"
+publish = false
+
+[features]
+# Exposes constructors the engine's adversarial suite injects with.
+adversarial = []
+
+[lints]
+workspace = true
+
+[lib]
+name = "fofoca_directory"
+path = "src/lib.rs"
+
+[dependencies]
+fofoca-protocol = { path = "../fofoca-protocol" }
+fofoca-util = { path = "../fofoca-util" }
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+insta.workspace = true

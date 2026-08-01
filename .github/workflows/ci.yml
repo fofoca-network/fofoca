@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      # Reads rust-toolchain.toml — do not duplicate the version here.
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Check
+        run: cargo check --workspace --all-targets
+
+      # The `mdns` and `dht` features exist so a consumer can drop iroh's
+      # discovery closure, and `async-io` so `fofoca-util` can shed tokio.
+      # Nothing else proves those combinations still compile.
+      - name: Check (no default features)
+        run: cargo check --workspace --no-default-features
+
+      - name: Check (all features)
+        run: cargo check --workspace --all-features
+
+      - name: Test
+        run: cargo test --workspace
+
+  # The C ABI is the whole point of fofoca-ffi and its only non-Rust consumer
+  # links the staticlib. Build it the way that consumer does.
+  staticlib:
+    name: FFI staticlib
+    runs-on: macos-15
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build staticlib
+        run: cargo build --release -p fofoca-ffi
+
+      - name: Confirm the archive exists and exports the ABI
+        run: |
+          ls -lh target/release/libfofoca_ffi.a
+          # Every function declared in include/fofoca.h must be present in the
+          # archive, or a downstream link fails long after this job went green.
+          nm -gU target/release/libfofoca_ffi.a 2>/dev/null \
+            | grep -oE '_fofoca_[a-z_]+$' | sort -u > /tmp/exported.txt
+          grep -oE '\bfofoca_[a-z_]+(?=\()' -P crates/fofoca-ffi/include/fofoca.h \
+            | sort -u | sed 's/^/_/' > /tmp/declared.txt
+          echo "--- declared in fofoca.h ---"; cat /tmp/declared.txt
+          missing=$(comm -23 /tmp/declared.txt /tmp/exported.txt)
+          if [ -n "$missing" ]; then
+            echo "::error::declared in fofoca.h but not exported by the staticlib:"
+            echo "$missing"
+            exit 1
+          fi

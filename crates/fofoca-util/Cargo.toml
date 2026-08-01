@@ -1,0 +1,38 @@
+[package]
+name = "fofoca-util"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors = ["Caio Gondim <me@caiogondim.com>"]
+description = "host-level helpers for fofoca: runtime dirs, clock, tuning dials, bounded containers, build stamp"
+license = "MIT"
+publish = false
+
+[features]
+# Exposes helpers that exist only for assertions (clock::unix_nanos,
+# Cooldown::len). fofoca turns it on through dev-dependencies.
+test-fixtures = []
+# `bounded_read` is the crate's only async code, and its only consumer is the
+# engine's IPC listener. Gating it keeps tokio out of the wire crates
+# (fofoca-protocol, -doc, -logging), which then have no async runtime at
+# all. See docs/mesh-slimming.md.
+async-io = ["dep:tokio"]
+
+[lints]
+workspace = true
+
+[lib]
+name = "fofoca_util"
+path = "src/lib.rs"
+
+# The bottom of the stack: no iroh, no serde, no engine modules. Everything
+# here is either std, the two syscalls in `mesh_prefix`/`resident_memory`, or
+# tokio's `AsyncBufRead` for `bounded_read`.
+[dependencies]
+libc.workspace = true
+tokio = { workspace = true, optional = true }
+tracing.workspace = true
+
+# Stamps the build's git short hash + dirty flag into `version::VERSION`.
+[build-dependencies]
+vergen-gitcl = "1"

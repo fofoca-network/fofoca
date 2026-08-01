@@ -1,0 +1,70 @@
+//! Wire types and seed-derived identities — the vocabulary every consumer
+//! speaks.
+//!
+//! **Flat by design.** The implementation is split across submodules (message
+//! envelope, `mesh id` identifier, nickname, crypto, sealing, address codec), but
+//! they are crate-private and everything lands here: a consumer that needed a
+//! `Message` and a `MeshName` and a `Password` used to write three import paths
+//! into the engine's file layout, which then could not be rearranged without
+//! churning every one of them.
+
+pub mod crypto;
+mod ident;
+mod topic;
+
+pub mod identity;
+/// Creator-minted invites to an invite-only mesh. Lives here rather than in
+/// the engine because `InviteTicket` is part of the join vocabulary a
+/// consumer speaks, and `resolver::JoinTarget` is defined in terms of it.
+pub mod invite;
+pub mod mesh;
+pub mod message;
+pub mod nickname;
+pub mod peer_addr;
+/// A join token: a literal mesh id, or a creator-minted invite ticket.
+pub mod resolver;
+pub mod seal;
+mod wordlist;
+
+pub use crypto::{Password, TicketAuth, ct_eq};
+pub use identity::{Identity, encode_pubkey};
+pub use mesh::{
+    AdvertiseRequiresReachable, DEFAULT_DIRECTORY, DirectorySelection, LookupOpts, LookupSet, Mesh,
+    MeshConfig, MeshId, MeshIdError, MeshName, NameError, RelayChoice, RelayLadder,
+    RelayLadderError, RelaySelection, resolve_lookups, validate_advertise,
+};
+pub use message::{
+    AppFrameParams, AppTag, BodyError, Channel, CorrId, IdError, Message, MessageBody, MessageId,
+    MessageKind, PresenceSubtype, Shard, ShardGroup, sole_addressee,
+};
+pub use nickname::{Nickname, NicknameError};
+pub use seal::seal_to_body;
+pub use topic::TopicId;
+
+/// The invite token itself. Minting lives in
+/// [`ops::invite`](crate::ops::invite); decoding is part of the join vocabulary.
+pub use crate::invite::InviteTicket;
+/// A join token: a literal mesh id, or a creator-minted invite ticket.
+pub use crate::resolver::{JoinTarget, JoinTargetError};
+
+// Gate matches the definitions' (`any(test, feature)`): a narrower gate here
+// leaves them `pub` but unreachable under a plain `cargo test`.
+#[cfg(any(test, feature = "test-fixtures"))]
+pub use message::{BuildMsgParams, ChainCtx, build_msg_bytes};
+
+// Shared config for this crate's `proptest!` blocks: regression seeds land in
+// `tests/proptest-regressions` rather than at the crate root. Every block opts
+// in with `#![proptest_config(crate::proptest_support::config())]`.
+#[cfg(test)]
+pub(crate) mod proptest_support {
+    use proptest::test_runner::{Config, FileFailurePersistence};
+
+    pub(crate) fn config() -> Config {
+        Config {
+            failure_persistence: Some(Box::new(FileFailurePersistence::SourceParallel(
+                "tests/proptest-regressions",
+            ))),
+            ..Config::default()
+        }
+    }
+}
