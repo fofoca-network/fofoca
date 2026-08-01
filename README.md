@@ -59,7 +59,7 @@ separate cadences.
 
 ```bash
 cargo check --workspace
-cargo test  --workspace          # 22 suites
+cargo test  --workspace          # 19 suites, 411 tests
 ```
 
 The `mdns` and `dht` features (default on) gate iroh's discovery closure, and

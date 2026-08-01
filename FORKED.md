@@ -161,7 +161,7 @@ iroh-gossip and the address-lookup crates fail to unify (E0308).
 
 ```
 cargo check --workspace            # also: --no-default-features, --all-features
-cargo test --workspace             # 22 suites
+cargo test --workspace             # 19 suites, 411 tests
 ```
 
 From a [mallorca](https://github.com/dviramontes/mallorca) checkout, `just check`

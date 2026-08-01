@@ -1954,7 +1954,7 @@ dependencies = [
 [[package]]
 name = "iroh"
 version = "1.0.2"
-source = "git+https://github.com/fofoca-network/iroh?rev=dcbdc1521caf680d483b2d8eec669a7997e9edf3#dcbdc1521caf680d483b2d8eec669a7997e9edf3"
+source = "git+https://github.com/fofoca-network/iroh?rev=f9cb1f4fd1b69e904770516029fa0afac0fd3ce4#f9cb1f4fd1b69e904770516029fa0afac0fd3ce4"
 dependencies = [
  "backon",
  "blake3",
@@ -2004,7 +2004,7 @@ dependencies = [
 [[package]]
 name = "iroh-base"
 version = "1.0.2"
-source = "git+https://github.com/fofoca-network/iroh?rev=dcbdc1521caf680d483b2d8eec669a7997e9edf3#dcbdc1521caf680d483b2d8eec669a7997e9edf3"
+source = "git+https://github.com/fofoca-network/iroh?rev=f9cb1f4fd1b69e904770516029fa0afac0fd3ce4#f9cb1f4fd1b69e904770516029fa0afac0fd3ce4"
 dependencies = [
  "curve25519-dalek 5.0.0-rc.0",
  "data-encoding",
@@ -2022,7 +2022,7 @@ dependencies = [
 [[package]]
 name = "iroh-dns"
 version = "1.0.2"
-source = "git+https://github.com/fofoca-network/iroh?rev=dcbdc1521caf680d483b2d8eec669a7997e9edf3#dcbdc1521caf680d483b2d8eec669a7997e9edf3"
+source = "git+https://github.com/fofoca-network/iroh?rev=f9cb1f4fd1b69e904770516029fa0afac0fd3ce4#f9cb1f4fd1b69e904770516029fa0afac0fd3ce4"
 dependencies = [
  "arc-swap",
  "cfg_aliases",
@@ -2154,7 +2154,7 @@ dependencies = [
 [[package]]
 name = "iroh-relay"
 version = "1.0.2"
-source = "git+https://github.com/fofoca-network/iroh?rev=dcbdc1521caf680d483b2d8eec669a7997e9edf3#dcbdc1521caf680d483b2d8eec669a7997e9edf3"
+source = "git+https://github.com/fofoca-network/iroh?rev=f9cb1f4fd1b69e904770516029fa0afac0fd3ce4#f9cb1f4fd1b69e904770516029fa0afac0fd3ce4"
 dependencies = [
  "blake3",
  "bytes",

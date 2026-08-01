@@ -186,15 +186,25 @@ opt-level = 3
 # `cargo update` builds. The rev is the tip of the named fix branch at pin
 # time; bumping a fork is an explicit rev edit here.
 #
-# iroh#4294 mapped_addrs eviction (drlukeangel's), from the fofoca-network fork
-# (branch fix/mapped-addrs-eviction-1.0.2, rebased onto v1.0.2). iroh-base/
-# iroh-dns are patched to the SAME repo+rev as `iroh` because the forked `iroh`
-# pulls its workspace-local copies of them — without these the graph carries
-# two `iroh_base`/`iroh_dns` versions (fork vs crates.io) and types from
-# iroh-gossip/lookups clash (E0308).
-iroh = { git = "https://github.com/fofoca-network/iroh", rev = "dcbdc1521caf680d483b2d8eec669a7997e9edf3" }
-iroh-base = { git = "https://github.com/fofoca-network/iroh", rev = "dcbdc1521caf680d483b2d8eec669a7997e9edf3" }
-iroh-dns = { git = "https://github.com/fofoca-network/iroh", rev = "dcbdc1521caf680d483b2d8eec669a7997e9edf3" }
+# Two fixes, stacked on the fofoca-network fork's branch
+# fix/join-all-panics-on-cancel (itself off fix/mapped-addrs-eviction-1.0.2,
+# rebased onto v1.0.2):
+#
+#  1. iroh#4294 mapped_addrs eviction (drlukeangel's).
+#  2. `RelayActor::close_all_active_relays` drains its `JoinSet` with
+#     `join_next` instead of `join_all`. `join_all` resolves a `JoinError` by
+#     panicking and does not distinguish a *cancelled* task from a panicked
+#     one, so an embedder dropping the tokio runtime mid-shutdown — which is
+#     exactly what `fofoca_close` does — takes a runtime worker down with it.
+#     Surfaced as "task N was cancelled" on a joining peer's teardown.
+#
+# iroh-base/iroh-dns are patched to the SAME repo+rev as `iroh` because the
+# forked `iroh` pulls its workspace-local copies of them — without these the
+# graph carries two `iroh_base`/`iroh_dns` versions (fork vs crates.io) and
+# types from iroh-gossip/lookups clash (E0308).
+iroh = { git = "https://github.com/fofoca-network/iroh", rev = "f9cb1f4fd1b69e904770516029fa0afac0fd3ce4" }
+iroh-base = { git = "https://github.com/fofoca-network/iroh", rev = "f9cb1f4fd1b69e904770516029fa0afac0fd3ce4" }
+iroh-dns = { git = "https://github.com/fofoca-network/iroh", rev = "f9cb1f4fd1b69e904770516029fa0afac0fd3ce4" }
 # Branch fix/superseded-conn-leak-0.101 (rebased onto v0.101.0): the
 # connection-churn leak fix (upstream PR n0-computer/iroh-gossip#147).
 iroh-gossip = { git = "https://github.com/fofoca-network/iroh-gossip", rev = "c779c0661fc9429e86852570be9bdc00fb47fdd9" }
