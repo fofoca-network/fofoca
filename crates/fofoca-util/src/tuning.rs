@@ -71,7 +71,7 @@ pub const LINKSTATE_INTERVAL_SECS: u64 = 15;
 /// deep interior gaps without re-sending the out-of-window remainder). At
 /// 70 ids each (~140 total) the body packs ids as raw 16-byte UUIDs
 /// Base58-encoded (~22 chars/id) to ~3.1 KB; plus the `{windows:[…]}` and
-/// message envelope (the `mesh id` id alone is ~80 chars) it stays under
+/// message envelope (the mesh id alone is ~80 chars) it stays under
 /// `MAX_MESSAGE_SIZE` (3840) — guarded by the `digest_fits_gossip_cap`
 /// test. Sized to a single gossip message, **not** the (larger,
 /// configurable) log, which the rolling cursor sweeps across rounds.
@@ -160,6 +160,10 @@ pub fn ping_window_secs() -> u64 {
 /// Default [`crate::consts::PPID_WATCH_INTERVAL_MS`]; hidden flag
 /// `--ppid-watch-interval-ms` so the subprocess test sees the self-exit in
 /// milliseconds instead of the production seconds.
+///
+/// Gated with its only caller (`daemon::event_loop::spawn_orphan_watch`): the
+/// orphan watch is `libc::getppid`, which arrives with `host`.
+#[cfg(all(unix, feature = "host"))]
 #[must_use]
 pub fn ppid_watch_interval_ms() -> u64 {
     current().ppid_watch_interval_ms.max(1)
@@ -267,7 +271,11 @@ pub const RESUBSCRIBE_MAX_ATTEMPTS: u32 = 8;
 /// handshake), so the listener retries forever instead of dying — the
 /// backoff (doubling MIN→MAX, reset on any successful accept) just
 /// keeps a persistently failing listener from spinning hot.
+///
+/// `host`-only with the listener itself — a browser binds no socket.
+#[cfg(feature = "host")]
 pub const IPC_ACCEPT_BACKOFF_MIN_MS: u64 = 100;
+#[cfg(feature = "host")]
 pub const IPC_ACCEPT_BACKOFF_MAX_SECS: u64 = 5;
 
 /// Per-connection IPC I/O deadline: how long the daemon waits for a
@@ -275,6 +283,7 @@ pub const IPC_ACCEPT_BACKOFF_MAX_SECS: u64 = 5;
 /// write to complete. A client that connects and goes silent would
 /// otherwise pin a task + fd for the daemon's lifetime; well above any
 /// real `msg`/`poll` round-trip, so only a hung client ever hits it.
+#[cfg(feature = "host")]
 pub const IPC_IO_TIMEOUT_SECS: u64 = 10;
 
 /// Readiness gate: how long to wait for the daemon's `--state-file` to
@@ -378,7 +387,7 @@ pub const QUIET_CAP: usize = 1024;
 /// still maintains links independently — this only throttles *our* piling-on.
 pub const RELINK_COOLDOWN_SECS: u64 = 10;
 
-/// How often an advertising `create` re-broadcasts its `mesh id` id into
+/// How often an advertising `create` re-broadcasts its mesh id into
 /// the directory. Short enough that a fresh discoverer sees every live
 /// mesh within one cycle (the join-horizon only surfaces ads stamped
 /// after the discoverer joined), long enough that the directory stays
@@ -490,3 +499,21 @@ pub const RELAY_REPROBE_BACKOFF_MAX_SECS: u64 = 300;
 /// is only a guard against a pathological non-responding socket, kept
 /// tight so a contended-rung walk can't stall the event loop.
 pub const RENDEZVOUS_PROBE_SECS: u64 = 1;
+
+/// How long a departing member waits for its co-hosted rendezvous endpoint
+/// to close (`beacon::Rendezvous::shed_and_wait`).
+///
+/// Bounded because shutdown must not hang on a relay that stopped answering:
+/// `Node::leave` allows the whole wind-down 3s and the `Left` propagation
+/// sleep already spends 500ms of it, so this has to fit in what is left with
+/// room to spare. Exceeding the bound abandons the endpoint exactly as it was
+/// abandoned before this wait existed — a fallback to the old behaviour, never
+/// worse than it.
+///
+/// **Not a round number picked for looks.** At 1s it timed out on a live
+/// three-peer share: an endpoint homed on two relay rungs spends most of a
+/// second shutting its relay actors down (measured ~770ms under
+/// `iroh=debug`), so a one-second budget sits on the edge and the ungraceful
+/// drop this exists to prevent came straight back. 2s clears the measured cost
+/// with headroom and still leaves ~500ms of `Node::leave`'s budget unspent.
+pub const RENDEZVOUS_CLOSE_SECS: u64 = 2;

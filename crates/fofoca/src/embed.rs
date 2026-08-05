@@ -5,7 +5,12 @@
 //! engine's surfacings. Everything else here is a value the engine passes *into*
 //! those hooks.
 
-pub use crate::daemon::app::{IpcRequest, NodeDriver};
+// `NodeDriver` is portable — a browser implements the same seam. `IpcRequest`
+// is not: it is the control socket's request envelope, and there is no socket
+// off a host.
+#[cfg(feature = "host")]
+pub use crate::daemon::app::IpcRequest;
+pub use crate::daemon::app::NodeDriver;
 pub use crate::daemon::ctx::HandlerCtx;
 pub use crate::daemon::state::{EventLoopState, PingRound, Reach, RosterEntry, RosterSnapshot};
 pub use crate::doc::SelfWriteGate;

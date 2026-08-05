@@ -32,7 +32,8 @@ pub enum JoinTarget {
 pub enum JoinTargetError {
     /// Looked like a mesh id (base58) but failed checksum/payload validation.
     MalformedMeshId(MeshIdError),
-    /// Matched neither brand. Carries the trimmed input to echo back.
+    /// Not a token at all — wrong length or outside the Base58 charset.
+    /// Carries the trimmed input to echo back.
     Unrecognized(String),
 }
 
@@ -55,20 +56,22 @@ impl FromStr for JoinTarget {
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
         let trimmed = input.trim();
-        // Invites and mesh ids share the bare-base58 shape; try invite decode
-        // first so a valid invite never falls through into mesh-id validation.
+        // Neither token is branded, so classification is try-decode. The
+        // invite goes first because it is the more specific parse: its payload
+        // carries a kind byte, and its checksum makes a false positive on a
+        // mesh id a ~2^-32 event. Only then does the id decoder see the input.
         if let Ok(invite) = InviteTicket::decode(trimmed) {
             return Ok(JoinTarget::Invite(invite));
         }
         match trimmed.parse::<MeshId>() {
             Ok(id) => Ok(JoinTarget::Mesh(id)),
-            // Charset/length failures mean "not a mesh id at all" — surface as
-            // unrecognized so callers can hint at topic/other paths. Checksum
-            // failures are a mistyped id and keep the specific error.
-            Err(MeshIdError::InvalidHash) => {
-                Err(JoinTargetError::MalformedMeshId(MeshIdError::InvalidHash))
+            // Wrong length or wrong charset means it was never a token; a
+            // payload that decodes far enough to fail on its *contents* is a
+            // real id the user mistyped, and keeps its specific reason.
+            Err(MeshIdError::Length(_) | MeshIdError::Charset(_)) => {
+                Err(JoinTargetError::Unrecognized(trimmed.to_owned()))
             }
-            Err(_) => Err(JoinTargetError::Unrecognized(trimmed.to_owned())),
+            Err(other) => Err(JoinTargetError::MalformedMeshId(other)),
         }
     }
 }

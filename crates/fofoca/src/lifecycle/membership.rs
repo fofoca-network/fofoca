@@ -88,7 +88,7 @@ pub(crate) fn apply(update: &MembershipUpdate, author: &Nickname, state: &mut Ev
 
 #[cfg(test)]
 mod tests {
-    use std::time::Instant;
+    use crate::util::clock::Instant;
 
     use super::{
         EventLoopState, MembershipUpdate, MessageKind, Nickname, PresenceSubtype, apply, compute,

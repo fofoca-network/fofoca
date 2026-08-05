@@ -2,7 +2,7 @@
 //! that evicts peers we've stopped hearing from. Part of the
 //! lifecycle subsystem (it drives `peer_timeout` / the roster).
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::transport::MeshSender;
 use bytes::Bytes;
@@ -10,6 +10,7 @@ use bytes::Bytes;
 use crate::daemon::state::EventLoopState;
 use crate::gossip::event::{NodeEvent, NodeSink};
 use crate::protocol::{MeshId, Message, Nickname};
+use crate::util::clock::Instant;
 use crate::util::tuning::{ALIVE_INTERVAL_SECS, alive_timeout_secs};
 
 /// Emit an `Alive` keepalive if we haven't broadcast anything

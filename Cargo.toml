@@ -43,7 +43,11 @@ version = "0.5.0"
 # every change. The `[patch.crates-io]` block at the bottom of this file governs
 # the whole graph, so it builds against the forked iroh here either way.
 iroh-multihop-transport = { path = "crates/iroh-multihop-transport" }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "fs", "signal", "net", "process"] }
+# The *floor*, not the union: `rt-multi-thread`, `fs`, `signal`, `net` and
+# `process` have no wasm32 equivalent, and `net` drags in `mio`, which refuses
+# to build there at all. The engine adds them back under its `host` feature;
+# anything that wants them unconditionally names them itself.
+tokio = { version = "1", default-features = false, features = ["sync", "macros", "time", "rt"] }
 serde = { version = "1", features = ["derive"] }
 # `raw_value` lets the MCP `fetch_messages` result embed each event's
 # already-rendered, field-order-pinned JSON verbatim (a `RawValue`) instead of
@@ -91,11 +95,24 @@ iroh = { version = "1.0.1", default-features = false, features = ["tls-ring", "u
 # both halves stay one version. `relay` is a default that `fofoca-protocol`
 # adds back; the transports do not need it.
 iroh-base = { version = "1.0.1", default-features = false, features = ["key"] }
-iroh-gossip = { version = "0.101", features = ["net"] }
+# `default-features = false` for the same reason as `iroh`: the browser leg
+# cannot carry the host-only defaults.
+iroh-gossip = { version = "0.101", default-features = false, features = ["net"] }
 # Named directly by both custom transports: `RecvMeta` appears in the
 # `CustomEndpoint::poll_recv` signature. This is the quinn fork iroh runs on,
 # and it resolves to the same crates.io release iroh itself depends on.
 noq-udp = "1.0.1"
+# The portable clock. Off wasm32 this is `pub use std::time::*` and pulls in
+# nothing, so on a host these *are* the std types; only a browser gets the
+# `Performance.now()` / `Date.now()` implementation. Without it every
+# `Instant::now()` / `SystemTime::now()` in the portable core panics on
+# wasm32 — a runtime failure `cargo check` cannot see.
+web-time = "1.1"
+# Timers and task spawning, the other half of the portability story: `web-time`
+# fixes `Instant`, but `tokio::time` still panics on wasm32 (no timer driver)
+# and `tokio::spawn` needs a runtime nothing can `block_on` on a browser main
+# thread. Off wasm32 it is a verbatim re-export of `tokio::{time, spawn}`.
+n0-future = "0.3"
 n0-watcher = "1.0"
 # Shared by `fofoca-blobs` and the WebRTC transport's browser backend. Pinned
 # here so the two cannot drift: `wasm-bindgen` and its generated glue must be

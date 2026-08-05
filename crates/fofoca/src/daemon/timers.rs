@@ -3,13 +3,15 @@
 //! heartbeat. The `Alive`/sweep heartbeat ticks live in
 //! `lifecycle::heartbeat`; the gossip healer in `gossip::heal`.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use iroh::Endpoint;
 
 use super::state::EventLoopState;
 use crate::gossip::event::{NodeEvent, NodeSink};
-use crate::util::{resident_memory, tuning};
+use crate::util::clock::Instant;
+use crate::util::resident_memory;
+use crate::util::tuning;
 
 /// The warn-only resident-memory leak check, run on the slow (1-minute)
 /// housekeeping tick (see `run`'s `intervals.prune`). Kept on this tick now
@@ -196,8 +198,8 @@ pub(crate) fn note_tick_gap(
 
 #[cfg(test)]
 mod tests {
+    use crate::util::clock::Instant;
     use std::sync::Arc;
-    use std::time::Instant;
 
     use super::{EventLoopState, warn_on_high_resident_memory};
     use crate::daemon::state::MeshSecrets;

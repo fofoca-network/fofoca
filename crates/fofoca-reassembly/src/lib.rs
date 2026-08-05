@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::time::Instant;
 
 use fofoca_protocol::{Message, MessageBody, MessageId, MessageKind, Nickname, ShardGroup};
+use fofoca_util::clock::Instant;
 use fofoca_util::consts::{
     LOGGED_SHARD_GROUP_MAX_TOTAL, REASSEMBLY_AUTHOR_BUDGET_BYTES, REASSEMBLY_GROUP_MAX_BYTES,
     REASSEMBLY_MAX_GROUP_LIFETIME_SECS, REASSEMBLY_REPAIR_IDLE_SECS, REASSEMBLY_REPAIR_MAX_IDXS,
@@ -380,7 +380,8 @@ pub fn synthesize_from(mut envelope: Message, body: MessageBody, group_id: &Shar
 
 #[cfg(test)]
 mod tests {
-    use std::time::{Duration, Instant};
+    use fofoca_util::clock::Instant;
+    use std::time::Duration;
 
     use super::{ReassemblyStore, ShardIngest};
     use fofoca_protocol::{

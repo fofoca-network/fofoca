@@ -10,8 +10,6 @@
 pub(crate) mod heartbeat;
 pub(crate) mod membership;
 
-use std::time::Instant;
-
 use crate::daemon::ctx::HandlerCtx;
 use crate::daemon::state::EventLoopState;
 use crate::gossip::app::NodeApp;
@@ -19,13 +17,14 @@ use crate::gossip::event::NodeEvent;
 use crate::protocol::{Message, MessageKind, PresenceSubtype};
 
 use crate::gossip;
+use crate::util::clock::Instant;
 
 /// Developer log for the mesh-ready milestone. Mirrors the operator
 /// `ready` event but on the lifecycle log target (stderr, opt-in via
 /// `RUST_LOG`); the operator JSON/human event is unchanged.
 ///
 /// Logs the derived **`TopicId`** (a one-way hash of the seed), never the full
-/// `mesh id` id. The id carries the seed and *is* the bearer credential, and this
+/// mesh id. The id carries the seed and *is* the bearer credential, and this
 /// log file is written under a shared path — logging the id would leak full
 /// mesh membership to anyone who can read the file. The topic hash is enough
 /// to correlate a run without exposing the secret.
@@ -176,12 +175,13 @@ pub(crate) async fn handle_presence(
             app.on_peer_left(&message.author, state, ctx).await;
         }
     } else if subtype == PresenceSubtype::Joined && update.joined_new {
-        // Re-announce so late joiners seed their roster.
-        gossip::broadcast_msg(
-            ctx.sender,
-            &Message::new_joined(ctx.mesh, ctx.author).signed(ctx.identity),
-        )
-        .await;
+        // Re-announce so late joiners seed their roster. Retained locally: a
+        // re-announce mints a fresh id, so without this each one becomes
+        // another message we can never acknowledge and every peer re-sends to
+        // us forever (see `gossip::recv::retain_own_broadcast`).
+        let joined = Message::new_joined(ctx.mesh, ctx.author).signed(ctx.identity);
+        gossip::broadcast_msg(ctx.sender, &joined).await;
+        gossip::retain_own_broadcast(state, &joined);
         state.last_sent_at = Instant::now();
         // Suppress "has joined" when we already printed "came back"
         // from the quiet check, or when this `joined` predates

@@ -81,7 +81,7 @@ separate cadences.
 
 ```bash
 cargo check --workspace
-cargo test  --workspace          # 27 suites, 477 tests
+cargo test  --workspace          # 29 suites, 518 tests
 ```
 
 The `mdns` and `dht` features (default on) gate iroh's discovery closure, and
@@ -93,17 +93,37 @@ cargo check --workspace --no-default-features
 cargo check --workspace --all-features
 ```
 
-`fofoca-blobs` is the one crate that also builds for the browser, and its OPFS
-and `IndexedDB` backends exist on no other target, so CI checks that leg
-separately:
+## The browser
+
+The engine runs in a tab. `--no-default-features` drops `host` and leaves the
+portable half — gossip, the CRDT documents, the protocol and identity types,
+address lookup, and the whole node runtime — so a browser peer is the same peer
+a CLI runs, not a reduced stand-in. What it loses is the control socket, the
+session state file, the process helpers and the log sink, none of which have a
+wasm32 equivalent.
+
+Three crates reach that target and CI checks each:
 
 ```bash
 rustup target add wasm32-unknown-unknown
-cargo check  --target wasm32-unknown-unknown -p fofoca-blobs --all-targets
-cargo clippy --target wasm32-unknown-unknown -p fofoca-blobs --all-targets -- -D warnings
+cargo check --target wasm32-unknown-unknown -p fofoca --no-default-features
+cargo check --target wasm32-unknown-unknown -p fofoca-blobs --all-targets
+cargo check --target wasm32-unknown-unknown -p fofoca-iroh-webrtc-transport --features web
 ```
 
-Its eight OPFS tests need a real browser and are not in CI:
+`cargo check` is not enough on its own, which is why
+[`crates/fofoca/tests/wasm_runtime.rs`](crates/fofoca/tests/wasm_runtime.rs)
+exists: `std::time::Instant::now()`, `tokio::time` and `tokio::spawn` all
+compile for wasm32 and then panic at runtime. Running it needs a wasm-capable
+clang for `ring`'s C core, so it is a compile check in CI and a real run
+locally:
+
+```bash
+CC=$(brew --prefix llvm)/bin/clang CC_wasm32_unknown_unknown=$(brew --prefix llvm)/bin/clang \
+  cargo test -p fofoca --no-default-features --target wasm32-unknown-unknown
+```
+
+`fofoca-blobs`'s eight OPFS tests need a real browser and are not in CI:
 `wasm-pack test --headless --chrome crates/fofoca-blobs`.
 
 To build the C ABI as a static library:

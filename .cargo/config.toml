@@ -1,0 +1,10 @@
+# `getrandom` 0.3+ will not pick a wasm backend from a cargo feature alone — it
+# also requires this cfg, and says so in a compile_error. Without it every
+# wasm32 build of anything downstream of `rand`/`uuid`/`iroh-base` fails before
+# it reaches our code.
+#
+# A consumer building fofoca for wasm32 from its own workspace needs the same
+# line in its own `.cargo/config.toml`: this file governs cargo invocations run
+# from inside this directory, not the crates themselves.
+[target.wasm32-unknown-unknown]
+rustflags = ["--cfg", 'getrandom_backend="wasm_js"']

@@ -1,9 +1,9 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use tokio::time::Instant as TokioInstant;
+use n0_future::time::Instant as TokioInstant;
 
 use bytes::Bytes;
 use iroh::EndpointId;
@@ -11,12 +11,14 @@ use serde::Serialize;
 
 use super::bounded_id_set::BoundedIdSet;
 use super::message_log::MessageLog;
+#[cfg(feature = "host")]
 use crate::daemon::state_file::StateFile;
 use crate::protocol::identity::Identity;
 use crate::protocol::mesh::Mesh;
 use crate::protocol::{Message, Nickname, ShardGroup};
 use crate::util::bounded_fifo_set::BoundedFifoSet;
 use crate::util::bounded_queue::BoundedQueue;
+use crate::util::clock::Instant;
 use crate::util::cooldown::Cooldown;
 
 use crate::util::tuning::{
@@ -211,9 +213,33 @@ pub struct EventLoopState {
     /// `LinkState` frames) and the underlay endpoint. `None` when multihop is off
     /// or on a non-peer (beacon/rendezvous) endpoint. See
     /// [`iroh_multihop_transport`].
+    #[cfg(feature = "host")]
     pub(crate) multihop: Option<iroh_multihop_transport::MultihopHandle>,
+    /// The `WebRTC` transport handle, when one is registered on this peer's
+    /// endpoint. Portable — it is the browser's only direct path, and an
+    /// opportunistic extra one for a native peer. `None` on the beacon.
+    pub(crate) webrtc: Option<fofoca_iroh_webrtc_transport::WebRtcHandle>,
+    /// Who may start a JSEP round, and how many may run at once.
+    ///
+    /// `has_session` only flips at *attach*, so without an in-flight record a
+    /// membership event and a re-flood of the same `PeerInfo` both start a
+    /// negotiation with the same peer, and the loser fails on duplicate attach
+    /// after paying a full gathering budget.
+    ///
+    /// Shared with the signal *acceptor* on the Router, not owned by the loop,
+    /// so the direct-peer ceiling is one number for this node rather than one
+    /// per role. See [`crate::transport::SignalAdmission`].
+    pub(crate) webrtc_admission: crate::transport::SignalAdmission,
+    /// How far ICE may reach when this peer gathers candidates. Host-only on a
+    /// loopback mesh, which promises to make no external network call —
+    /// `IceConfig::default()` would query two public STUN servers.
+    pub(crate) webrtc_ice: crate::transport::IceProfile,
     /// Monotonic sequence for *our own* emitted link-state vectors, so peers keep
     /// the freshest and drop reorders.
+    ///
+    /// `host`-only with the multihop transport that consumes the vectors: a
+    /// browser peer emits none, so it has no sequence to keep.
+    #[cfg(feature = "host")]
     pub(crate) link_state_seq: u64,
     /// When `Some(deadline)` and not yet elapsed, the event loop runs
     /// a fast `beacon::ensure` burst (event-driven failover). Armed
@@ -248,6 +274,7 @@ pub struct EventLoopState {
     /// re-parses what this node just serialized. A bounded FIFO queue (cap
     /// `PENDING_OUTBOUND_CAP`) so the backlog can't grow without limit.
     pub(crate) pending_outbound: BoundedQueue<(Message, Bytes)>,
+    #[cfg(feature = "host")]
     pub(crate) state_file: Option<StateFile>,
     /// Whether the event loop is serving IPC yet. Starts `false` (the
     /// pre-loop state-file write reports "identity up, not yet serving");
@@ -389,6 +416,7 @@ pub(crate) struct MeshSecrets {
 /// same reason [`MeshSecrets`] is: the argument budget. `now` stays separate
 /// because tests pin it to a deterministic instant.
 pub(crate) struct StateInit {
+    #[cfg(feature = "host")]
     pub(crate) state_file: Option<StateFile>,
     pub(crate) identity: Arc<Identity>,
     pub secrets: MeshSecrets,
@@ -403,6 +431,7 @@ impl EventLoopState {
     /// per-channel keys are derived, rather than lingering in the caller.
     pub(crate) fn new(init: StateInit, now: Instant) -> Self {
         let StateInit {
+            #[cfg(feature = "host")]
             state_file,
             identity,
             secrets,
@@ -443,13 +472,23 @@ impl EventLoopState {
             announced: false,
             meshed: false,
             unicast_pool: crate::transport::UnicastPool::disconnected(),
+            #[cfg(feature = "host")]
             multihop: None,
+            webrtc: None,
+            // Replaced by the one the Router's acceptor shares, in `run`.
+            // Defaulted here so `fresh_state` and friends need no argument.
+            webrtc_admission: crate::transport::SignalAdmission::new(
+                crate::transport::MAX_DIRECT_PEERS,
+            ),
+            webrtc_ice: crate::transport::IceProfile::default(),
+            #[cfg(feature = "host")]
             link_state_seq: 0,
             reclaim_until: None,
             next_rival_recheck: None,
             rival_recheck_rounds: 0,
             seen: BoundedIdSet::new(seen_ids_cap()),
             pending_outbound: BoundedQueue::new(PENDING_OUTBOUND_CAP),
+            #[cfg(feature = "host")]
             state_file,
             ready: false,
             live_count: None,
@@ -489,6 +528,7 @@ impl EventLoopState {
     /// present. No-op for neither.
     pub(crate) fn write_peer_count(&self) {
         let count = self.peers.len() + 1;
+        #[cfg(feature = "host")]
         if let Some(sf) = self.state_file.as_ref() {
             sf.write(count, self.ready);
         }
@@ -501,6 +541,7 @@ impl EventLoopState {
     /// sorted most-recently-seen first. Backs a consumer's roster surfaces, the MCP
     /// `mesh_info` roster, and the task sender's target picker /
     /// nickname validation.
+    #[must_use]
     pub fn roster_snapshot(&self) -> RosterSnapshot {
         let now = Instant::now();
         let secs_since = |seen: &Instant| now.duration_since(*seen).as_secs();
@@ -852,6 +893,7 @@ impl EventLoopState {
     }
 
     /// The multi-hop transport handle, when `--multihop` registered one.
+    #[cfg(feature = "host")]
     #[must_use]
     pub fn multihop(&self) -> Option<&iroh_multihop_transport::MultihopHandle> {
         self.multihop.as_ref()

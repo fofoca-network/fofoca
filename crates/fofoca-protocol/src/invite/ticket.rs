@@ -472,4 +472,15 @@ mod tests {
         token.push(if last == '1' { '2' } else { '1' });
         assert!(InviteTicket::decode(&token).is_err());
     }
+
+    #[test]
+    fn mints_bare_ascii_base58() {
+        // No glyph, no variation selector, no `://`: an invite pastes into a
+        // URL or a shell word untouched.
+        let token = mint(&creator(), Some(3600), None).unwrap();
+        assert!(
+            token.bytes().all(|byte| byte.is_ascii_alphanumeric()),
+            "invite must be ASCII Base58: {token}"
+        );
+    }
 }

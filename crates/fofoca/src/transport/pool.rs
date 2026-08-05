@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{Result, bail};
 use bytes::Bytes;
@@ -15,6 +15,8 @@ use iroh::{Endpoint, EndpointAddr, EndpointId};
 use tokio::sync::Mutex;
 
 use super::{LOG_TARGET, UNICAST_ALPN};
+
+use crate::util::clock::Instant;
 
 /// How long an inline dial keeps trying before giving up. Deliberately short —
 /// far under the application's 90s discovery deadline — because the dial blocks the send,
@@ -97,7 +99,7 @@ impl UnicastPool {
             }
         };
         let pool = self.clone();
-        tokio::spawn(async move {
+        n0_future::task::spawn(async move {
             let Err(error) = send_one(&conn, &bytes).await else {
                 return;
             };
@@ -192,7 +194,7 @@ fn on_cooldown(failures: &mut HashMap<EndpointId, Instant>, eid: EndpointId, now
 /// knows the peer's address (registered via `add_peer_addr`), so a bare-id
 /// `EndpointAddr` resolves through the endpoint's address book + lookups.
 async fn dial(endpoint: &Endpoint, eid: EndpointId) -> Result<Connection> {
-    match tokio::time::timeout(
+    match n0_future::time::timeout(
         DIAL_TIMEOUT,
         endpoint.connect(EndpointAddr::new(eid), UNICAST_ALPN),
     )
@@ -219,8 +221,9 @@ async fn send_one(conn: &Connection, bytes: &[u8]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use crate::util::clock::Instant;
     use std::collections::HashMap;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use iroh::{EndpointId, SecretKey};
 

@@ -8,7 +8,7 @@
 //! the daemon-internal plumbing (`config`/`ctx`/`ipc`/`state`/`timers`/
 //! `setup`) are siblings under `super`.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::Result;
 use futures_util::StreamExt;
@@ -16,17 +16,26 @@ use iroh::{Endpoint, EndpointId, RelayUrl};
 use iroh_gossip::api::{GossipReceiver, GossipSender};
 use tokio::sync::{broadcast, mpsc, watch};
 
+#[cfg(feature = "host")]
 use crate::daemon::state_file::StateFile;
 use crate::gossip::event::{NodeEvent, NodeSink};
 use crate::protocol::mesh::MeshName;
 use crate::protocol::{MeshId, Message, Nickname};
+use crate::transport::IpcMessage;
 use crate::transport::MeshSender;
-use crate::transport::ipc::IpcMessage;
+use crate::util::clock::Instant;
+// The timer-driver clock, distinct from `clock::Instant` off wasm32 (there it is
+// `tokio::time::Instant`). Aliased rather than path-qualified, matching
+// `daemon::state` / `daemon::app`.
 use crate::util::tuning::{
     ALIVE_INTERVAL_SECS, LINKSTATE_INTERVAL_SECS, RECLAIM_INTERVAL_MS, RECLAIM_WINDOW_SECS,
     RESUBSCRIBE_MAX_ATTEMPTS, STATE_REFRESH_SECS, antientropy_interval_secs, heal_interval_secs,
-    heal_stall_threshold_secs, ppid_watch_interval_ms, sweep_interval_secs,
+    heal_stall_threshold_secs, sweep_interval_secs,
 };
+use n0_future::time::Instant as TokioInstant;
+// Gated with `spawn_orphan_watch`, its only caller.
+#[cfg(all(unix, feature = "host"))]
+use crate::util::tuning::ppid_watch_interval_ms;
 use crate::{beacon, gossip, lifecycle, lookup};
 
 use super::app::NodeDriver;
@@ -76,7 +85,11 @@ pub async fn run<A: NodeDriver>(
         cohost,
         runtime_base,
         state_file,
+        #[cfg(feature = "host")]
         multihop,
+        webrtc,
+        webrtc_admission,
+        webrtc_ice,
         unicast_rx,
         live_count,
         driver,
@@ -102,6 +115,10 @@ pub async fn run<A: NodeDriver>(
     // runtime folder (`<prefix>/<nick>.state.json`, beside the socket + log)
     // when no `--state-file` override is given. In-process in-process sessions
     // (`!exit_on_quit`) keep writing nothing.
+    // Host-only: a browser node has no filesystem to write the session file to.
+    // The path is still carried on the config (a `PathBuf` costs nothing off
+    // wasm), it is only the `StateFile` that cannot exist.
+    #[cfg(feature = "host")]
     let state_file = state_file
         .or_else(|| {
             let base = runtime_base.as_deref()?;
@@ -115,6 +132,8 @@ pub async fn run<A: NodeDriver>(
                 .with_base(runtime_base.clone())
                 .with_topic(topic_string.as_deref())
         });
+    #[cfg(not(feature = "host"))]
+    drop(state_file);
     // The departure line's label: a topic gossip shows `topic` plus the raw
     // string it was derived from (the name is lossy, and the wording mirrors
     // the `joined topic …` startup line), every other gossip its `#name`.
@@ -125,9 +144,11 @@ pub async fn run<A: NodeDriver>(
     // Seed the state file with the application's own discovery fields before
     // readiness is advertised — the local client reads them from this mode-600
     // file. What those fields are is the app's business; the engine only writes.
+    #[cfg(feature = "host")]
     app.init_state_file(state_file.as_ref());
     let mut state = EventLoopState::new(
         crate::daemon::state::StateInit {
+            #[cfg(feature = "host")]
             state_file,
             identity,
             secrets: MeshSecrets {
@@ -139,7 +160,15 @@ pub async fn run<A: NodeDriver>(
         started,
     );
     state.mint_mesh = mint_mesh; // creator-only: backs the `invite` command
-    state.multihop = multihop; // `--multihop`: the registered transport's handle
+    #[cfg(feature = "host")]
+    {
+        state.multihop = multihop; // `--multihop`: the registered transport's handle
+    }
+    state.webrtc = Some(webrtc); // the direct-path transport the session manager fills
+    // The *same* table the Router's signal acceptor holds, not a fresh one:
+    // the cap only means anything if both roles count against it together.
+    state.webrtc_admission = webrtc_admission;
+    state.webrtc_ice = webrtc_ice;
     wire_session_state(
         &mut state,
         &endpoint,
@@ -156,12 +185,18 @@ pub async fn run<A: NodeDriver>(
     // advertisers sharing one directory `rendezvous_id` don't bind
     // duplicate copies. Why: `EventLoopConfig::cohost`.
     let mut rendezvous: Option<beacon::Rendezvous> = None;
+    // The outstanding probe-before-claim, if any. Owned here beside the
+    // beacon it decides, because a probe outlives the tick that started it:
+    // its verdict arrives on the loop's own arm, up to `HEAL_PROBE_SECS`
+    // later.
+    let mut rival_probe: Option<beacon::RivalProbe> = None;
     if claims_at_startup(cohost) {
         let claimed = beacon::ensure(
             &rendezvous_params,
             &endpoint,
             &mut rendezvous,
             probes_before_claim(cohost),
+            &mut rival_probe,
         )
         .await;
         if claimed {
@@ -173,6 +208,7 @@ pub async fn run<A: NodeDriver>(
 
     let sender = MeshSender::new(gossip_sender);
 
+    #[cfg(feature = "host")]
     let ipc_rx = spawn_ipc_rx::<A::Ipc>(
         &IpcBinding {
             disabled: ipc_listener_disabled,
@@ -182,23 +218,35 @@ pub async fn run<A: NodeDriver>(
         },
         &sink,
     );
+    // A browser binds no control socket. The loop keeps its IPC `select!` arm —
+    // `IpcMessage` is portable — and the arm simply never fires.
+    #[cfg(not(feature = "host"))]
+    let ipc_rx: Option<mpsc::Receiver<IpcMessage<A::Ipc>>> = {
+        drop(runtime_base);
+        None
+    };
 
     // Arrival announce is deferred to the first `NeighborUp` — see
     // `gossip::handle_gossip_event`.
 
     let intervals = build_maintenance_intervals().await;
+    // A session inside a foreground command that owns its own lifetime
+    // (a `--advertise` transfer, a directory browse) must not register
+    // process-wide signal handlers — doing so suppresses the OS
+    // default-terminate forever and the host command stops dying on
+    // ctrl-c. Give the loop a quit channel that never fires instead;
+    // shutdown comes from `external_quit_rx` / drop. A browser is always this
+    // case: there are no process signals to listen for.
+    #[cfg(feature = "host")]
     let quit_rx = if handle_signals {
         spawn_quit_signal_tasks(exit_on_quit)
     } else {
-        // A session inside a foreground command that owns its own lifetime
-        // (a `--advertise` transfer, a directory browse) must not register
-        // process-wide signal handlers — doing so suppresses the OS
-        // default-terminate forever and the host command stops dying on
-        // ctrl-c. Give the loop a quit channel that never fires instead;
-        // shutdown comes from `external_quit_rx` / drop.
-        let (quit_tx, quit_rx) = mpsc::channel::<()>(1);
-        std::mem::forget(quit_tx);
-        quit_rx
+        never_quit()
+    };
+    #[cfg(not(feature = "host"))]
+    let quit_rx = {
+        let _ = handle_signals;
+        never_quit()
     };
 
     // Flip `ready` to `true` only once the daemon can actually serve, then
@@ -254,6 +302,7 @@ pub async fn run<A: NodeDriver>(
         ipc_rx,
         intervals,
         rendezvous,
+        rival_probe,
         rendezvous_params,
         rung_rx,
         cohost,
@@ -320,12 +369,26 @@ async fn antientropy_arm(
 
 /// Default per-link routing cost we advertise for our own neighbours until live
 /// telemetry (RTT / delivery) is wired into the multihop metric.
+#[cfg(feature = "host")]
 const MULTIHOP_LINK_COST: u32 = 10;
 
 /// The multihop link-state tick: re-broadcast our own links (one per direct
 /// neighbour, carrying our underlay dial address) so every peer keeps a fresh
 /// routing graph for the multihop transport. No-op until meshed, or when the
 /// multihop transport is off — a vector with no consumer helps no one.
+/// Off a host the multihop transport does not exist, so the tick has nothing to
+/// broadcast. A no-op stub rather than a `cfg` at the `select!` arm, so the loop
+/// body reads the same on both targets.
+#[cfg(not(feature = "host"))]
+#[expect(
+    clippy::unused_async,
+    reason = "the `host` body awaits; the signatures must match so the select! arm reads the same on both targets"
+)]
+async fn linkstate_arm(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
+    let _ = (state, ctx);
+}
+
+#[cfg(feature = "host")]
 async fn linkstate_arm(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
     if !state.meshed || state.multihop.is_none() {
         return;
@@ -349,11 +412,14 @@ async fn linkstate_arm(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
     let Ok(body) = crate::protocol::MessageBody::new(json) else {
         return;
     };
-    gossip::broadcast_msg(
-        ctx.sender,
-        &Message::new_link_state(ctx.mesh, ctx.author, body).signed(&state.identity),
-    )
-    .await;
+    // Retained locally for the same reason the vector is fed into our own
+    // routing table above: gossip never loops a broadcast back. Every tick
+    // mints a fresh `seq`, so an unretained vector is one more message our
+    // peers re-send to us on every anti-entropy round for as long as the log
+    // holds it (see `gossip::recv::retain_own_broadcast`).
+    let vector_msg = Message::new_link_state(ctx.mesh, ctx.author, body).signed(&state.identity);
+    gossip::broadcast_msg(ctx.sender, &vector_msg).await;
+    gossip::retain_own_broadcast(state, &vector_msg);
 }
 
 /// The sweep-tick arm: note the gap, then evict silent peers. The app's own
@@ -397,6 +463,11 @@ struct EventLoop<A: NodeDriver> {
     ipc_rx: Option<mpsc::Receiver<IpcMessage<A::Ipc>>>,
     intervals: MaintenanceIntervals,
     rendezvous: Option<beacon::Rendezvous>,
+    /// The outstanding probe-before-claim, whose verdict the loop applies on
+    /// its own arm (`beacon::probe_verdict`). Off-loop by construction: a
+    /// free rendezvous is only provably free once the dial exhausts its
+    /// budget, and paying that inline froze the whole loop for ~5s a tick.
+    rival_probe: Option<beacon::RivalProbe>,
     rendezvous_params: beacon::RendezvousParams,
     /// Bootstrap rung chosen off-loop (startup probe + beacon
     /// self-monitor); the loop applies changes via the rung-update arm.
@@ -456,6 +527,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
         mut ipc_rx,
         mut intervals,
         mut rendezvous,
+        mut rival_probe,
         mut rendezvous_params,
         mut rung_rx,
         cohost,
@@ -517,7 +589,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
                 finalize_ping_round(&mut state, sink.as_ref()),
             () = sleep_until_opt(app.earliest_poll_deadline()) => app.poll_deadline_elapsed(),
             () = sleep_until_opt(app.earliest_deadline()) =>
-                app.expire_deadlines(tokio::time::Instant::now()),
+                app.expire_deadlines(TokioInstant::now()),
             ipc_msg = recv_opt(&mut ipc_rx) => match ipc_msg {
                 None => ipc_rx = None,
                 Some((cmd, resp_tx)) => {
@@ -552,6 +624,14 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
             _ = intervals.alive.tick() => {
                 let ctx = parts.ctx(&sender);
                 alive_arm(&mut anchors, &mut state, &ctx).await;
+                // Retry WebRTC negotiation for any peer we still have no
+                // session with. Without this a pair gets exactly one attempt
+                // ever: negotiation fires on `PeerInfo`, and once the pair is
+                // linked, `PeerInfo` stops re-flooding — so a first attempt
+                // lost to a transient (the peer not yet reachable, an ICE
+                // hiccup) is never retried, and the pair stays relay-only for
+                // the life of the link. Observed exactly that, CLI↔browser.
+                crate::transport::webrtc::retry_sessions(&mut state, &ctx);
             }
             _ = intervals.sweep.tick() => {
                 sweep_arm(&mut anchors, &mut state, sink.as_ref());
@@ -567,23 +647,40 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
                         params: &rendezvous_params,
                         cohost,
                         started,
-                    }, &mut rendezvous).await;
+                    }, &mut rendezvous, &mut rival_probe).await;
                 } else {
                     // Stream ended: resubscribe instead of healing a dead topic
                     // (see `resubscribe_tick`); the beacon keeps the mesh joinable.
-                    resubscribe_tick(
+                    // The loop's one error exit, and it must release the
+                    // beacon on the way out for the same reason the normal
+                    // one does — see `release_rendezvous`.
+                    if let Err(error) = resubscribe_tick(
                         &ResubscribeEnv { gossip: &gossip, params: &rendezvous_params, parts: &parts, exit_on_quit },
                         &mut state,
                         &mut app,
                         GossipLink { sender: &mut sender, receiver: &mut receiver, attempts: &mut resubscribe_attempts },
-                    ).await?;
+                    ).await {
+                        release_rendezvous(&mut rendezvous, &mut rival_probe).await;
+                        return Err(error);
+                    }
                     let ctx = parts.ctx(&sender);
-                    maybe_cohost(&mut state, &ctx, &CohostArm { policy: cohost, params: &rendezvous_params, started }, &mut rendezvous).await;
+                    maybe_cohost(&mut state, &ctx, &CohostArm { policy: cohost, params: &rendezvous_params, started }, &mut rendezvous, &mut rival_probe).await;
                 }
             }
             // A bootstrap rung chosen off-loop (startup probe / beacon self-monitor); apply it cheaply.
             // `Ok(())` only: a closed channel (impossible while the beacon params live) disables the arm.
             Ok(()) = rung_rx.changed() => apply_rung_change(&mut rendezvous_params, &endpoint, &mut rendezvous, &rung_rx),
+            // The off-loop probe-before-claim answered. Its own arm rather
+            // than a poll at the next heal tick: the probe already cost up to
+            // `HEAL_PROBE_SECS`, and making a free rendezvous wait out another
+            // 15s interval before anyone binds it would hand back the claim
+            // latency this change was meant to leave untouched.
+            found_rival = beacon::probe_verdict(&mut rival_probe) => {
+                let claimed = beacon::claim_after_probe(&rendezvous_params, &endpoint, &mut rendezvous, found_rival).await;
+                if claimed {
+                    schedule_rival_recheck(&mut state, cohost, &rendezvous_params, &endpoint);
+                }
+            }
             _ = intervals.reclaim.tick() => {
                 let ctx = parts.ctx(&sender);
                 let arm = CohostArm { policy: cohost, params: &rendezvous_params, started };
@@ -597,7 +694,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
                 // (~RECLAIM_INTERVAL_MS later, after the dropped endpoint has
                 // unmapped) runs the re-probe via `maybe_reclaim`.
                 if !shed_rival_beacon_if_due(&mut state, &arm, &mut rendezvous) {
-                    maybe_reclaim(&mut state, &ctx, &arm, &mut rendezvous).await;
+                    maybe_reclaim(&mut state, &ctx, &arm, &mut rendezvous, &mut rival_probe).await;
                 }
             }
             _ = intervals.antientropy.tick() => {
@@ -633,7 +730,40 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
         app.drain_surfaced();
     }
 
+    release_rendezvous(&mut rendezvous, &mut rival_probe).await;
     Ok(())
+}
+
+/// Close the co-hosted rendezvous endpoint before this loop's stack unwinds.
+///
+/// The `Rendezvous` is a loop local, and letting it merely *drop* aborts its
+/// tasks while leaving the endpoint open — iroh then logs `Endpoint dropped
+/// without calling Endpoint::close. Aborting ungracefully.` and tears the
+/// socket down without the QUIC close. Every co-hosting member hits this on
+/// every departure, which in a public mesh is every member.
+///
+/// A graceful close is not just quieter: it is the same courtesy
+/// [`beacon::Rendezvous::shed`] pays mid-run, so peers holding a link to our
+/// beacon see an immediate `NeighborDown` rather than waiting out the QUIC
+/// idle timeout on a corpse.
+///
+/// Not in `shutdown()` — the loop owns the `Rendezvous`, and the CLI's
+/// `exit_on_quit` path `process::exit`s from inside `shutdown` before any of
+/// this could run (that path skips every destructor by design, so there is no
+/// warning to silence there either).
+///
+/// An outstanding probe-before-claim goes the same way, and for the same
+/// reason: its throwaway endpoint is just as capable of reaching `Drop` open.
+async fn release_rendezvous(
+    rendezvous: &mut Option<beacon::Rendezvous>,
+    probe: &mut Option<beacon::RivalProbe>,
+) {
+    if let Some(rendezvous) = rendezvous.take() {
+        rendezvous.shed_and_wait().await;
+    }
+    if let Some(probe) = probe.take() {
+        probe.abort_and_close().await;
+    }
 }
 
 /// Graceful shutdown: remove the statusline state file first, then
@@ -656,6 +786,7 @@ async fn shutdown<A: NodeDriver>(
     // Release app-owned resources (fail parked app waiters, close the
     // blob-serving endpoint whose store spool is dropped with it).
     app.on_shutdown(state, ctx).await;
+    #[cfg(feature = "host")]
     if let Some(sf) = state.state_file.as_ref() {
         sf.remove();
     }
@@ -673,7 +804,7 @@ async fn shutdown<A: NodeDriver>(
         &Message::new_left(ctx.mesh, ctx.author).signed(&state.identity),
     )
     .await;
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    n0_future::time::sleep(Duration::from_millis(500)).await;
 }
 
 /// The mesh name (for the departure log line), the user-facing departure
@@ -728,6 +859,7 @@ async fn announce_and_maybe_exit<A: NodeDriver>(
 /// daemon for a `/gossip-*` session) tends to send; without catching it
 /// the default action terminated the daemon without cleanup, stranding a
 /// ghost pill on the statusline. Only SIGKILL stays uncatchable.
+#[cfg(feature = "host")]
 fn spawn_quit_signal_tasks(exit_on_quit: bool) -> mpsc::Receiver<()> {
     let (quit_tx, quit_rx) = mpsc::channel::<()>(1);
     let ctrl_c_tx = quit_tx.clone();
@@ -767,7 +899,8 @@ fn spawn_quit_signal_tasks(exit_on_quit: bool) -> mpsc::Receiver<()> {
 /// identical on macOS and Linux (`PR_SET_PDEATHSIG` and kqueue `NOTE_EXIT` are
 /// each platform-specific). When the parent vanishes we feed `quit_tx`, reusing
 /// the SIGTERM path that broadcasts `left` and exits cleanly.
-#[cfg(unix)]
+// `unix` alone is not enough: `libc` arrives with the `host` feature.
+#[cfg(all(unix, feature = "host"))]
 #[expect(
     unsafe_code,
     reason = "libc::getppid FFI; no safe wrapper, always succeeds"
@@ -780,7 +913,7 @@ fn spawn_orphan_watch(quit_tx: mpsc::Sender<()>) {
     let interval = Duration::from_millis(ppid_watch_interval_ms());
     tokio::spawn(async move {
         loop {
-            tokio::time::sleep(interval).await;
+            n0_future::time::sleep(interval).await;
             let current_ppid = unsafe { libc::getppid() };
             if parent_lost(original_ppid, current_ppid) {
                 let _ = quit_tx.send(()).await;
@@ -808,9 +941,18 @@ fn parent_lost(original_ppid: i32, current_ppid: i32) -> bool {
     original_ppid != current_ppid
 }
 
+/// A quit channel whose sender is deliberately leaked, so the receiver parks
+/// forever. The loop's quit arm then only ever fires from `external_quit_rx`.
+fn never_quit() -> mpsc::Receiver<()> {
+    let (quit_tx, quit_rx) = mpsc::channel::<()>(1);
+    std::mem::forget(quit_tx);
+    quit_rx
+}
+
 /// Where [`spawn_ipc_rx`] would bind the control socket, and whether to at all.
 /// Grouped rather than passed loose: the three are only ever used together, to
 /// build one path.
+#[cfg(feature = "host")]
 #[derive(Clone, Copy)]
 struct IpcBinding<'a> {
     /// In-process drivers (library API / MCP) use the typed `session_rx` and
@@ -824,6 +966,7 @@ struct IpcBinding<'a> {
 /// Resolve the IPC receiver: reuse a pre-wired channel (MCP / library API) or,
 /// for the CLI, spawn the unix-socket listener and own the channel.
 /// Returning `Option` keeps the loop's `select!` arm uniform.
+#[cfg(feature = "host")]
 fn spawn_ipc_rx<C: serde::de::DeserializeOwned + Send + 'static>(
     binding: &IpcBinding<'_>,
     sink: &std::sync::Arc<dyn NodeSink>,
@@ -871,9 +1014,9 @@ fn spawn_ipc_rx<C: serde::de::DeserializeOwned + Send + 'static>(
 /// is active. Lets the event loop's `select!` carry a ping-finalize arm
 /// that only fires while a round is in flight, without borrowing
 /// `state` across the await (the deadline is copied out beforehand).
-async fn sleep_until_opt(deadline: Option<tokio::time::Instant>) {
+async fn sleep_until_opt(deadline: Option<TokioInstant>) {
     match deadline {
-        Some(at) => tokio::time::sleep_until(at).await,
+        Some(at) => n0_future::time::sleep_until(at).await,
         None => std::future::pending::<()>().await,
     }
 }
@@ -1077,6 +1220,7 @@ async fn heal_tick(
     ctx: &HandlerCtx<'_>,
     tick: HealTickParams<'_>,
     rendezvous: &mut Option<beacon::Rendezvous>,
+    probe: &mut Option<beacon::RivalProbe>,
 ) {
     run_heal(tick.gap, state, ctx, tick.params).await;
     let arm = CohostArm {
@@ -1084,7 +1228,7 @@ async fn heal_tick(
         params: tick.params,
         started: tick.started,
     };
-    maybe_cohost(state, ctx, &arm, rendezvous).await;
+    maybe_cohost(state, ctx, &arm, rendezvous, probe).await;
 }
 
 /// Per-timer gap anchors; the heal gap also drives the resume-edge hard
@@ -1216,6 +1360,7 @@ async fn resubscribe_tick(
         }
         Resubscribe::Pending => {}
         Resubscribe::Fatal => {
+            #[cfg(feature = "host")]
             if let Some(state_file) = state.state_file.as_ref() {
                 state_file.remove();
             }
@@ -1304,9 +1449,16 @@ fn apply_rung_change(
         );
         params.bootstrap_relay = new;
         setup::register_rendezvous(endpoint, params);
-        // Drop the beacon: `maybe_cohost` → `beacon::ensure` rebuilds it
-        // homed on the new rung at the next heal/reclaim tick.
-        *rendezvous = None;
+        // Release the beacon so `maybe_cohost` → `beacon::ensure` rebuilds it
+        // homed on the new rung at the next heal/reclaim tick — `shed`, not a
+        // plain drop. The old endpoint is still open and still homed on the
+        // rung we are abandoning; dropping it leaves iroh to tear the socket
+        // down ungracefully and leaves peers linked to a corpse until the QUIC
+        // idle timeout. This fires exactly when relays are flaky, which is
+        // when a graceful handover matters most.
+        if let Some(old) = rendezvous.take() {
+            old.shed();
+        }
     }
 }
 
@@ -1329,6 +1481,7 @@ async fn maybe_cohost(
     ctx: &HandlerCtx<'_>,
     arm: &CohostArm<'_>,
     current: &mut Option<beacon::Rendezvous>,
+    probe: &mut Option<beacon::RivalProbe>,
 ) {
     if may_cohost(arm.policy, state.meshed, arm.started) {
         let claimed = beacon::ensure(
@@ -1336,6 +1489,7 @@ async fn maybe_cohost(
             ctx.endpoint,
             current,
             probes_before_claim(arm.policy),
+            probe,
         )
         .await;
         if claimed {
@@ -1356,6 +1510,7 @@ async fn maybe_reclaim(
     ctx: &HandlerCtx<'_>,
     arm: &CohostArm<'_>,
     current: &mut Option<beacon::Rendezvous>,
+    probe: &mut Option<beacon::RivalProbe>,
 ) {
     if arm.policy != CoHostPolicy::Never
         && state
@@ -1367,6 +1522,7 @@ async fn maybe_reclaim(
             ctx.endpoint,
             current,
             probes_before_claim(arm.policy),
+            probe,
         )
         .await;
         if claimed {
@@ -1489,20 +1645,20 @@ fn shed_rival_beacon_if_due(
 
 /// The time-driven maintenance tickers.
 struct MaintenanceIntervals {
-    prune: tokio::time::Interval,
-    alive: tokio::time::Interval,
-    sweep: tokio::time::Interval,
-    heal: tokio::time::Interval,
+    prune: n0_future::time::Interval,
+    alive: n0_future::time::Interval,
+    sweep: n0_future::time::Interval,
+    heal: n0_future::time::Interval,
     /// Fast event-driven failover burst; only does work while
     /// `state.reclaim_until` is open (armed on `NeighborDown`).
-    reclaim: tokio::time::Interval,
+    reclaim: n0_future::time::Interval,
     /// Periodic anti-entropy digest broadcast (recover messages missed
     /// while partitioned/asleep).
-    antientropy: tokio::time::Interval,
-    state_refresh: tokio::time::Interval,
+    antientropy: n0_future::time::Interval,
+    state_refresh: n0_future::time::Interval,
     /// Periodic relay link-state re-broadcast (our own measured links), so peers
     /// keep a fresh routing graph.
-    linkstate: tokio::time::Interval,
+    linkstate: n0_future::time::Interval,
 }
 
 /// Build the maintenance tickers, eating the first immediate tick on
@@ -1516,29 +1672,30 @@ struct MaintenanceIntervals {
 /// ~0 gap). Each tick here means "do the maintenance now", so a skipped tick is
 /// free; `Skip` collapses the salvo to one tick on the next aligned boundary.
 async fn build_maintenance_intervals() -> MaintenanceIntervals {
-    use tokio::time::MissedTickBehavior::Skip;
+    use n0_future::time::MissedTickBehavior::Skip;
 
-    let mut prune = tokio::time::interval(Duration::from_mins(1));
+    let mut prune = n0_future::time::interval(Duration::from_mins(1));
     prune.set_missed_tick_behavior(Skip);
-    let mut alive = tokio::time::interval(Duration::from_secs(ALIVE_INTERVAL_SECS));
+    let mut alive = n0_future::time::interval(Duration::from_secs(ALIVE_INTERVAL_SECS));
     alive.set_missed_tick_behavior(Skip);
     alive.tick().await;
-    let mut sweep = tokio::time::interval(Duration::from_secs(sweep_interval_secs()));
+    let mut sweep = n0_future::time::interval(Duration::from_secs(sweep_interval_secs()));
     sweep.set_missed_tick_behavior(Skip);
     sweep.tick().await;
-    let mut heal = tokio::time::interval(Duration::from_secs(heal_interval_secs()));
+    let mut heal = n0_future::time::interval(Duration::from_secs(heal_interval_secs()));
     heal.set_missed_tick_behavior(Skip);
     heal.tick().await;
-    let mut reclaim = tokio::time::interval(Duration::from_millis(RECLAIM_INTERVAL_MS));
+    let mut reclaim = n0_future::time::interval(Duration::from_millis(RECLAIM_INTERVAL_MS));
     reclaim.set_missed_tick_behavior(Skip);
     reclaim.tick().await;
-    let mut antientropy = tokio::time::interval(Duration::from_secs(antientropy_interval_secs()));
+    let mut antientropy =
+        n0_future::time::interval(Duration::from_secs(antientropy_interval_secs()));
     antientropy.set_missed_tick_behavior(Skip);
     antientropy.tick().await;
-    let mut state_refresh = tokio::time::interval(Duration::from_secs(STATE_REFRESH_SECS));
+    let mut state_refresh = n0_future::time::interval(Duration::from_secs(STATE_REFRESH_SECS));
     state_refresh.set_missed_tick_behavior(Skip);
     state_refresh.tick().await;
-    let mut linkstate = tokio::time::interval(Duration::from_secs(LINKSTATE_INTERVAL_SECS));
+    let mut linkstate = n0_future::time::interval(Duration::from_secs(LINKSTATE_INTERVAL_SECS));
     linkstate.set_missed_tick_behavior(Skip);
     linkstate.tick().await;
     MaintenanceIntervals {

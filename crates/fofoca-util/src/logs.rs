@@ -5,7 +5,9 @@
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
+#[cfg(feature = "host")]
 use crate::consts::LOG_FILE_MAX_BYTES;
+#[cfg(feature = "host")]
 use crate::mesh_prefix;
 
 /// Log config, installed **once** at startup from the `--log-dir` /
@@ -55,6 +57,10 @@ pub fn log_dir() -> PathBuf {
 /// runs before it opens a file (see
 /// [`ensure_parent_private`](crate::ensure_parent_private)). `None` when
 /// no consumer configured one.
+///
+/// `host`-only, with the rest of the file-sink path: a browser has no log file
+/// to open and so no parent to check.
+#[cfg(feature = "host")]
 #[must_use]
 pub fn configured_base() -> Option<PathBuf> {
     config().base
@@ -70,6 +76,7 @@ fn resolve_log_dir(override_dir: Option<PathBuf>, base: Option<PathBuf>) -> Path
 /// mesh's runtime folder beside its `<nick>.ipc.sock` / `<nick>.state.json`.
 /// The sink's `open()` creates the parent dir, so the nesting needs no
 /// pre-creation here.
+#[cfg(feature = "host")]
 #[must_use]
 pub fn log_file_path(mesh_id: &str, nickname: &str) -> PathBuf {
     log_dir()
@@ -80,6 +87,7 @@ pub fn log_file_path(mesh_id: &str, nickname: &str) -> PathBuf {
 /// Max bytes a log file grows before rotating to `<file>.1`. The
 /// `--log-max-bytes` flag overrides [`LOG_FILE_MAX_BYTES`]; `0` disables
 /// rotation.
+#[cfg(feature = "host")]
 #[must_use]
 pub fn log_max_bytes() -> u64 {
     config().max_bytes.unwrap_or(LOG_FILE_MAX_BYTES)

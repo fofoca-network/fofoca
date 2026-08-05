@@ -18,6 +18,7 @@ use fofoca::embed::HandlerCtx;
 use fofoca::embed::NodeDriver;
 use fofoca::embed::SilentSink;
 use fofoca::embed::{AppClass, InboundApp, NodeApp};
+use fofoca::net::TransportOpts;
 use fofoca::ops::{StateMergeParams, broadcast_state_merge, send_app};
 use fofoca::protocol::JoinTarget;
 use fofoca::protocol::{
@@ -318,6 +319,15 @@ impl Pipe {
                     runtime_base: None,
                     state_file: None,
                     sink: Arc::new(SilentSink),
+                    // The engine binds its own endpoint and serves no extra
+                    // ALPNs here: injecting either is for a consumer that
+                    // already owns an iroh endpoint, which a byte pipe does
+                    // not.
+                    endpoint: None,
+                    protocols: Vec::new(),
+                    // Everything this target has. A native pipe is not a
+                    // browser, so it keeps IP paths alongside the relay.
+                    transports: TransportOpts::default(),
                     multihop: false,
                     // A byte pipe publishes no per-peer identity, so `meta`
                     // stays free-form.

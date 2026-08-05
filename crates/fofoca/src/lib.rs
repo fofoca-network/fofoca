@@ -16,6 +16,12 @@
 pub mod embed;
 pub mod net;
 pub mod ops;
+// Portable. The node runtime — `setup_mesh` → `Node::spawn` → the event loop —
+// is the same on a CLI and in a browser; only the host-shaped *inputs* to it
+// (the control socket, the session state file) are gated, inside the module.
+// Before this, a wasm build of the crate exposed the protocol types and no way
+// whatsoever to run a node, which made the wasm CI leg a compile check of code
+// nobody could call.
 pub mod runtime;
 
 pub(crate) mod beacon;
@@ -60,6 +66,11 @@ pub mod util {
     /// Deferred `tracing` sink and the pinned directive filter.
     pub mod logging {
         pub use crate::logging::messages::log_out;
+        /// The file sink and the filter that feeds it. `host`-only: a browser
+        /// has no log file to defer writes to, and logs to the console
+        /// instead. `log_out` above stays portable — the per-message logger is
+        /// how a peer reports what it sent and received, on either target.
+        #[cfg(feature = "host")]
         pub use crate::logging::{LogSink, attach, flush_pending_to_stderr, install, log_filter};
     }
 }
@@ -67,6 +78,14 @@ pub mod util {
 // Re-exported at the crate root so engine code (and the app's re-export) can
 // reach the build version stamp as `crate::VERSION`.
 pub use util::version::VERSION;
+
+/// The relay ladder, re-exported so consumers resolve `Pinned` to the **same**
+/// rungs this crate's gossip does.
+///
+/// `lookup` is `pub(crate)`, so without this agent-share had to keep its own
+/// copy of the list — two constants that must agree, with nothing to make them.
+/// A share and the mesh derived from it should home on one relay, not two.
+pub use lookup::RENDEZVOUS_RELAY_LADDER;
 
 // The `NodeApp` / `NodeDriver` seams are `#[async_trait]`, so any consumer
 // implementing them needs the same macro. Re-export it so a downstream crate

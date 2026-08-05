@@ -74,11 +74,22 @@ jobs:
         run: |
           cargo check --target wasm32-unknown-unknown -p fofoca-blobs --all-targets
           cargo check --target wasm32-unknown-unknown -p fofoca-iroh-webrtc-transport --features web
+          # The engine itself must reach the browser, not merely be avoidable
+          # from it. `--no-default-features` is the portable half: no `host`,
+          # so no IPC listener, no state file, no process helpers. Without this
+          # gate the wasm target rots on the next edit that reaches for a file
+          # or a socket.
+          #
+          # Not `--all-targets`: the unit tests pull proptest and insta, which
+          # are host-only dev-deps. The one wasm test target is named below.
+          cargo check --target wasm32-unknown-unknown -p fofoca --no-default-features
+          cargo check --target wasm32-unknown-unknown -p fofoca --no-default-features --test wasm_runtime
 
       - name: Clippy (wasm32)
         run: |
           cargo clippy --target wasm32-unknown-unknown -p fofoca-blobs --all-targets -- -D warnings
           cargo clippy --target wasm32-unknown-unknown -p fofoca-iroh-webrtc-transport --features web -- -D warnings
+          cargo clippy --target wasm32-unknown-unknown -p fofoca --no-default-features -- -D warnings
 
       - name: Test
         run: cargo test --workspace

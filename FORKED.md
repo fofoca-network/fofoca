@@ -243,6 +243,58 @@ Divergences from upstream, in the order they were made.
     and `web-sys` moved up at the same time, each having been named by two
     crates.
 
+22. **The engine builds for the browser.** `agent-habilis/agent-share` had been
+    carrying a vendored fork of the engine since it needed a wasm32 peer, and
+    that fork's changes came back here — the last and largest of the moves.
+
+    The two histories were one commit apart: agent-share vendored
+    `agent-gossip@8914557`, this workspace forked at `f81b0529`. So this was a
+    real three-way merge rather than a hand-reconciliation. 54 of 83 files
+    merged clean; the 86 conflicts were almost all the same shape — the split
+    and rename on one side, a `host` gate or a de-glyphed doc line on the
+    other — and resolving them meant taking both.
+
+    What arrived:
+
+    - A **`host` feature**, on by default, in every crate. Off, what is left is
+      the portable engine: gossip, the CRDT documents, the protocol and
+      identity types, address lookup, the whole node runtime. `interprocess`,
+      `libc`, signals, processes and the filesystem have no wasm32 equivalent
+      and are gone with it. It has to exist in six places because the split put
+      the host-only code in six crates, so `fofoca/host` forwards to each leaf.
+    - **A portable clock.** `fofoca-util::clock` is now `web-time`, which off
+      wasm32 *is* `std::time` and pulls in nothing. Without it every
+      `Instant::now()` in the portable core panics in a browser — and
+      `unix_secs` stamps every `Message`, so a browser peer could not author a
+      single frame. The failure is invisible to `cargo check`, which is what
+      `tests/wasm_runtime.rs` exists to catch.
+    - **The WebRTC lane**, `transport/webrtc.rs` and `transport/admission.rs`,
+      wiring the transport crate into the engine. `TransportHandles` and
+      `TransportOpts` in `lookup` replace a growing positional argument list,
+      and `TransportOpts` is deliberately *not* part of the mesh id: a browser
+      only ever has relay and WebRTC, so baking transports into mesh identity
+      would mean a browser could never join a mesh a CLI created.
+    - Fixes that were never wasm-related and are worth having on their own: the
+      beacon sheds on every release path instead of being dropped, its
+      probe-before-claim runs off the event loop, a peer retains its own
+      broadcasts so anti-entropy can converge, and native peers stay off the
+      WebRTC lane.
+
+    Two knock-on manifest changes: `tokio` and `iroh-gossip` in
+    `[workspace.dependencies]` dropped to a portable floor with
+    `default-features = false`, since a member cannot turn off defaults the
+    workspace turns on; and `.cargo/config.toml` now carries the
+    `getrandom_backend` rustflag, which `getrandom` 0.3+ requires and says so
+    in a `compile_error!`.
+
+23. A `clippy.toml`, aligned with agent-share's. Most of this workspace is now
+    code written under that configuration, and without the file the two repos
+    disagree on every configurable lint even though their `[workspace.lints]`
+    match. One deliberate divergence, documented in the file:
+    `warn-on-all-wildcard-imports` cannot hold here, because the `protocol` and
+    `util` facades are `pub use fofoca_protocol::*` — the mechanism by which
+    the split crates keep their old module paths.
+
 ## Patch pins — do not drop
 
 `[patch.crates-io]` in the workspace root pins `iroh`, `iroh-base` and

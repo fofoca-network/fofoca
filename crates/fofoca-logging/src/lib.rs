@@ -5,9 +5,12 @@
 //! anything here.
 
 pub mod messages;
+#[cfg(feature = "host")]
 mod sink;
 
+#[cfg(feature = "host")]
 pub use sink::LogSink;
+#[cfg(feature = "host")]
 pub use sink::{attach, flush_pending_to_stderr, install};
 
 /// Default tracing directives when `RUST_LOG` is unset (`RUST_LOG`
@@ -22,6 +25,7 @@ pub use sink::{attach, flush_pending_to_stderr, install};
 /// same rationale as the `messages=info` pin. tracing writes only to
 /// the file sink; `--output json` (stdout) is a separate path, so this
 /// never affects the event stream.
+#[cfg(feature = "host")]
 #[must_use]
 pub fn log_filter(consumer_pins: &str) -> tracing_subscriber::EnvFilter {
     use tracing_subscriber::EnvFilter;

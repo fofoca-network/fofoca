@@ -37,7 +37,7 @@ const _: () = assert!(
 pub use broadcast::{
     StateMergeParams, broadcast_msg, broadcast_state_merge, send_app, unicast_farewell,
 };
-pub(crate) use recv::{drain_dead_receiver, handle_gossip_event, ingest};
+pub(crate) use recv::{drain_dead_receiver, handle_gossip_event, ingest, retain_own_broadcast};
 
 /// Snapshot the active transport path to `node_id`: a short label
 /// (`direct` / `relay` / `mixed` / `unknown`) plus the relay URL when

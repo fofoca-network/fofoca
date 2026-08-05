@@ -143,8 +143,8 @@ async fn broadcast(sender: &MeshSender, bytes: Bytes) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use crate::util::clock::Instant;
     use std::sync::Arc;
-    use std::time::Instant;
 
     use iroh::{EndpointId, SecretKey};
 

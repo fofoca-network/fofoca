@@ -36,7 +36,7 @@ pub struct CreateParams {
     /// id at setup (the salt is the seed, minted there).
     pub password: Option<Password>,
     /// `--invite-only`: the mesh's issuer keypair + invite root are minted at
-    /// setup and only creator-signed invite tickets can join.
+    /// setup and only creator-signed invites can join.
     pub invite_only: bool,
 }
 
@@ -109,7 +109,7 @@ impl CreateParams {
 }
 
 impl JoinParams {
-    /// Resolve the `mesh id` id target into a [`Mesh`], verify the password
+    /// Resolve the mesh id target into a [`Mesh`], verify the password
     /// against the id's verifier (locally — a wrong password fails here,
     /// before any network), and default the nickname. `join` never
     /// advertises.
@@ -171,15 +171,15 @@ impl JoinParams {
 /// # Errors
 /// The topic string sanitizes to an empty mesh name.
 pub fn derive_topic_mesh(string: &str) -> Result<Mesh> {
-    if string.trim().is_empty() {
-        anyhow::bail!("topic string must not be empty");
-    }
     // `--topic-mdns-only` (test-only): keep the mesh *public-shaped* (an
     // ephemeral, address-lookup-discoverable rendezvous — the beacon-claim
     // race under test lives on that path, not the loopback ladder) while
     // reaching no further than the LAN — CI has no public relay, and the
     // narrowed config bytes also derive a topic id no production peer on
     // the same string can land in. Same rationale as `--directory-private`.
+    //
+    // Deliberately applied here and not in `derive_topic_mesh_with`: a caller
+    // that states its own reach must not have it silently rewritten.
     let lookups = if crate::util::tuning::topic_mdns_only_for_test() {
         LookupOpts {
             mdns: true,
@@ -189,6 +189,35 @@ pub fn derive_topic_mesh(string: &str) -> Result<Mesh> {
     } else {
         LookupOpts::public_preset()
     };
+    derive_topic_mesh_with(string, lookups)
+}
+
+/// The canonical [`Mesh`] a topic string derives **at a stated reach**.
+///
+/// The lookups are part of the mesh id — `MeshConfig` is mixed into the topic
+/// derivation and encoded into the id payload — so they are also part of
+/// what the peers on this mesh agree to. A loopback caller derives a loopback
+/// mesh: a rendezvous on the seed-derived port ladder, and no external network
+/// call.
+///
+/// Use this whenever the caller already knows its reach, and pass the *same*
+/// lookups the endpoint was built with. [`derive_topic_mesh`] hardcoded the
+/// public preset, so a share served with `--swarm <loopback-id>` — bound with
+/// relays disabled and no mDNS or DHT, the documented "zero external network
+/// calls" branch — still stood up a second endpoint doing real multicast, real
+/// DHT, and a publicly published rendezvous. It accomplished nothing either:
+/// the rendezvous went to a relay the loopback endpoint had no transport to
+/// dial, so two loopback peers of one share never found each other.
+///
+/// An injected endpoint makes this a hard requirement rather than a nicety —
+/// see [`crate::runtime::InjectedEndpoint`].
+///
+/// # Errors
+/// The string is empty or whitespace.
+pub fn derive_topic_mesh_with(string: &str, lookups: LookupOpts) -> Result<Mesh> {
+    if string.trim().is_empty() {
+        anyhow::bail!("topic string must not be empty");
+    }
     Ok(Mesh::from_topic(
         string,
         MeshConfig {
@@ -217,5 +246,62 @@ impl TopicParams {
             author: self.nickname.unwrap_or_else(Nickname::random),
             advertise_directory: None,
         })
+    }
+}
+
+#[cfg(test)]
+mod topic_derivation_tests {
+    use super::*;
+
+    /// The no-argument form must stay exactly what it always was, because the
+    /// `--topic` id it derives is public API for every frontend that calls it.
+    #[test]
+    fn the_bare_form_is_the_public_preset_form() {
+        let bare = derive_topic_mesh("standup").expect("derive");
+        let explicit =
+            derive_topic_mesh_with("standup", LookupOpts::public_preset()).expect("derive");
+        assert_eq!(bare.to_string(), explicit.to_string());
+    }
+
+    /// Reach is part of the mesh id, and that is the point: peers on one mesh
+    /// have provably agreed where to rendezvous. It is also the deliberate wire
+    /// change — a share served with narrowed lookups now derives a different
+    /// mesh than it did when the derivation hardcoded the public preset.
+    ///
+    /// The default share is unaffected: `serve` with no flags resolves to
+    /// `public_preset()`, which is byte-identical to the old behaviour.
+    #[test]
+    fn stating_a_narrower_reach_changes_the_id() {
+        let public =
+            derive_topic_mesh_with("standup", LookupOpts::public_preset()).expect("derive");
+        let private = derive_topic_mesh_with("standup", LookupOpts::loopback()).expect("derive");
+        assert_ne!(
+            public.to_string(),
+            private.to_string(),
+            "lookups are mixed into the id, so two reaches cannot collide"
+        );
+    }
+
+    /// The whole point of threading the lookups: a private share gets a mesh
+    /// that stays on the box, rather than one that publishes a rendezvous it
+    /// has no transport to reach.
+    #[test]
+    fn a_loopback_reach_derives_a_loopback_mesh() {
+        let mesh = derive_topic_mesh_with("standup", LookupOpts::loopback()).expect("derive");
+        assert!(mesh.is_loopback());
+        assert!(
+            !derive_topic_mesh_with("standup", LookupOpts::public_preset())
+                .expect("derive")
+                .is_loopback()
+        );
+    }
+
+    /// The empty-string guard is shared, not duplicated: an empty topic would
+    /// otherwise derive one globally-fixed mesh every empty-string caller lands
+    /// in.
+    #[test]
+    fn both_forms_reject_an_empty_string() {
+        assert!(derive_topic_mesh("   ").is_err());
+        assert!(derive_topic_mesh_with("   ", LookupOpts::loopback()).is_err());
     }
 }

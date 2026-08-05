@@ -32,10 +32,7 @@ fn to_name(path: &str) -> Result<Name<'_>> {
     Ok(path.to_fs_name::<GenericFilePath>()?)
 }
 
-/// Type alias for messages flowing from IPC listener to the event loop, generic
-/// over the app's command type `C`. The event loop receives the command and
-/// sends back a raw JSON response string.
-pub(crate) type IpcMessage<C> = (C, tokio::sync::oneshot::Sender<String>);
+pub(crate) use super::IpcMessage;
 
 /// A mesh-addressed IPC command. The engine derives the per-mesh socket path
 /// from the mesh id in [`send`]; `None` means the command is addressed by

@@ -1,6 +1,6 @@
 //! Gossip healer — the sole reconnect primitive for the gossip mesh.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::transport::MeshSender;
 use iroh::{Endpoint, EndpointId};
@@ -8,6 +8,7 @@ use iroh::{Endpoint, EndpointId};
 use crate::daemon::ctx::HandlerCtx;
 use crate::daemon::state::EventLoopState;
 use crate::util::bounded_fifo_set::BoundedFifoSet;
+use crate::util::clock::Instant;
 use crate::util::tuning::HEAL_HARD_PROBE_SECS;
 
 /// Hard-heal body: re-resolve/re-path the seed-derived rendezvous via a
@@ -21,7 +22,7 @@ async fn heal(
     probe_secs: u64,
 ) {
     let endpoint = endpoint.clone();
-    tokio::spawn(async move {
+    n0_future::task::spawn(async move {
         let _ =
             crate::lookup::probe_connect(&endpoint, rendezvous_id, Duration::from_secs(probe_secs))
                 .await;
@@ -135,7 +136,7 @@ pub(crate) async fn recover_from_starvation(state: &mut EventLoopState, ctx: &Ha
     state.relink.clear();
     state.peerinfo.clear();
     rebridge_known(ctx.sender, &state.known_endpoints).await;
-    super::broadcast::announce_arrival(ctx).await;
+    super::broadcast::announce_arrival(state, ctx).await;
     let now = Instant::now();
     state.last_sent_at = now;
     state.note_recovery(now);

@@ -1,9 +1,10 @@
+use n0_future::time::Instant as TokioInstant;
 use serde::de::DeserializeOwned;
 use tokio::sync::oneshot;
-use tokio::time::Instant as TokioInstant;
 
 use crate::daemon::ctx::HandlerCtx;
 use crate::daemon::state::EventLoopState;
+#[cfg(feature = "host")]
 use crate::daemon::state_file::StateFile;
 use crate::gossip::app::NodeApp;
 use crate::protocol::mesh::MeshName;
@@ -32,6 +33,12 @@ pub trait NodeDriver: NodeApp {
     ///
     /// Defaults to a no-op — an app that serves no local binding writes no
     /// discovery fields.
+    ///
+    /// Host-only, and the *only* host-only thing in this trait: it names
+    /// [`StateFile`], which needs a filesystem. A browser node has no state file
+    /// to seed, so the hook simply does not exist there rather than the whole
+    /// driver seam being gated behind it.
+    #[cfg(feature = "host")]
     fn init_state_file(&self, state_file: Option<&StateFile>) {
         let _ = state_file;
     }

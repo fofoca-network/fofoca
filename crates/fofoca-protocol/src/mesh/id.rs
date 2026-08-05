@@ -10,7 +10,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use super::Mesh;
 
-const MIN_LEN: usize = 7;
+const MIN_LEN: usize = 3;
 const MAX_LEN: usize = 512;
 
 /// A mesh identifier — the encoded bare `Base58Check` string.
@@ -159,7 +159,12 @@ mod mesh_id_tests {
 
     #[test]
     fn new_rejects_invalid_base58_chars() {
-        // `0`, `O`, `I`, `l` are not in the Base58 alphabet.
+        // `0`, `O`, `I`, `l` are not in the Base58 alphabet — and neither is
+        // the glyph prefix ids used to carry, so a stale paste lands here too.
+        assert!(matches!(
+            MeshId::new("AbCdEf0xyz"),
+            Err(MeshIdError::Charset(_))
+        ));
         assert!(matches!(
             MeshId::new("AbCdEf0xyzZZ"),
             Err(MeshIdError::Charset(_))

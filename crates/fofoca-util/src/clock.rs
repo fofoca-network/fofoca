@@ -1,8 +1,28 @@
-//! Unix-epoch timestamps — `std::time` wrappers that produce the
-//! `i64`-shaped fields the wire protocol and state file expect.
-//! Pure `std`, so the crate needs no `chrono` dependency.
+//! The crate's clock: the portable [`Instant`] / [`SystemTime`] every other
+//! module imports, and the unix-epoch timestamps the wire protocol and state
+//! file expect.
+//!
+//! Load-bearing on wasm, not a nicety. On `wasm32-unknown-unknown` the `std`
+//! constructors route to `sys/time/unsupported.rs` and **panic**
+//! (`"time not implemented on this platform"`) — and [`unix_secs`] stamps every
+//! `Message`, so a browser peer could not author a single frame. A panic is
+//! invisible to `cargo check`, which is why the wasm CI leg is green today
+//! while nothing has ever actually run there.
+//!
+//! `web-time` is a drop-in rather than a shim: off wasm32 it is
+//! `pub use std::time::*` and pulls in no dependencies, so on the host these
+//! *are* the std types and nothing about their behaviour changes. Only a
+//! browser gets the `Performance.now()` / `Date.now()` implementation. That is
+//! why this is a re-export instead of a hand-rolled `cfg` façade — and why
+//! `Duration`, which never reads a clock, keeps coming straight from `std`.
+//!
+//! Import the two clock types from here, never from `std::time`. Note the
+//! browser caveat on [`Instant`]: outside Windows it stops ticking while the
+//! tab is asleep.
 
-use std::time::{SystemTime, UNIX_EPOCH};
+pub use web_time::{Instant, SystemTime};
+
+use web_time::UNIX_EPOCH;
 
 /// Seconds since the Unix epoch, or 0 if the system clock is set
 /// before 1970 or beyond the year 2554 (i64 fits >290 billion

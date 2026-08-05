@@ -9,7 +9,9 @@
 
 use std::collections::HashMap;
 use std::hash::Hash;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use crate::clock::Instant;
 
 /// A set of keys each "on cooldown" until `window` after its last [`note`].
 ///
@@ -72,7 +74,8 @@ impl<K: Eq + Hash + Copy> Cooldown<K> {
 
 #[cfg(test)]
 mod tests {
-    use std::time::{Duration, Instant};
+    use crate::clock::Instant;
+    use std::time::Duration;
 
     use super::Cooldown;
 

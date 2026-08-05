@@ -16,6 +16,10 @@
 //! target: `crate::gossip`, `crate::lifecycle`, `crate::beacon`,
 //! `crate::lookup`.
 
+// The node runtime is portable. What is *not* is gated inside these modules,
+// pocket by pocket — signals, the orphan watch, the control socket, the state
+// file, the multihop handle — rather than by gating the modules wholesale. A
+// browser runs the same event loop as the CLI; it just has fewer inputs to it.
 pub(crate) mod app;
 mod bounded_id_set;
 pub(crate) mod config;
@@ -35,6 +39,7 @@ pub(crate) mod state;
 
 // The session state file the daemon writes for external readers (its
 // sole writer). Daemon-session state, not a generic `util` helper.
+#[cfg(feature = "host")]
 pub(crate) mod state_file;
 pub(crate) mod timers;
 

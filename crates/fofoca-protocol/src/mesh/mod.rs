@@ -458,8 +458,10 @@ mod mesh_tests {
     fn round_trip_loopback() {
         let mesh = Mesh::new(dummy_seed(), dummy_name(), MeshConfig::loopback());
         let encoded = mesh.to_string();
-        assert!(!encoded.contains("://"));
-        assert!(encoded.is_ascii());
+        assert!(
+            encoded.bytes().all(|byte| byte.is_ascii_alphanumeric()),
+            "id must be bare ASCII Base58: {encoded}"
+        );
         let decoded: Mesh = encoded.parse().unwrap();
         assert_eq!(decoded.seed(), mesh.seed());
         assert_eq!(decoded.name, mesh.name);
@@ -638,10 +640,18 @@ mod mesh_tests {
     }
 
     #[test]
-    fn garbage_prefix_rejected() {
+    fn a_prefixed_id_is_rejected() {
+        // An id is bare Base58Check, so anything glued to the front is not a
+        // brand to strip — it is corruption, and the checksum says so. Covers
+        // both a stale glyph paste and the ASCII brands other tools use.
         let encoded = Mesh::new(dummy_seed(), dummy_name(), MeshConfig::loopback()).to_string();
-        let bad = format!("xxx{encoded}");
-        assert!(bad.parse::<Mesh>().is_err());
+        for prefix in ["💬", "💬://", "sw1", "xyz", "ahs"] {
+            let bad = format!("{prefix}{encoded}");
+            assert!(
+                bad.parse::<Mesh>().is_err(),
+                "expected reject for prefix {prefix}",
+            );
+        }
     }
 
     #[test]
@@ -669,7 +679,7 @@ mod mesh_tests {
 
     #[test]
     fn mesh_id_round_trips_unicode_name() {
-        let name = MeshName::new("café-日本-💬").unwrap();
+        let name = MeshName::new("café-日本-🎉").unwrap();
         let mesh = Mesh::new(dummy_seed(), name.clone(), MeshConfig::loopback());
         let decoded: Mesh = mesh.to_string().parse().expect("decode failed");
         assert_eq!(decoded.name, name);
@@ -679,7 +689,7 @@ mod mesh_tests {
     fn mesh_id_round_trips_max_byte_name() {
         // 32 four-byte scalars = 128 bytes = the most the 1-byte name
         // length field can carry; exercises the encode/decode upper edge.
-        let name = MeshName::new("💬".repeat(32)).unwrap();
+        let name = MeshName::new("🎉".repeat(32)).unwrap();
         assert_eq!(name.as_bytes().len(), 128);
         let mesh = Mesh::new(dummy_seed(), name.clone(), MeshConfig::public_preset());
         let decoded: Mesh = mesh.to_string().parse().expect("decode failed");

@@ -9,6 +9,14 @@
 // local users traverse it and read per-member logs, so it moved to a
 // uid-scoped, `0700` directory.
 
+// Mesh ids and tickets carry no sigil and no `://` separator: both are bare
+// Base58Check, told apart by the kind byte inside the payload (see
+// `protocol::mesh`, `blob::ticket`, `invite::ticket`). They used to be branded
+// with an emoji glyph, which cost a percent-encode in every URL, a non-ASCII
+// component in every runtime path, and a variation-selector workaround in both
+// ticket decoders. Being pure ASCII, an id now drops into a path, a URL, or a
+// shell word verbatim.
+
 /// Default lifetime of a minted invite ticket when `--ttl` is omitted (24h).
 /// A finite window by default so a forgotten invite stops admitting; the
 /// creator can override, and `--ttl none`/`0` mints a no-expiry invite.
@@ -18,6 +26,9 @@ pub const INVITE_DEFAULT_TTL_SECS: u64 = 24 * 60 * 60;
 /// (active + one backup ⇒ bounded at `2 ×` this). The `--log-max-bytes` flag
 /// overrides; `0` disables rotation. Resolved by
 /// [`crate::logs::log_max_bytes`].
+///
+/// `host`-only with the file sink: a browser has no log file to rotate.
+#[cfg(feature = "host")]
 pub const LOG_FILE_MAX_BYTES: u64 = 10 * 1024 * 1024; // 10 MiB
 
 /// Maximum size in bytes of a serialized mesh message. A network-wide
@@ -140,6 +151,9 @@ pub const MAX_BLOB_BYTES: u64 = 2 * 1024 * 1024 * 1024; // 2 GiB
 /// new blob that would push the store past this unlinks the oldest spooled
 /// blobs to make room — a hard cap, so it can drop a still-referenced blob under
 /// pressure (the fetch then fails cleanly rather than corrupting).
+///
+/// `host`-only with the spool itself: only a producer writes blobs to disk.
+#[cfg(feature = "host")]
 pub const MAX_BLOB_STORE_BYTES: u64 = 4 * 1024 * 1024 * 1024; // 4 GiB
 
 /// Default number of recent messages each member retains in its in-memory
@@ -162,6 +176,9 @@ pub const UNICAST_INBOX_CAP: usize = 256;
 /// — worst case every char doubles (quotes/backslashes/newlines) — so budget
 /// **2×** the raw ceiling plus envelope headroom, or an escape-heavy body
 /// within the documented limit is refused at the socket.
+///
+/// `host`-only with the IPC listener — a browser binds no socket.
+#[cfg(feature = "host")]
 pub const MAX_IPC_COMMAND_BYTES: usize = 2 * MAX_LOGICAL_BODY_BYTES + 2 * MAX_MESSAGE_SIZE;
 
 /// Max bytes for one IPC response line. A rendered event carries the body
@@ -172,6 +189,7 @@ pub const MAX_IPC_COMMAND_BYTES: usize = 2 * MAX_LOGICAL_BODY_BYTES + 2 * MAX_ME
 /// it forever. `poll` batches byte-aware against this bound
 /// (`EventLoopState::poll_since`), returning the oldest prefix that fits;
 /// the client re-polls for the rest.
+#[cfg(feature = "host")]
 pub const MAX_IPC_RESPONSE_BYTES: usize = 5 * MAX_LOGICAL_BODY_BYTES;
 
 // ── Password KDF (wire contract) ──────────────────────────────────
@@ -273,7 +291,7 @@ pub const HEAL_STALL_THRESHOLD_SECS: u64 = 60;
 /// Flag: `--starvation-threshold-secs`.
 pub const STARVATION_THRESHOLD_SECS: u64 = 2 * ALIVE_TIMEOUT_SECS;
 
-/// How often an advertising `create` re-broadcasts its `mesh id` id into the
+/// How often an advertising `create` re-broadcasts its mesh id into the
 /// directory. Flag: `--advertise-interval-secs`.
 pub const ADVERTISE_INTERVAL_SECS: u64 = 20;
 

@@ -1,0 +1,39 @@
+# Readability-focused Clippy configuration. See [workspace.lints] in
+# Cargo.toml for the enabled lint set.
+#
+# Kept aligned with `agent-habilis/agent-share`'s copy, because most of this
+# workspace was written under it and crates still move between the two repos.
+# Both carry the same `[workspace.lints]`, but lint *configuration* lives in a
+# file like this rather than in the manifest — so without it the two disagree
+# on every configurable lint even though their lint sets match, and code that
+# passes in one fails in the other.
+#
+# One deliberate divergence: agent-share also sets
+# `warn-on-all-wildcard-imports = true`. That cannot hold here. `fofoca`'s
+# `protocol` and `util` facades are `pub use fofoca_protocol::*` /
+# `pub use fofoca_util::*`, which is the whole mechanism by which the split
+# crates keep their old module paths; enumerating those names by hand would
+# drift on every new public item in a leaf crate.
+
+# Flag single-character identifiers; keep idiomatic generics and loop vars.
+min-ident-chars-threshold = 1
+allowed-idents-below-min-chars = ["_", "T", "E", "K", "V", "R", "S", "i", "j"]
+
+# Complexity ceilings (favor small, readable functions).
+cognitive-complexity-threshold = 20
+too-many-lines-threshold = 120
+
+# Domain terms that must not trip clippy::doc_markdown (extends the default
+# allow-list rather than replacing it).
+doc-valid-idents = [
+    "iroh",
+    "QUIC",
+    "WebRTC",
+    "HyParView",
+    "Plumtree",
+    "Base58Check",
+    "Ed25519",
+    "TopicId",
+    "EndpointId",
+    "JSON-RPC",
+]

@@ -19,17 +19,37 @@
 //! cross-transport dedup are identical on both planes.
 
 mod accept;
+mod admission;
+#[cfg(feature = "host")]
 pub(crate) mod ipc;
 mod pool;
+// The JSEP exchange that fills `lookup::TransportHandles::webrtc`. Portable:
+// a browser peer negotiates with a CLI peer over the same envelope, and only
+// the backend behind it differs.
+pub(crate) mod webrtc;
+
+/// Messages flowing from the IPC listener to the event loop, generic over the
+/// app's command type `C`: the command, plus the channel the loop sends its raw
+/// JSON response back on.
+///
+/// Deliberately declared out here rather than inside the host-gated [`ipc`]
+/// module. It is a plain tuple with nothing host-specific in it, and keeping it
+/// portable is what lets the event loop's IPC `select!` arm compile everywhere
+/// and simply never fire — a browser binds no socket, so its receiver is always
+/// `None`. Only the socket *server* needs `interprocess`.
+pub(crate) type IpcMessage<C> = (C, tokio::sync::oneshot::Sender<String>);
 mod send;
 pub(crate) mod sender;
 
 pub(crate) use accept::UnicastAcceptor;
+pub(crate) use admission::SignalAdmission;
 pub(crate) use pool::UnicastPool;
 pub use send::Lane;
 pub use send::deliver;
 pub(crate) use send::lane_for;
 pub use sender::MeshSender;
+pub use webrtc::MAX_DIRECT_PEERS;
+pub(crate) use webrtc::{IceProfile, MESH_WEBRTC_SIGNAL_ALPN, WebRtcSignalAcceptor};
 
 /// ALPN for the unicast channel — a raw bidirectional QUIC stream with its own
 /// protocol identity, distinct from `GOSSIP_ALPN` and the application's own bridge ALPN.

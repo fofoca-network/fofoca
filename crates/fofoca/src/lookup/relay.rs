@@ -20,8 +20,8 @@ use iroh::{
     Endpoint, RelayMode, RelayUrl,
     endpoint::{default_relay_mode, presets},
 };
+use n0_future::task::JoinHandle;
 use tokio::sync::watch;
-use tokio::task::JoinHandle;
 
 use crate::protocol::mesh::RelayChoice;
 use crate::util::tuning::{
@@ -55,7 +55,7 @@ use crate::util::tuning::{
 /// `relay.agent-habilis.com` cutover then moved rung 0 itself: binaries
 /// from before it home on the retired `swarm-relay.…` host, so they
 /// cannot relay-direct rendezvous with binaries from after.
-const RENDEZVOUS_RELAY_LADDER: [&str; 5] = [
+pub const RENDEZVOUS_RELAY_LADDER: [&str; 5] = [
     // No trailing-dot FQDN on rung 0: Cloudflare routes by exact Host
     // header and 404s the dotted form (including the /relay websocket
     // upgrade); n0's infra tolerates the dot.
@@ -206,7 +206,7 @@ async fn relay_rung_reachable(rung: &RelayUrl, timeout: Duration) -> bool {
     else {
         return false;
     };
-    let reachable = tokio::time::timeout(timeout, endpoint.online())
+    let reachable = n0_future::time::timeout(timeout, endpoint.online())
         .await
         .is_ok();
     endpoint.close().await;
@@ -294,7 +294,7 @@ pub(crate) fn spawn_relay_monitor(
     homed: bool,
 ) -> JoinHandle<()> {
     let probe = Duration::from_secs(RELAY_RUNG_PROBE_SECS);
-    tokio::spawn(async move {
+    n0_future::task::spawn(async move {
         if homed {
             monitor_homed_rung(&endpoint, &ladder, &rung_tx, probe).await;
         } else {
@@ -314,8 +314,11 @@ async fn monitor_homed_rung(
 ) {
     let mut fails: u32 = 0;
     loop {
-        tokio::time::sleep(Duration::from_secs(RELAY_LIVENESS_INTERVAL_SECS)).await;
-        if tokio::time::timeout(probe, endpoint.online()).await.is_ok() {
+        n0_future::time::sleep(Duration::from_secs(RELAY_LIVENESS_INTERVAL_SECS)).await;
+        if n0_future::time::timeout(probe, endpoint.online())
+            .await
+            .is_ok()
+        {
             fails = 0;
             continue;
         }
@@ -353,7 +356,7 @@ async fn monitor_relay_less(
             let _ = rung_tx.send(Some(rung));
             return;
         }
-        tokio::time::sleep(backoff).await;
+        n0_future::time::sleep(backoff).await;
         backoff = next_relay_backoff(backoff);
     }
 }

@@ -4,13 +4,20 @@
 
 pub mod bounded_fifo_set;
 pub mod bounded_queue;
+// Gated with its only caller, the engine's IPC listener: line framing over a
+// unix socket / named pipe, which a browser has no equivalent of. `async-io` is
+// also the crate's only tokio user.
 #[cfg(feature = "async-io")]
 pub mod bounded_read;
 pub mod clock;
 pub mod consts;
 pub mod cooldown;
 pub mod logs;
+#[cfg(feature = "host")]
 pub mod process;
+// Portable: the reading itself is `cfg`'d down to `None` off a libc host, so
+// the leak gauge compiles everywhere and simply reports 0 in a browser. Keeping
+// the module un-gated is what lets `timers` stay free of `cfg` at its call sites.
 pub mod resident_memory;
 pub mod tuning;
 pub mod version;
@@ -19,7 +26,8 @@ pub mod version;
 /// identifier. The stem of every per-mesh file (socket / log / state), so it
 /// lives here rather than in any one module. See [`mesh_runtime_dir`].
 ///
-/// Truncate a bare mesh id to a filesystem-safe directory stem (16 chars).
+/// An id is bare Base58, so the stem is plain ASCII and needs no escaping or
+/// separator-stripping before it lands in a path.
 #[must_use]
 pub fn mesh_prefix(mesh_id: &str) -> String {
     mesh_id.chars().take(16).collect()
@@ -51,6 +59,7 @@ pub fn mesh_prefix(mesh_id: &str) -> String {
 /// env-var config" rule. The `-<uid>` suffix adds only a few bytes, so the
 /// socket path stays well inside the `AF_UNIX` `sun_path` ~104-byte limit.
 #[must_use]
+#[cfg(feature = "host")]
 pub fn runtime_base(product: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(format!("/tmp/{product}-{}", current_uid()))
 }
@@ -61,6 +70,7 @@ pub fn runtime_base(product: &str) -> std::path::PathBuf {
 /// base we just created ourselves). The one place the crate calls libc, so the
 /// single `unsafe` block has one documented home (mirrors the termios FFI in
 /// `main`). `geteuid` has no safety preconditions.
+#[cfg(feature = "host")]
 #[expect(unsafe_code, reason = "libc::geteuid FFI; no safe std wrapper exists")]
 fn current_uid() -> u32 {
     // SAFETY: geteuid cannot fail and reads no memory.
@@ -85,6 +95,7 @@ fn current_uid() -> u32 {
 /// user (a squatting attempt — a clear message so the operator can remove it);
 /// or the create / chmod syscalls fail. Fails *closed*: a failure here must
 /// abort the write, never fall through to an unvalidated directory.
+#[cfg(feature = "host")]
 pub fn ensure_runtime_base(base: &std::path::Path) -> std::io::Result<()> {
     use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, PermissionsExt as _};
 
@@ -135,6 +146,7 @@ pub fn ensure_runtime_base(base: &std::path::Path) -> std::io::Result<()> {
 /// Whether `path` is inside `base`. A `--state-file` / `--log-dir` override can
 /// point outside the base and must not be gated on its validation.
 #[must_use]
+#[cfg(feature = "host")]
 pub fn is_under_runtime_base(base: &std::path::Path, path: &std::path::Path) -> bool {
     path.starts_with(base)
 }
@@ -152,6 +164,7 @@ pub fn is_under_runtime_base(base: &std::path::Path, path: &std::path::Path) -> 
 /// [`ensure_runtime_base`] rejected the base, or the parent create failed.
 /// `base` is `None` for a consumer that configured no runtime base at all —
 /// there is then no protected directory to validate, only a parent to create.
+#[cfg(feature = "host")]
 pub fn ensure_parent_private(
     base: Option<&std::path::Path>,
     path: &std::path::Path,
@@ -180,6 +193,7 @@ pub fn ensure_parent_private(
 /// builders all derive from it. Pure — a path only; use
 /// [`ensure_mesh_runtime_dir`] when about to *create* files under it.
 #[must_use]
+#[cfg(feature = "host")]
 pub fn mesh_runtime_dir(base: &std::path::Path, mesh_id: &str) -> std::path::PathBuf {
     base.join(mesh_prefix(mesh_id))
 }
@@ -192,6 +206,7 @@ pub fn mesh_runtime_dir(base: &std::path::Path, mesh_id: &str) -> std::path::Pat
 ///
 /// # Errors
 /// [`ensure_runtime_base`] rejected the base, or the subdir create failed.
+#[cfg(feature = "host")]
 pub fn ensure_mesh_runtime_dir(
     base: &std::path::Path,
     mesh_id: &str,
@@ -255,5 +270,17 @@ mod tests {
     fn result_is_a_prefix_of_input() {
         let input = "abcdefghijkmnpqrstuvwx";
         assert!(input.starts_with(&mesh_prefix(input)));
+    }
+
+    #[test]
+    fn stem_is_path_safe_ascii() {
+        // The stem goes straight into a path, so it must carry no separator
+        // and nothing needing escaping. Fed a *real* id (bare Base58), not the
+        // short labels the cases above use.
+        let stem = mesh_prefix("2UXAThUkdBAbiJNXvCt4YeMGQ9myFg7gJJZSr3pG3MAG");
+        assert!(
+            stem.bytes().all(|byte| byte.is_ascii_alphanumeric()),
+            "{stem}"
+        );
     }
 }

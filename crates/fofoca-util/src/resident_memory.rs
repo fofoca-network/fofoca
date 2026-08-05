@@ -32,7 +32,10 @@ pub fn peak_resident_memory_mb() -> Option<u64> {
     peak_resident_memory_bytes().map(|bytes| bytes / (1024 * 1024))
 }
 
-#[cfg(unix)]
+// `unix` alone is not the right gate: `libc` is an optional dependency the
+// `host` feature turns on, so a `--no-default-features` build on a unix host
+// would take this arm with nothing to call into. Both conditions, or neither.
+#[cfg(all(unix, feature = "host"))]
 #[expect(
     unsafe_code,
     reason = "libc getrusage FFI; no safe wrapper for RUSAGE_SELF maxrss"
@@ -60,7 +63,10 @@ fn maxrss_bytes() -> Option<u64> {
     }
 }
 
-#[cfg(not(unix))]
+/// No reading available: a non-unix host, or any target without `libc` — which
+/// includes the browser, where a tab has no meaningful RSS of its own anyway.
+/// The leak gauge simply reports 0 there.
+#[cfg(not(all(unix, feature = "host")))]
 fn maxrss_bytes() -> Option<u64> {
     None
 }
@@ -69,7 +75,7 @@ fn maxrss_bytes() -> Option<u64> {
 mod tests {
     use super::peak_resident_memory_bytes;
 
-    #[cfg(unix)]
+    #[cfg(all(unix, feature = "host"))]
     #[test]
     fn reads_a_plausible_resident_memory() {
         // The test process holds a real address space, so resident memory is

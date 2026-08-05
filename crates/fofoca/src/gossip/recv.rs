@@ -6,7 +6,7 @@
 //! layer never touches the peer roster directly — it calls into
 //! `lifecycle::observe` and dispatches by kind.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use bytes::Bytes;
 use iroh_gossip::api::{ApiError, Event};
@@ -19,7 +19,11 @@ use crate::lookup::add_peer_addr;
 use crate::protocol::identity;
 use crate::protocol::message::MessageBody;
 use crate::protocol::{Channel, Message, MessageKind, Nickname};
+use crate::util::clock::Instant;
+// The timer-driver clock the ping round's deadlines are kept in — distinct from
+// `clock::Instant` off wasm32. See `daemon::state`.
 use crate::util::tuning::RECLAIM_WINDOW_SECS;
+use n0_future::time::Instant as TokioInstant;
 
 use super::app::{AppClass, InboundApp, NodeApp};
 use super::broadcast::{announce_arrival, broadcast_peer_info};
@@ -66,7 +70,7 @@ pub(crate) async fn handle_gossip_event(
                     state.last_sent_at = now;
                 }
             } else {
-                announce_arrival(ctx).await;
+                announce_arrival(state, ctx).await;
                 state.announced = true;
                 state.note_peerinfo(node_id, now);
                 state.last_sent_at = now;
@@ -149,11 +153,18 @@ pub(crate) async fn handle_gossip_event(
             // Terminal: the actor closed this subscription (lag
             // eviction) or died. The heal arm re-subscribes; meanwhile
             // IPC msg/poll keep serving the local buffer.
+            //
+            // `warn`, not `error`: this is recovered automatically, and the
+            // case where recovery is genuinely exhausted has an `error` of
+            // its own (`Resubscribe::Fatal`, which then shuts the daemon
+            // down). Logging both at the same level buried the one that
+            // means the node is finished under the one that means it is
+            // reconnecting.
             state.gossip_open = false;
             ctx.sink.emit(NodeEvent::Error(
                 "gossip stream ended; resubscribing".to_owned(),
             ));
-            tracing::error!(target: "fofoca::gossip", "gossip stream ended; heal arm will resubscribe");
+            tracing::warn!(target: "fofoca::gossip", "gossip stream ended; heal arm will resubscribe");
         }
     }
 }
@@ -381,7 +392,7 @@ pub(crate) async fn ingest(
             {
                 round
                     .pongs
-                    .insert(message.author.clone(), tokio::time::Instant::now());
+                    .insert(message.author.clone(), TokioInstant::now());
             }
             return;
         }
@@ -479,24 +490,32 @@ pub(crate) async fn ingest(
 /// silently when the multihop transport is off or the body is malformed —
 /// plumbing like the digests, never logged or surfaced.
 fn handle_link_state(message: &Message, state: &mut EventLoopState) {
-    let Some(handle) = state.multihop.as_ref() else {
-        return; // multihop off: nothing consumes the routing table
-    };
-    match serde_json::from_str::<iroh_multihop_transport::LinkVector>(message.body.as_str()) {
-        Ok(vector) => {
-            let updated = handle.feed_topology(vector);
-            tracing::debug!(target: "fofoca::gossip",
-                author = %message.author,
-                updated,
-                "multihop link-state received"
-            );
-        }
-        Err(error) => {
-            tracing::debug!(target: "fofoca::gossip",
-                author = %message.author,
-                %error,
-                "dropping malformed multihop link-state"
-            );
+    #[cfg(not(feature = "host"))]
+    {
+        // No multihop transport off-host: nothing consumes a routing table.
+        let _ = (message, state);
+    }
+    #[cfg(feature = "host")]
+    {
+        let Some(handle) = state.multihop.as_ref() else {
+            return; // multihop off: nothing consumes the routing table
+        };
+        match serde_json::from_str::<iroh_multihop_transport::LinkVector>(message.body.as_str()) {
+            Ok(vector) => {
+                let updated = handle.feed_topology(vector);
+                tracing::debug!(target: "fofoca::gossip",
+                    author = %message.author,
+                    updated,
+                    "multihop link-state received"
+                );
+            }
+            Err(error) => {
+                tracing::debug!(target: "fofoca::gossip",
+                    author = %message.author,
+                    %error,
+                    "dropping malformed multihop link-state"
+                );
+            }
         }
     }
 }
@@ -644,14 +663,48 @@ fn retain_and_index(
             tracing::warn!(target: "fofoca::gossip", author = %message.author, "message timestamp precedes a referenced parent; possible backdating");
         }
     }
+    push_to_log(state, message);
+}
+
+/// Push a retained message into the anti-entropy log, keeping the DAG + fork
+/// indexes bounded with the log window as the push evicts.
+pub(super) fn push_to_log(state: &mut EventLoopState, message: Message) {
     if let Some(evicted) = state.message_log.push(message) {
-        // Keep the DAG + fork indexes bounded with the log window.
         let evicted_hash = evicted.content_hash_hex();
         state.forget_hash(&evicted_hash);
         if let Some(seq) = evicted.seq {
             state.forget_msg_seq(&evicted.pubkey, seq, &evicted_hash);
         }
     }
+}
+
+/// Retain a message **this node just broadcast** in its own anti-entropy log.
+///
+/// gossip never echoes a node's own publications back to it, so a message we
+/// author reaches every peer's [`ingest`] but never our own. Without this our
+/// `message_log` — and so the digest we advertise — omits everything we wrote,
+/// with two consequences:
+///
+/// * We cannot serve our own `joined` to a peer that missed it, which is the
+///   one repair anti-entropy exists to make.
+/// * Worse, every peer that *does* hold it reads the omission as a gap and
+///   re-sends it to us on **every** digest round, forever: we can never
+///   acknowledge it, because we can never receive it. Each such message is a
+///   permanent per-round broadcast to the whole mesh, and since a re-announced
+///   `joined` mints a fresh id, the unconvergeable set ratchets upward — the
+///   mesh-wide CPU/traffic runaway this guards against.
+///
+/// The state/meta channel already retains its own writes for exactly this
+/// reason; see [`super::broadcast_state_merge`].
+pub(crate) fn retain_own_broadcast(state: &mut EventLoopState, message: &Message) {
+    if !is_loggable(&message.kind) {
+        return;
+    }
+    // Ours by construction, so it can never arrive again — but mark it seen so
+    // a peer still running the old resend behaviour is deduped at the gate
+    // rather than double-pushed here.
+    state.mark_seen(message);
+    push_to_log(state, message.clone());
 }
 
 /// Route a received `State`/`Meta` event to its channel doc, then — for `meta` —
@@ -1084,6 +1137,10 @@ async fn handle_peer_info(
     // and *asks* the gossip actor to graft it. Until the link
     // materializes, each post-cooldown re-receipt retries the dial —
     // the healer's per-peer backstop.
+    // Negotiate a direct WebRTC session alongside the graft, never in front of
+    // it. Blocking the graft on the session deadlocks mesh formation — see the
+    // note on `negotiate_session`.
+    crate::transport::webrtc::negotiate_session(state, ctx, peer_id, peer_addr.clone());
     if !defer_first_dial
         && state.linked_endpoints.len() < ctx.max_peers
         && !state.linked_endpoints.contains(&peer_id)
@@ -1161,5 +1218,107 @@ mod is_loggable_tests {
         // PeerInfo is endpoint plumbing — never logged/surfaced, and the
         // classifier (not just its early-return) says so.
         assert!(!is_loggable(&MessageKind::PeerInfo));
+    }
+}
+
+/// Replicates the second mesh-wide CPU runaway at its mechanism: a node that
+/// does not retain its **own** broadcasts advertises a digest that omits them,
+/// and since gossip never echoes a node's publications back to it, it can never
+/// acknowledge them — so every peer re-sends them on every anti-entropy round,
+/// forever. Measured at 6 peers: 180 resend events/minute steady-state and
+/// ~108% total CPU, against 12 (join-window only, then silent) and ~54% once
+/// the author retains its own presence.
+#[cfg(test)]
+mod retain_own_broadcast_tests {
+    use std::collections::HashSet;
+    use std::time::Instant;
+
+    use super::retain_own_broadcast;
+    use crate::daemon::message_log::WindowRange;
+    use crate::daemon::state::{EventLoopState, MeshSecrets, StateInit};
+    use crate::protocol::{MeshId, Message, Nickname};
+
+    fn fresh_state() -> EventLoopState {
+        EventLoopState::new(
+            StateInit {
+                state_file: None,
+                identity: std::sync::Arc::new(crate::protocol::identity::Identity::generate()),
+                secrets: MeshSecrets::default(),
+                per_peer_gate: None,
+            },
+            Instant::now(),
+        )
+    }
+
+    fn joined(state: &EventLoopState, author: &str) -> Message {
+        Message::new_joined(&MeshId::from("💬test"), &Nickname::from(author))
+            .signed(&state.identity)
+    }
+
+    /// The invariant: our own `joined` is in our log, so the digest we
+    /// advertise names it.
+    #[test]
+    fn own_presence_lands_in_the_local_log() {
+        let mut state = fresh_state();
+        let mine = joined(&state, "me");
+        assert_eq!(state.message_log.len(), 0, "log starts empty");
+        retain_own_broadcast(&mut state, &mine);
+        assert_eq!(
+            state.message_log.len(),
+            1,
+            "a node must hold the presence it just broadcast — it is the only source for it"
+        );
+    }
+
+    /// Plumbing we broadcast but never log stays out, so retaining our own
+    /// sends does not quietly widen what anti-entropy replays.
+    #[test]
+    fn own_unloggable_plumbing_is_not_retained() {
+        let mut state = fresh_state();
+        let body = crate::protocol::MessageBody::new("{}".to_owned()).expect("valid body");
+        let peer_info =
+            Message::new_peer_info(&MeshId::from("💬test"), &Nickname::from("me"), body)
+                .signed(&state.identity);
+        retain_own_broadcast(&mut state, &peer_info);
+        assert_eq!(
+            state.message_log.len(),
+            0,
+            "PeerInfo is never logged inbound, so it must not be logged outbound either"
+        );
+    }
+
+    /// The end-to-end property, as the two peers actually exchange it: a holder
+    /// computing gaps against our digest must find **nothing** to re-send.
+    /// Before the fix this returned our own `joined` on every round, forever.
+    #[test]
+    fn a_peer_offers_nothing_back_against_our_digest() {
+        // Us: we broadcast our own `joined`, and receive the peer's.
+        let mut us = fresh_state();
+        let ours = joined(&us, "us");
+        retain_own_broadcast(&mut us, &ours);
+        let mut them = fresh_state();
+        let theirs = joined(&them, "them");
+        retain_own_broadcast(&mut them, &theirs);
+        // Each side ingests the other's presence, as gossip delivers it.
+        super::push_to_log(&mut us, theirs);
+        super::push_to_log(&mut them, ours);
+
+        // We advertise what we hold; they compute what we are missing.
+        let window = us.message_log.recent_window(64).expect("non-empty log");
+        let have: HashSet<[u8; 16]> = window.ids.into_iter().collect();
+        let offered = them.message_log.missing_in_window(
+            WindowRange {
+                lo: window.lo,
+                hi: window.hi,
+            },
+            &have,
+            64,
+        );
+        assert!(
+            offered.is_empty(),
+            "two converged peers must have nothing to re-send; got {} message(s) — \
+             the anti-entropy loop is back",
+            offered.len()
+        );
     }
 }
