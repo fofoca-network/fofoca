@@ -29,9 +29,10 @@ fofoca-util          host helpers, no deps of consequence   (13 crates resolved)
 
 fofoca-blobs                    verified byte ranges, + bao-tree, blake3
 fofoca-iroh-webrtc-transport    QUIC over a WebRTC data channel, + iroh
+iroh-multihop-transport         QUIC relayed through peers, + iroh
 ```
 
-The bottom two are standalone: they depend on nothing else here.
+The bottom three are standalone: they depend on nothing else here.
 
 The load-bearing property: **only `fofoca` names `iroh`**. `fofoca-protocol`
 builds on `iroh-base` alone and pulls no tokio, QUIC, TLS or DNS; `-doc`,
@@ -51,8 +52,12 @@ not exist there. One crate, two mutually exclusive backends behind features —
 disagree about the transport id or the envelope shape fail to connect with no
 useful error.
 
-Both run on a host and in a browser, and neither knows what a mesh is; the
-engine does not know about either. They meet in a consumer.
+[`iroh-multihop-transport`](crates/iroh-multihop-transport) is the other custom
+transport: source-routed relaying through intermediate peers, for when no direct
+path exists at all.
+
+None of the three knows what a mesh is, and the engine takes only the multihop
+one. The other two meet it in a consumer.
 
 That is the whole reason the split exists. Cargo features cannot be selected
 per-consumer across a dependency edge, so a consumer that wants the wire
@@ -67,9 +72,6 @@ separate cadences.
 
 ## Related repos
 
-- [`iroh-multihop-transport`](https://github.com/fofoca-network/iroh-multihop-transport)
-  — source-routed multi-hop iroh transport. Split out because it has no fofoca
-  dependency; consumed here as a git dependency.
 - [`iroh`](https://github.com/fofoca-network/iroh) and
   [`iroh-gossip`](https://github.com/fofoca-network/iroh-gossip) — forks carrying
   two unreleased fixes, pinned by rev in `[patch.crates-io]`. See
@@ -79,7 +81,7 @@ separate cadences.
 
 ```bash
 cargo check --workspace
-cargo test  --workspace          # 22 suites, 446 tests
+cargo test  --workspace          # 27 suites, 477 tests
 ```
 
 The `mdns` and `dht` features (default on) gate iroh's discovery closure, and

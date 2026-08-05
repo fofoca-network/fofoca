@@ -37,10 +37,12 @@ fofoca-util          no deps of consequence          (13 crates resolved)
 
 fofoca-blobs                    + bao-tree, blake3   (standalone)
 fofoca-iroh-webrtc-transport    + iroh, str0m        (standalone)
+iroh-multihop-transport         + iroh               (standalone)
 ```
 
-The bottom two are off the tree entirely: neither depends on anything in this
-workspace. See carried changes 18 and 19.
+The bottom three are off the tree: none depends on anything in this workspace.
+The engine takes the multihop transport; the other two are a consumer's
+business. See carried changes 18, 19 and 20.
 
 The load-bearing property: **only `fofoca` names `iroh`**. `fofoca-protocol`
 builds on `iroh-base` alone and pulls no tokio, QUIC, TLS or DNS; `-doc` and
@@ -130,6 +132,8 @@ Divergences from upstream, in the order they were made.
     git dependency pinned by rev in `[workspace.dependencies]`. Note that
     `[patch.crates-io]` below still governs it — patch applies from the
     top-level workspace root across the whole graph, git dependencies included.
+
+    **Reversed by carried change 20**, which brought it back as a member.
 14. The `iroh` / `iroh-gossip` forks were re-homed from `agent-habilis` to
     `fofoca-network` so this workspace owns its entire pin surface. The commits
     were pushed unchanged, so **the rev SHAs are identical** — only the URLs in
@@ -194,6 +198,50 @@ Divergences from upstream, in the order they were made.
     existing job built neither, and the `web` half had never been linted at all
     — `agent-share` only ever ran `cargo check` against wasm32, never clippy.
     Its first clippy pass produced 18 findings, all fixed here.
+
+20. `iroh-multihop-transport` came back as a member, reversing change 13, and
+    `agent-share`'s vendored copy of it was deleted in favour of this one. There
+    were three copies of this crate in circulation; now there is one.
+
+    The reasoning in 13 still holds — it has no fofoca dependency and its
+    audience is any iroh user — but a separate repo bought nothing and cost a
+    rev pin to bump on every change. What it was protecting is a property of the
+    *manifest*, not of the repository: the crate still names only crates.io
+    `iroh`/`iroh-base`, and nothing here may leak into it.
+
+    Its `iroh` requirement was lowered from `1.0.2` to `1.0.1` on the way in.
+    `agent-share` patches `iroh` to a 1.0.1 fork, and a `1.0.2` requirement is
+    not satisfied by 1.0.1 — so cargo would ignore that patch, resolve unpatched
+    crates.io alongside it, and put two `iroh_base` crates in the graph, at
+    which point `CustomAddr` stops unifying (E0308). `agent-share`'s vendored
+    copy had already been lowered for exactly this reason; the split to a
+    separate repo had silently undone it, and consuming that version would have
+    reintroduced the bug. `1.0.1` is satisfied by both forks.
+
+    The now-unused [standalone repo](https://github.com/fofoca-network/iroh-multihop-transport)
+    is superseded, not deleted.
+
+21. Every dependency named by more than one crate now lives in
+    `[workspace.dependencies]` and nowhere else. Members opt in with
+    `dep.workspace = true` and may union in extra features, but no member
+    restates a version.
+
+    This started as tidiness and is not: `iroh` sat at `1.0.2` in the workspace
+    while both transports named `1.0.1` locally. Nothing had broken yet, but two
+    versions of `iroh`/`iroh-base` in one graph is precisely how a
+    `CustomTransport` impl stops satisfying the trait iroh hands back, and the
+    E0308 it produces points nowhere near the manifests that caused it.
+
+    `iroh` and `iroh-base` also moved to `default-features = false`. A member
+    cannot turn off default features that the workspace entry turns on, and the
+    WebRTC transport's browser backend must have them off — iroh's defaults drag
+    `tokio/net` → `mio`, which refuses to build for wasm32. So the off position
+    lives at the root and `fofoca` re-adds `metrics`, `portmapper` and
+    `fast-apple-datapath` by name, `fofoca-protocol` re-adds `relay`.
+
+    `noq-udp`, `n0-watcher`, `wasm-bindgen`, `wasm-bindgen-futures`, `js-sys`
+    and `web-sys` moved up at the same time, each having been named by two
+    crates.
 
 ## Patch pins — do not drop
 

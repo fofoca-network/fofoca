@@ -52,7 +52,18 @@ bytes.workspace = true
 tracing.workspace = true
 async-trait.workspace = true
 uuid.workspace = true
-iroh.workspace = true
+# The workspace entry turns iroh's default features off, because the browser
+# backend of the WebRTC transport cannot have them. The engine is the host peer
+# and wants them, so it names them: `metrics`, `portmapper` and
+# `fast-apple-datapath` are iroh's own defaults, and `unstable-net-report` is
+# what 1.0.0 gated `Endpoint::net_report()` behind — the capability probe in
+# `lookup::capability` reads the report directly.
+iroh = { workspace = true, features = [
+    "metrics",
+    "portmapper",
+    "fast-apple-datapath",
+    "unstable-net-report",
+] }
 iroh-gossip.workspace = true
 # The multi-hop iroh custom transport: reach a peer with no direct path by
 # relaying its QUIC packets through intermediate peers. Registered on the

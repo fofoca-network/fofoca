@@ -30,7 +30,9 @@ path = "src/lib.rs"
 # engine converts at the gossip boundary. See docs/mesh-slimming.md.
 [dependencies]
 fofoca-util = { path = "../fofoca-util" }
-iroh-base.workspace = true
+# `relay` is an iroh-base default that the workspace entry turns off for the
+# transports' sake; the wire vocabulary needs it for `RelayUrl`.
+iroh-base = { workspace = true, features = ["relay"] }
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true

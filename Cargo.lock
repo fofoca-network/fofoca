@@ -2422,8 +2422,7 @@ dependencies = [
 
 [[package]]
 name = "iroh-multihop-transport"
-version = "0.1.0"
-source = "git+https://github.com/fofoca-network/iroh-multihop-transport?rev=93cdd76f9611a710f476675e0492d49c06888d05#93cdd76f9611a710f476675e0492d49c06888d05"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "bytes",
