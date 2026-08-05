@@ -27,20 +27,32 @@ fofoca-util          host helpers, no deps of consequence   (13 crates resolved)
         └── fofoca         the engine, + iroh, iroh-gossip (436 crates)
               └── fofoca-ffi     the C ABI
 
-fofoca-blobs         verified byte ranges, + bao-tree, blake3  (standalone)
+fofoca-blobs                    verified byte ranges, + bao-tree, blake3
+fofoca-iroh-webrtc-transport    QUIC over a WebRTC data channel, + iroh
 ```
+
+The bottom two are standalone: they depend on nothing else here.
 
 The load-bearing property: **only `fofoca` names `iroh`**. `fofoca-protocol`
 builds on `iroh-base` alone and pulls no tokio, QUIC, TLS or DNS; `-doc`,
 `-logging`, `-reassembly` and `-directory` inherit that.
 
-[`fofoca-blobs`](crates/fofoca-blobs) is off the tree: it depends on nothing
-else here. It is a BLAKE3/bao store of verification metadata — outboards, root
-bindings, which ranges are held — for bytes that live wherever the caller
-already keeps them, so a peer can serve verified ranges of a file it did not
-have to copy first. It runs on a host and in a browser, and it knows nothing
-about meshes; the engine does not know about it either. The two meet in a
-consumer.
+[`fofoca-blobs`](crates/fofoca-blobs) is a BLAKE3/bao store of verification
+metadata — outboards, root bindings, which ranges are held — for bytes that live
+wherever the caller already keeps them, so a peer can serve verified ranges of a
+file it did not have to copy first.
+
+[`fofoca-iroh-webrtc-transport`](crates/fofoca-iroh-webrtc-transport) carries
+QUIC datagrams over a WebRTC data channel as an iroh custom transport. It is how
+a browser reaches a peer at all: a tab has no UDP socket, so iroh's own paths do
+not exist there. One crate, two mutually exclusive backends behind features —
+`native` (sans-io str0m on tokio) and `web` (the browser's own
+`RTCPeerConnection`) — sharing one protocol half, because two peers that
+disagree about the transport id or the envelope shape fail to connect with no
+useful error.
+
+Both run on a host and in a browser, and neither knows what a mesh is; the
+engine does not know about either. They meet in a consumer.
 
 That is the whole reason the split exists. Cargo features cannot be selected
 per-consumer across a dependency edge, so a consumer that wants the wire

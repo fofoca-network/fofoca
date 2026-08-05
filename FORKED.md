@@ -35,11 +35,12 @@ fofoca-util          no deps of consequence          (13 crates resolved)
         └── fofoca         + iroh, iroh-gossip  (436 crates)
               └── fofoca-ffi
 
-fofoca-blobs         + bao-tree, blake3              (standalone)
+fofoca-blobs                    + bao-tree, blake3   (standalone)
+fofoca-iroh-webrtc-transport    + iroh, str0m        (standalone)
 ```
 
-`fofoca-blobs` is off the tree entirely: it depends on nothing in this
-workspace. See carried change 18.
+The bottom two are off the tree entirely: neither depends on anything in this
+workspace. See carried changes 18 and 19.
 
 The load-bearing property: **only `fofoca` names `iroh`**. `fofoca-protocol`
 builds on `iroh-base` alone and pulls no tokio, QUIC, TLS or DNS; `-doc` and
@@ -171,6 +172,28 @@ Divergences from upstream, in the order they were made.
     its one upward edge: the new crate depends on nothing in this workspace, so
     it sits beside the tree rather than above the engine. Its own
     `tests/isolation.rs` is what keeps that true.
+
+19. `fofoca-iroh-webrtc-transport` arrived from the same repo. It is an iroh
+    custom transport carrying QUIC datagrams over a WebRTC data channel, and it
+    is what lets a browser reach a peer at all — a tab has no UDP socket, so
+    iroh's own paths do not exist there. Like `fofoca-blobs` it depends on
+    nothing else here, so it sits beside the tree.
+
+    Its two backends were renamed on the way in: `host` → **`native`** and
+    `web` stayed, along with `src/host/` → `src/native/`. `host` collided with
+    the engine's own `host` feature, which means something related but not the
+    same, and the pair now says plainly which of two mutually exclusive
+    implementations gets compiled.
+
+    The `iroh` requirement stays at `1.0.1` rather than moving to this
+    workspace's `1.0.2`. The crate is still consumed from `agent-share`, whose
+    patch table supplies 1.0.1; a `1.0.2` floor would be unsatisfiable there.
+    Raise it once both sides pin the same fork.
+
+    CI grew four steps for it. Neither backend is on by default, so every
+    existing job built neither, and the `web` half had never been linted at all
+    — `agent-share` only ever ran `cargo check` against wasm32, never clippy.
+    Its first clippy pass produced 18 findings, all fixed here.
 
 ## Patch pins — do not drop
 

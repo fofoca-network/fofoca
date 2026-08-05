@@ -47,23 +47,48 @@ jobs:
       - name: Check (all features)
         run: cargo check --workspace --all-features
 
-      # `fofoca-blobs` runs the same store in a browser that it runs on a host,
-      # and roughly a third of it — `src/opfs.rs`, `src/idb.rs`,
-      # `tests/opfs_browser.rs` — is reachable on no other target. Without these
-      # two steps that code compiles nowhere and rots silently, and the
+      # `fofoca-iroh-webrtc-transport` compiles one of two mutually exclusive
+      # backends and neither is on by default, so the steps above — which all
+      # run with default features — build neither. `native` is the str0m one,
+      # and it owns the loopback test.
+      - name: Check (webrtc, native backend)
+        run: cargo check -p fofoca-iroh-webrtc-transport --features native --all-targets
+
+      - name: Clippy (webrtc, native backend)
+        run: cargo clippy -p fofoca-iroh-webrtc-transport --features native --all-targets -- -D warnings
+
+      # Two crates are reachable on wasm32 and nowhere else, and between them
+      # that is a substantial amount of code no other job compiles: roughly a
+      # third of `fofoca-blobs` (`src/opfs.rs`, `src/idb.rs`,
+      # `tests/opfs_browser.rs`) and the whole `web` backend of the WebRTC
+      # transport. Without these steps that code rots silently, and the
       # `#[expect(...)]` attributes inside it are never lint-checked either.
       #
+      # Clippy, not just check. The `web` backend had never been linted before
+      # this job existed and carried 18 findings on its first pass.
+      #
       # Nothing else in the workspace builds for wasm32, hence `-p`. No
-      # rustflags and no C toolchain are needed: the crate pulls no `getrandom`
-      # and no C dependency.
+      # rustflags and no C toolchain are needed: neither crate pulls
+      # `getrandom` or a C dependency.
       - name: Check (wasm32)
-        run: cargo check --target wasm32-unknown-unknown -p fofoca-blobs --all-targets
+        run: |
+          cargo check --target wasm32-unknown-unknown -p fofoca-blobs --all-targets
+          cargo check --target wasm32-unknown-unknown -p fofoca-iroh-webrtc-transport --features web
 
       - name: Clippy (wasm32)
-        run: cargo clippy --target wasm32-unknown-unknown -p fofoca-blobs --all-targets -- -D warnings
+        run: |
+          cargo clippy --target wasm32-unknown-unknown -p fofoca-blobs --all-targets -- -D warnings
+          cargo clippy --target wasm32-unknown-unknown -p fofoca-iroh-webrtc-transport --features web -- -D warnings
 
       - name: Test
         run: cargo test --workspace
+
+      # Not covered by `--workspace` above: the loopback suite is behind
+      # `required-features = ["native"]`, so a default-feature test run skips
+      # it. It stands up two real endpoints and completes a QUIC handshake over
+      # a str0m data channel, offline via `IceConfig::host_only()`.
+      - name: Test (webrtc, native backend)
+        run: cargo test -p fofoca-iroh-webrtc-transport --features native
 
   # The C ABI is the whole point of fofoca-ffi and its only non-Rust consumer
   # links the staticlib. Build it the way that consumer does.
