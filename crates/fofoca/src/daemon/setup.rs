@@ -353,10 +353,30 @@ struct SetupBuild<'a> {
     transports: crate::lookup::TransportOpts,
     injected: Option<InjectedEndpoint>,
     /// The caller's ALPN handlers, moved out exactly once by whichever of
-    /// create/join runs. `RefCell` because they are boxed trait objects — not
-    /// `Clone` — and `SetupBuild` is threaded by reference.
-    protocols: std::cell::RefCell<CallerProtocols>,
+    /// create/join runs. Interior mutability because they are boxed trait
+    /// objects — not `Clone` — and `SetupBuild` is threaded by reference.
+    ///
+    /// `Mutex`, not `RefCell`: `RefCell` is not `Sync`, which made `SetupBuild`
+    /// not `Send`, which made the whole `setup_mesh` future not `Send` — so a
+    /// consumer could not `tokio::spawn` a mesh setup at all (agent-gossip does,
+    /// for its directory advertiser and its `api::Session`). Nothing is
+    /// contended here and nothing holds the guard across an `.await`; the
+    /// `Mutex` is bought purely for the `Sync` it carries.
+    protocols: std::sync::Mutex<CallerProtocols>,
     rung_tx: &'a watch::Sender<Option<RelayUrl>>,
+}
+
+impl SetupBuild<'_> {
+    /// Move the caller's ALPN handlers out, leaving the slot empty. Called
+    /// exactly once, by whichever of create/join runs.
+    fn take_protocols(&self) -> CallerProtocols {
+        std::mem::take(
+            &mut *self
+                .protocols
+                .lock()
+                .expect("nothing panics while holding the protocols lock"),
+        )
+    }
 }
 
 /// The ALPN handlers a caller registers on the mesh's Router.
@@ -453,7 +473,7 @@ pub async fn setup_mesh(kind: SetupKind, params: SetupParams) -> Result<EventLoo
         multihop,
         transports,
         injected,
-        protocols: std::cell::RefCell::new(protocols),
+        protocols: std::sync::Mutex::new(protocols),
         rung_tx: &rung_tx,
     };
     let Assembled {
@@ -663,7 +683,7 @@ async fn setup_create(build: &SetupBuild<'_>, create: CreateSetup) -> Result<Ass
         build.max_peers,
         Some(build.unicast_acceptor.clone()),
         Some((webrtc.clone(), webrtc_admission.clone(), webrtc_ice)),
-        build.protocols.take(),
+        build.take_protocols(),
     );
     // Creator has no peers yet — bootstrap is empty.
     let topic = gossip.subscribe(topic_id, vec![]).await?;
@@ -751,7 +771,7 @@ async fn setup_join(build: &SetupBuild<'_>, kind: SetupKind) -> Result<Assembled
         build.max_peers,
         Some(build.unicast_acceptor.clone()),
         Some((webrtc.clone(), webrtc_admission.clone(), webrtc_ice)),
-        build.protocols.take(),
+        build.take_protocols(),
     );
     // We subscribe, background-connect to the rendezvous, and — for a plain
     // join — `daemon::run` defers co-hosting our own (same seed-id) rendezvous
