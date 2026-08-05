@@ -26,6 +26,21 @@ pub mod resolver;
 pub mod seal;
 mod wordlist;
 
+/// The forked `iroh-base` this crate's types are built on, re-exported whole.
+///
+/// **Take it from here, never as your own dependency.** `EndpointAddr`,
+/// `RelayUrl` and the key types appear in this crate's public signatures, so a
+/// consumer that declares `iroh-base` itself gets the published crate and its
+/// values stop being the ones our functions accept — an `E0308` between two
+/// types with the same name and version.
+///
+/// This is the door a consumer with no `fofoca` dependency uses: the wire
+/// vocabulary needs `iroh-base` alone (no QUIC, no TLS, no DNS, no tokio), so
+/// depending on this crate is far cheaper than depending on the engine, and it
+/// still avoids a `[patch.crates-io]` — which cargo honours only in a workspace
+/// root and never inherits.
+pub use iroh_base;
+
 pub use crypto::{Password, TicketAuth, ct_eq};
 pub use identity::{Identity, encode_pubkey};
 pub use mesh::{

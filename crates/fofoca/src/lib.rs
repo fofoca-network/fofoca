@@ -98,6 +98,35 @@ pub use lookup::RENDEZVOUS_RELAY_LADDER;
 // taking its own (version-matched) `async-trait` dependency.
 pub use async_trait::async_trait;
 
+/// The forked `iroh` this engine is built against, re-exported whole.
+///
+/// **Take iroh from here, never as your own dependency.** The engine needs a
+/// forked iroh (relay teardown, mapped-addrs eviction), and a consumer that
+/// declares `iroh` itself gets the published one — two `iroh` crates in one
+/// graph, at which point an `Endpoint` from one will not satisfy a signature
+/// expecting the other. That failure is an `E0308` on types that look
+/// identical, pointing nowhere near the manifest at fault.
+///
+/// Reaching it through this re-export is what lets a consumer carry **no**
+/// `[patch.crates-io]` at all: cargo honours a patch only in a workspace root
+/// and never inherits one, so every alternative means restating our pins by
+/// hand in every consumer, silently wrong the moment one drifts.
+///
+/// This does not contradict "iroh stays an internal detail" — it enforces it.
+/// The detail is now reached through one door instead of copied into every
+/// consumer's manifest.
+pub use iroh;
+
+/// The mainline-DHT address-lookup provider, re-exported for the same reason as
+/// [`iroh`]: it is forked to pin iroh, so a consumer naming the published crate
+/// would put a second iroh in the graph. Gated on the feature that pulls it.
+#[cfg(feature = "dht")]
+pub use iroh_mainline_address_lookup;
+/// The mDNS address-lookup provider — same reasoning as
+/// [`iroh_mainline_address_lookup`], gated on `mdns`.
+#[cfg(feature = "mdns")]
+pub use iroh_mdns_address_lookup;
+
 // Shared config for the crate's `proptest!` blocks. Overrides the default
 // failure-persistence path so regression seeds land in
 // `tests/proptest-regressions` rather than a `proptest-regressions` folder
