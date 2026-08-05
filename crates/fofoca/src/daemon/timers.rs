@@ -75,10 +75,23 @@ fn warn_on_high_resident_memory(
 /// representative one (post hole-punch upgrade), unlike the `NeighborUp`
 /// snapshot which skews `relay`. Gated on `debug` being live so the
 /// per-peer `remote_info` round-trips are skipped at the default level.
-pub(crate) async fn tick_state_refresh(state: &EventLoopState, endpoint: &Endpoint) {
+///
+/// Takes `&mut` because it also drains [`IdleCounters`](super::state::IdleCounters)
+/// onto the census line — this tick is the reporting interval for them.
+pub(crate) async fn tick_state_refresh(state: &mut EventLoopState, endpoint: &Endpoint) {
     state.write_peer_count();
     let roster_len = state.peers.len();
     let link_len = state.linked_endpoints.len();
+
+    // Drained on every path, including the silent-partition return below: a
+    // counter that survived one census would fold that interval's work into
+    // the next line's delta and read as a spike that never happened.
+    // `wakeups` is bumped *after* each arm body, so this iteration's own bump
+    // lands in the next interval — and the previous census's bump landed in
+    // this one. The two cancel: a line's `wakeups` still equals the sum of its
+    // own arm columns. Do not "correct" it by adding one here; that
+    // double-counts the census iteration and inflates the total every interval.
+    let idle = state.idle.take();
 
     if state.meshed && link_len == 0 && roster_len > 0 {
         tracing::warn!(
@@ -99,12 +112,30 @@ pub(crate) async fn tick_state_refresh(state: &EventLoopState, endpoint: &Endpoi
     // so a churn-proportional leak reads as a rising slope right next to the
     // flap counts — no external `ps` sampler needed (0 if it is unreadable on
     // this platform).
+    //
+    // The `idle_*` fields ride here rather than on lines of their own because
+    // this one already fires on a fixed cadence at `info` under a pinned
+    // target, so it survives a release build (base level `error`) with no
+    // `RUST_LOG` surgery — and the arms being counted fire up to 150×/min,
+    // which is far too often to afford a line each. Deltas, not totals: a
+    // reader needs no arithmetic, and a rotated log cannot corrupt the series.
     tracing::info!(
         target: "fofoca::lifecycle",
         roster_len,
         link_len,
         meshed = state.meshed,
         peak_resident_memory_mb = resident_memory::peak_resident_memory_mb().unwrap_or(0),
+        idle_wakeups = idle.wakeups,
+        idle_prune = idle.prune,
+        idle_alive = idle.alive,
+        idle_sweep = idle.sweep,
+        idle_heal = idle.heal,
+        idle_reclaim = idle.reclaim,
+        idle_antientropy = idle.antientropy,
+        idle_state_refresh = idle.state_refresh,
+        idle_linkstate = idle.linkstate,
+        idle_external = idle.external,
+        idle_broadcasts = idle.broadcasts,
         "mesh census"
     );
 

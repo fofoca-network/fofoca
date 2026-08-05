@@ -28,6 +28,7 @@ pub(crate) async fn tick_alive(
     if let Ok(bytes) = msg.serialize() {
         let _ = sender.broadcast(Bytes::from(bytes)).await;
     }
+    state.idle.broadcasts += 1;
     state.last_sent_at = Instant::now();
     tracing::trace!("alive keepalive broadcast");
 }

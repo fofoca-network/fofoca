@@ -127,6 +127,7 @@ pub(crate) async fn broadcast_digest(
         return;
     };
     tracing::trace!(ids = total_ids, "anti-entropy digest broadcast");
+    state.idle.broadcasts += 1;
     broadcast_msg(
         sender,
         &Message::new_digest(mesh, author, body).signed(&state.identity),
@@ -261,6 +262,7 @@ async fn broadcast_state_digest(
     let Ok(body) = MessageBody::new(json) else {
         return;
     };
+    state.idle.broadcasts += 1;
     broadcast_msg(
         sender,
         &Message::new_channel_digest(origin.mesh, origin.author, body, channel)

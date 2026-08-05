@@ -412,6 +412,7 @@ async fn linkstate_arm(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
     let Ok(body) = crate::protocol::MessageBody::new(json) else {
         return;
     };
+    state.idle.broadcasts += 1;
     // Retained locally for the same reason the vector is fed into our own
     // routing table above: gossip never loops a broadcast back. Every tick
     // mints a fresh `seq`, so an unretained vector is one more message our
@@ -585,14 +586,22 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
 
     loop {
         tokio::select! {
-            () = sleep_until_opt(state.ping_round.as_ref().map(|round| round.deadline)) =>
-                finalize_ping_round(&mut state, sink.as_ref()),
-            () = sleep_until_opt(app.earliest_poll_deadline()) => app.poll_deadline_elapsed(),
-            () = sleep_until_opt(app.earliest_deadline()) =>
-                app.expire_deadlines(TokioInstant::now()),
+            () = sleep_until_opt(state.ping_round.as_ref().map(|round| round.deadline)) => {
+                state.idle.external += 1;
+                finalize_ping_round(&mut state, sink.as_ref());
+            }
+            () = sleep_until_opt(app.earliest_poll_deadline()) => {
+                state.idle.external += 1;
+                app.poll_deadline_elapsed();
+            }
+            () = sleep_until_opt(app.earliest_deadline()) => {
+                state.idle.external += 1;
+                app.expire_deadlines(TokioInstant::now());
+            }
             ipc_msg = recv_opt(&mut ipc_rx) => match ipc_msg {
                 None => ipc_rx = None,
                 Some((cmd, resp_tx)) => {
+                    state.idle.external += 1;
                     let ctx = parts.ctx(&sender);
                     let req = super::app::IpcRequest {
                         cmd,
@@ -607,21 +616,30 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
             http_req = recv_opt(&mut http_rx) => match http_req {
                 None => http_rx = None,
                 Some(req) => {
+                    state.idle.external += 1;
                     let ctx = parts.ctx(&sender);
                     app.handle_http(req, &mut state, &ctx).await;
                 }
             },
             event = receiver.next(), if state.gossip_open => {
+                state.idle.external += 1;
                 let ctx = parts.ctx(&sender);
                 gossip::handle_gossip_event(event, &mut state, &mut app, &ctx).await;
             }
             // Inbound unicast rides the *same* validate + dedup path as gossip (`ingest`).
             frame = recv_opt(&mut unicast_rx) => match frame {
-                Some(bytes) => gossip::ingest(bytes, &mut state, &mut app, &parts.ctx(&sender)).await,
+                Some(bytes) => {
+                    state.idle.external += 1;
+                    gossip::ingest(bytes, &mut state, &mut app, &parts.ctx(&sender)).await;
+                }
                 None => unicast_rx = None,
             },
-            _ = intervals.prune.tick() => timers::tick_prune(&mut state, sink.as_ref()),
+            _ = intervals.prune.tick() => {
+                state.idle.prune += 1;
+                timers::tick_prune(&mut state, sink.as_ref());
+            }
             _ = intervals.alive.tick() => {
+                state.idle.alive += 1;
                 let ctx = parts.ctx(&sender);
                 alive_arm(&mut anchors, &mut state, &ctx).await;
                 // Retry WebRTC negotiation for any peer we still have no
@@ -634,11 +652,13 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
                 crate::transport::webrtc::retry_sessions(&mut state, &ctx);
             }
             _ = intervals.sweep.tick() => {
+                state.idle.sweep += 1;
                 sweep_arm(&mut anchors, &mut state, sink.as_ref());
                 let ctx = parts.ctx(&sender);
                 app.on_tick(&mut state, &ctx).await;
             }
             _ = intervals.heal.tick() => {
+                state.idle.heal += 1;
                 let (mono_gap, wall_gap) = timers::note_tick_gap("heal", &mut anchors.heal, &mut anchors.heal_wall, Duration::from_secs(heal_interval_secs()));
                 if state.gossip_open {
                     let ctx = parts.ctx(&sender);
@@ -669,19 +689,28 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
             }
             // A bootstrap rung chosen off-loop (startup probe / beacon self-monitor); apply it cheaply.
             // `Ok(())` only: a closed channel (impossible while the beacon params live) disables the arm.
-            Ok(()) = rung_rx.changed() => apply_rung_change(&mut rendezvous_params, &endpoint, &mut rendezvous, &rung_rx),
+            // Counted `external`: like the probe verdict below it is beacon
+            // work driven from off-loop, not by one of our maintenance tickers,
+            // and it is silent on a settled daemon — so `external` still reads
+            // 0 when idle while `wakeups` stays equal to the column sum.
+            Ok(()) = rung_rx.changed() => {
+                state.idle.external += 1;
+                apply_rung_change(&mut rendezvous_params, &endpoint, &mut rendezvous, &rung_rx);
+            }
             // The off-loop probe-before-claim answered. Its own arm rather
             // than a poll at the next heal tick: the probe already cost up to
             // `HEAL_PROBE_SECS`, and making a free rendezvous wait out another
             // 15s interval before anyone binds it would hand back the claim
             // latency this change was meant to leave untouched.
             found_rival = beacon::probe_verdict(&mut rival_probe) => {
+                state.idle.external += 1;
                 let claimed = beacon::claim_after_probe(&rendezvous_params, &endpoint, &mut rendezvous, found_rival).await;
                 if claimed {
                     schedule_rival_recheck(&mut state, cohost, &rendezvous_params, &endpoint);
                 }
             }
             _ = intervals.reclaim.tick() => {
+                state.idle.reclaim += 1;
                 let ctx = parts.ctx(&sender);
                 let arm = CohostArm { policy: cohost, params: &rendezvous_params, started };
                 // The rival re-check shed rides this ticker, NOT the heal tick:
@@ -698,11 +727,18 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
                 }
             }
             _ = intervals.antientropy.tick() => {
+                state.idle.antientropy += 1;
                 let ctx = parts.ctx(&sender);
                 antientropy_arm(&mut anchors, &mut state, &ctx).await;
             }
-            _ = intervals.state_refresh.tick() => timers::tick_state_refresh(&state, &endpoint).await,
+            // Counted before the census reads them, so the tick that reports an
+            // interval is itself in that interval's numbers.
+            _ = intervals.state_refresh.tick() => {
+                state.idle.state_refresh += 1;
+                timers::tick_state_refresh(&mut state, &endpoint).await;
+            }
             _ = intervals.linkstate.tick() => {
+                state.idle.linkstate += 1;
                 let ctx = parts.ctx(&sender);
                 linkstate_arm(&mut state, &ctx).await;
             }
@@ -715,6 +751,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
             req = recv_opt(&mut external_req_rx) => match req {
                 None => external_req_rx = None,
                 Some(req) => {
+                    state.idle.external += 1;
                     let ctx = parts.ctx(&sender);
                     if app.handle_session(req, &mut state, &ctx).await {
                         state.last_sent_at = Instant::now();
@@ -727,6 +764,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
                 break;
             }
         }
+        state.idle.wakeups += 1;
         app.drain_surfaced();
     }
 
