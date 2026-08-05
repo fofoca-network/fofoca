@@ -23,8 +23,7 @@ the p2panda-derived rules the split follows.
 
 ## Crate layout
 
-Dependencies point strictly downward, except `fofoca-blobs`, which sits
-*above* the engine because it needs endpoint construction.
+Dependencies point strictly downward.
 
 ```
 fofoca-util          no deps of consequence          (13 crates resolved)
@@ -34,13 +33,17 @@ fofoca-util          no deps of consequence          (13 crates resolved)
         ├── fofoca-reassembly
         ├── fofoca-directory
         └── fofoca         + iroh, iroh-gossip  (436 crates)
-              ├── fofoca-ffi
-              └── fofoca-blobs
+              └── fofoca-ffi
+
+fofoca-blobs         + bao-tree, blake3              (standalone)
 ```
 
-The load-bearing property: **only `fofoca` and `-blobs` name
-`iroh`**. `fofoca-protocol` builds on `iroh-base` alone and pulls no
-tokio, QUIC, TLS or DNS; `-doc` and `-logging` inherit that.
+`fofoca-blobs` is off the tree entirely: it depends on nothing in this
+workspace. See carried change 18.
+
+The load-bearing property: **only `fofoca` names `iroh`**. `fofoca-protocol`
+builds on `iroh-base` alone and pulls no tokio, QUIC, TLS or DNS; `-doc` and
+`-logging` inherit that.
 
 ## Where things moved
 
@@ -56,7 +59,7 @@ workspace was also renamed from `agent-habilis-mesh/` to `fofoca/`.
 | `agent-habilis-mesh/src/logging/` | `fofoca-logging/src/` |
 | `agent-habilis-mesh/src/reassembly/` | `fofoca-reassembly/src/` |
 | `agent-habilis-mesh/src/directory/` | `fofoca-directory/src/` |
-| `agent-habilis-mesh/src/blob/` | `fofoca-blobs/src/` |
+| `agent-habilis-mesh/src/blob/` | deleted — see carried change 18 |
 | `agent-habilis-mesh-ffi` | `fofoca-ffi` |
 | everything else | unchanged in `fofoca` (was `agent-habilis-mesh`) |
 
@@ -98,8 +101,9 @@ Divergences from upstream, in the order they were made.
    `fofoca-util` gating `bounded_read`, which is the only tokio user
    below the engine.
 9. Dropped the unused `anstyle` / `anstream` dependencies (zero references).
-10. `ops::blob` removed — `fofoca-blobs` depends on the engine, so the
-    engine cannot re-export it. Consumers take the crate directly.
+10. `ops::blob` removed — the blob-transfer crate depended on the engine, so
+    the engine could not re-export it. Superseded by carried change 18, which
+    deleted that crate.
 11. `public-surface.txt` moved to the workspace root and regenerated, since it
     now spans eight crates.
 
@@ -145,11 +149,35 @@ Divergences from upstream, in the order they were made.
     `scripts/measure-ffi-cost.sh` stayed behind — they measure mallorca's
     binary, not this workspace.
 
+**From reclaiming the `fofoca-blobs` name:**
+
+18. The blob-transfer crate — upstream's `agent-habilis-mesh/src/blob/`, carved
+    out by change 6 — was **deleted**, and the name reassigned to an unrelated
+    crate brought in from `agent-habilis/agent-share`.
+
+    It was dead code here: no `use fofoca_blobs::` anywhere in the workspace, no
+    reverse edge in `Cargo.lock`, and `fofoca-ffi` — mallorca's only entry point
+    — never depended on it. It is recoverable from history if a consumer ever
+    wants it back; upstream `agent-gossip` still carries it under `src/blob/`.
+
+    What took the name is a BLAKE3/bao verified-byte-range store: outboards,
+    chunk availability, and a `BlobStore` seam over bytes the caller already
+    owns, with in-memory, filesystem, OPFS and `IndexedDB` backends. It shares
+    no code, no wire format and no dependency with what it replaced — the two
+    crates only ever shared a name.
+
+    Two invariants got stronger as a result. "Only `fofoca` and `-blobs` name
+    `iroh`" became **only `fofoca` names `iroh`**, and the dependency graph lost
+    its one upward edge: the new crate depends on nothing in this workspace, so
+    it sits beside the tree rather than above the engine. Its own
+    `tests/isolation.rs` is what keeps that true.
+
 ## Patch pins — do not drop
 
 `[patch.crates-io]` in the workspace root pins `iroh`, `iroh-base` and
-`iroh-dns` to `fofoca-network/iroh` rev `dcbdc1521caf680d483b2d8eec669a7997e9edf3`
-(mapped_addrs eviction fix) and `iroh-gossip` to `fofoca-network/iroh-gossip` rev
+`iroh-dns` to `fofoca-network/iroh` rev `f9cb1f4fd1b69e904770516029fa0afac0fd3ce4`
+(mapped_addrs eviction + relay teardown fixes) and `iroh-gossip` to
+`fofoca-network/iroh-gossip` rev
 `c779c0661fc9429e86852570be9bdc00fb47fdd9` (connection-churn leak fix).
 
 `iroh-base` must stay pinned to the **same repo and rev as `iroh`**: the forked

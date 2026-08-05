@@ -15,8 +15,7 @@ library and joins a mesh from its own process.
 
 ## The crates
 
-Dependencies point strictly downward, except `fofoca-blobs`, which sits *above*
-the engine because it needs endpoint construction.
+Dependencies point strictly downward.
 
 ```
 fofoca-util          host helpers, no deps of consequence   (13 crates resolved)
@@ -26,13 +25,22 @@ fofoca-util          host helpers, no deps of consequence   (13 crates resolved)
         ├── fofoca-reassembly   multipart body reassembly
         ├── fofoca-directory    discovery advertisement codec
         └── fofoca         the engine, + iroh, iroh-gossip (436 crates)
-              ├── fofoca-ffi     the C ABI
-              └── fofoca-blobs   out-of-band content-addressed transfer
+              └── fofoca-ffi     the C ABI
+
+fofoca-blobs         verified byte ranges, + bao-tree, blake3  (standalone)
 ```
 
-The load-bearing property: **only `fofoca` and `fofoca-blobs` name `iroh`**.
-`fofoca-protocol` builds on `iroh-base` alone and pulls no tokio, QUIC, TLS or
-DNS; `-doc`, `-logging`, `-reassembly` and `-directory` inherit that.
+The load-bearing property: **only `fofoca` names `iroh`**. `fofoca-protocol`
+builds on `iroh-base` alone and pulls no tokio, QUIC, TLS or DNS; `-doc`,
+`-logging`, `-reassembly` and `-directory` inherit that.
+
+[`fofoca-blobs`](crates/fofoca-blobs) is off the tree: it depends on nothing
+else here. It is a BLAKE3/bao store of verification metadata — outboards, root
+bindings, which ranges are held — for bytes that live wherever the caller
+already keeps them, so a peer can serve verified ranges of a file it did not
+have to copy first. It runs on a host and in a browser, and it knows nothing
+about meshes; the engine does not know about it either. The two meet in a
+consumer.
 
 That is the whole reason the split exists. Cargo features cannot be selected
 per-consumer across a dependency edge, so a consumer that wants the wire
@@ -59,7 +67,7 @@ separate cadences.
 
 ```bash
 cargo check --workspace
-cargo test  --workspace          # 19 suites, 411 tests
+cargo test  --workspace          # 22 suites, 446 tests
 ```
 
 The `mdns` and `dht` features (default on) gate iroh's discovery closure, and
@@ -70,6 +78,19 @@ worth checking too:
 cargo check --workspace --no-default-features
 cargo check --workspace --all-features
 ```
+
+`fofoca-blobs` is the one crate that also builds for the browser, and its OPFS
+and `IndexedDB` backends exist on no other target, so CI checks that leg
+separately:
+
+```bash
+rustup target add wasm32-unknown-unknown
+cargo check  --target wasm32-unknown-unknown -p fofoca-blobs --all-targets
+cargo clippy --target wasm32-unknown-unknown -p fofoca-blobs --all-targets -- -D warnings
+```
+
+Its eight OPFS tests need a real browser and are not in CI:
+`wasm-pack test --headless --chrome crates/fofoca-blobs`.
 
 To build the C ABI as a static library:
 

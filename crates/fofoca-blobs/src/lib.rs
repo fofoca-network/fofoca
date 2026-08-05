@@ -1,331 +1,220 @@
-//! The blob channel — direct point-to-point transfer of payloads too large for a
-//! gossip frame, off the gossip plane entirely. The producer serves the content,
-//! content-addressed by SHA-256, over a dedicated QUIC endpoint and mints a bare
-//! [`ticket::BlobTicket`] referencing it. The consumer dials the producer,
-//! presents the ticket's bearer secret, and streams the bytes — verified against
-//! the advertised hash.
+//! Verified byte ranges over data you already own.
 //!
-//! Layering: a *transport* parallel to the gossip binding — its own ALPN, its own
-//! bearer-secret handshake, its own bare-base58 ticket. The bytes never touch
-//! gossip; only the small reference does, and getting that reference to the
-//! consumer is the application's job (it is a short string, so a single
-//! `fofoca::ops::send_app` frame carries it).
+//! A store of BLAKE3/bao verification metadata — outboards, root bindings, and
+//! which ranges are held — for bytes that live somewhere this crate does not
+//! control. That inversion is the whole design:
 //!
-//! Raw bytes, not text: unlike a frame body, nothing here is UTF-8-constrained or
-//! re-encoded, and the transfer streams in bounded chunks so memory stays flat
-//! regardless of size.
+//! > **`iroh-blobs` owns its data. This does not.**
 //!
-//! Producing is path-based — [`BlobServer::register`] stream-hashes a file and
-//! snapshots it into a spool dir — so an in-memory payload has to be written to a
-//! temp file first. A streaming produce path would have to rework hashing and the
-//! `MAX_BLOB_BYTES` check, which cannot run before the length is known.
+//! `iroh-blobs` takes bytes and stores them under a hash, so it cannot serve a
+//! blob until it has read every byte and built its tree. That turns listing a
+//! large share from a metadata walk into a full read, re-hashes on every editor
+//! save, and makes browsing a 500 GB tree while reading three files impossible.
+//! Here the blob *is* the caller's file, wherever it already is; the store holds
+//! only the sidecar metadata beside it.
+//!
+//! The second first-class concept, which a content-addressed store has no room
+//! for:
+//!
+//! > **A root is bound to a version: `(size, mtime) -> root`.**
+//!
+//! Mutable files are supported, not a violation. A file whose size or mtime has
+//! moved since its outboard was built is *unbound*, and an unbound file is not
+//! served rather than being served wrongly.
+//!
+//! # What this crate is not
+//!
+//! No transport, no ALPN, no framing. No discovery. No download scheduler — that
+//! needs peer budgets and connection state, and making it generic is how
+//! `iroh-blobs` gets rebuilt by accident. No GC, no tags, no collections: the
+//! caller's own directory listing is the collection.
+//!
+//! It also does not know what a mesh is, and depends on nothing else in this
+//! workspace. It takes a key, a size, an mtime and byte ranges. See
+//! `tests/isolation.rs`.
+//!
+//! # Both runtimes
+//!
+//! The same store runs under tokio and in a browser, so every future here is
+//! `?Send`: a `MemStore` in wasm holds `Rc`-flavoured state and an OPFS backend
+//! is pinned to one Worker thread. Callers that need `Send` get it from their
+//! own backend, not from this trait.
 
-use std::path::PathBuf;
-use std::time::Duration;
+use std::future::Future;
 
 use anyhow::Result;
-use iroh::Endpoint;
+use bao_tree::BlockSize;
 
-use fofoca_protocol::mesh::LookupOpts;
-
-mod consume;
-mod produce;
-mod store;
-pub mod ticket;
-
-pub use consume::fetch;
-pub use produce::BlobServer;
-pub use ticket::BlobTicket;
-
-/// An opaque content-group id the blob layer keys evictable blobs by.
+/// The filesystem backend.
 ///
-/// Whatever the application groups content by — a task, a job, a conversation —
-/// it maps into this; the blob layer never names that type. `evict_content` then
-/// drops a whole group at once.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ContentId(String);
+/// Host-only, and gated on the target rather than a feature so it cannot be
+/// misconfigured: a wasm build simply does not have it, and `OpfsStore` is what
+/// a browser uses instead. `std::fs` is not a dependency, so the crate stays
+/// wasm-clean either way.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod fs;
+/// The browser backend that needs no Worker. See the module docs.
+#[cfg(target_arch = "wasm32")]
+pub mod idb;
+pub mod mem;
+/// The browser backend. Worker-only; see the module docs.
+#[cfg(target_arch = "wasm32")]
+pub mod opfs;
+mod sidecar;
+pub mod sparse;
+mod verify;
 
-impl ContentId {
+#[cfg(not(target_arch = "wasm32"))]
+pub use fs::FsStore;
+#[cfg(target_arch = "wasm32")]
+pub use idb::IdbStore;
+pub use mem::MemStore;
+#[cfg(target_arch = "wasm32")]
+pub use opfs::OpfsStore;
+pub use sparse::SparseBlocks;
+pub use verify::{
+    Outboard, Root, build_outboard, decode_into, decode_sparse, encode_from_outboard, encode_ranges,
+};
+
+/// Re-exported so a caller can name a range set without depending on
+/// `bao-tree` directly.
+///
+/// The alternative is every consumer taking the dependency to spell one type,
+/// which would put the verification format in their manifests and make swapping
+/// it a change to all of them rather than to this crate.
+pub use bao_tree::{ChunkNum, ChunkRanges};
+
+/// Chunk group size: 64 `KiB`, i.e. 2^6 chunks of 1 `KiB`.
+///
+/// Measured rather than assumed. Against 16 `KiB` this is **four
+/// times smaller outboards** — 0.097 % of file size against 0.390 % — at
+/// indistinguishable construction speed, and it lines up with the 128 `KiB` reads
+/// the kernel issues through NFS. The cost is coarser partial-seed granularity
+/// and more bytes discarded when a range fails to verify.
+pub const BLOCK_SIZE: BlockSize = BlockSize::from_chunk_log(6);
+
+/// Bytes per chunk group, derived so the two can never disagree.
+pub const CHUNK_GROUP_BYTES: u64 = 1024 << 6;
+
+/// What a caller knows about a file, independent of where the bytes live.
+///
+/// The store never opens this itself — that is the backend's job — and never
+/// interprets `key`. Native backends use a path; a browser backend uses an OPFS
+/// name. Keeping it opaque is what stops this crate learning about filesystems.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileId {
+    /// Opaque to this crate. Whatever the backend can reopen the bytes with.
+    pub key: String,
+    /// Size at the moment the caller looked.
+    pub size: u64,
+    /// Seconds since the epoch; `0` when unknown.
+    pub mtime: i64,
+}
+
+/// The chunk ranges a file of `size` bytes actually occupies.
+///
+/// Load-bearing, and the source of a bug worth naming: **`ChunkRanges::all()` is
+/// unbounded** — `0..∞`, not `0..len`. So a request for "everything" is never a
+/// subset of what any store holds, and a completeness check written the obvious
+/// way rejects a store that is in fact complete. Clamp a caller's request to
+/// this before comparing it with anything.
+#[must_use]
+pub fn extent_of(size: u64) -> ChunkRanges {
+    ChunkRanges::from(..ChunkNum::chunks(size))
+}
+
+impl FileId {
+    /// Whether `other` describes the same file *version* as this one.
+    ///
+    /// The comparison guarding every read. Two files at one key with different
+    /// sizes or mtimes are different content, and serving one under the other's
+    /// root is the silent-corruption case this exists to prevent.
     #[must_use]
-    pub fn new(id: &str) -> Self {
-        Self(id.to_owned())
+    pub fn same_version(&self, other: &Self) -> bool {
+        self.key == other.key && self.size == other.size && self.mtime == other.mtime
     }
 }
 
-/// One offload: which file, where to spool it, which content group it belongs to,
-/// and the mesh password it inherits (so a scraped ticket cannot be redeemed
-/// without it).
-#[derive(Debug)]
-pub struct OffloadRequest {
-    pub path: PathBuf,
-    pub spool_dir: PathBuf,
-    pub content_id: ContentId,
-    pub password: Option<fofoca_protocol::crypto::Password>,
-}
-
-/// Offload a file over the blob channel and return the [`BlobTicket`] that
-/// fetches it back. Lazily binds `server` on the first call (into
-/// `request.spool_dir`), reusing it thereafter — so a caller holds one
-/// `Option<BlobServer>` for its lifetime and passes it here each time.
+/// A store of verification metadata for bytes held elsewhere.
 ///
-/// The ticket is the whole result: `encode()` it into whatever reference the
-/// application uses, ship that string over gossip, and the peer calls
-/// [`fetch`]. Content-addressed dedup means offloading identical bytes twice
-/// returns the first ticket without re-paying the hash or the Argon2 stretch.
-///
-/// # Errors
-/// Binding the blob server, hashing, or snapshotting the file fails (e.g. the
-/// file is unreadable or exceeds `MAX_BLOB_BYTES`).
-/// # Panics
-/// Panics if an internal invariant is violated.
-pub async fn offload(
-    server: &mut Option<BlobServer>,
-    lookups: &LookupOpts,
-    request: OffloadRequest,
-) -> Result<BlobTicket> {
-    let OffloadRequest {
-        path,
-        spool_dir,
-        content_id,
-        password,
-    } = request;
-    if server.is_none() {
-        *server = Some(BlobServer::start(lookups.clone(), spool_dir, password).await?);
-    }
-    server
-        .as_ref()
-        .expect("server set above")
-        .register(&path, content_id)
-        .await
-}
+/// Futures are `?Send` on purpose — see the module docs. Implementors are used
+/// through generics rather than `dyn`, so a backend never pays for type erasure
+/// it does not need.
+pub trait BlobStore {
+    /// Adopt content this peer already holds at `file.key`: hash it, bind it,
+    /// and mark it fully servable.
+    ///
+    /// What an origin does the first time someone wants to pull one of its own
+    /// files from a third party.
+    ///
+    /// **Required rather than provided, and that is the design showing
+    /// through.** A default written in terms of [`Self::write_verified`] would
+    /// force every backend to *copy* the bytes into itself, which is exactly
+    /// the ownership model this crate exists to avoid. A filesystem backend
+    /// implements this by recording metadata beside a file it never reads
+    /// again; an in-memory one has nowhere else to put the bytes and does copy.
+    /// The difference is the point, so the trait asks rather than assumes.
+    fn insert_complete(&self, file: &FileId, bytes: &[u8]) -> impl Future<Output = Result<Root>>;
 
-/// ALPN for the blob channel — a raw bidirectional QUIC stream with its own
-/// protocol identity, distinct from `GOSSIP_ALPN` and the application's own bridge
-/// ALPN, so a mismatched dial is rejected at the QUIC handshake.
-pub const BLOB_ALPN: &[u8] = b"fofoca/blob/1";
+    /// The root this key is bound to, if the file still matches the version the
+    /// binding was made for.
+    ///
+    /// `None` means *do not serve this*: either nothing was ever bound, or the
+    /// file moved underneath and the outboard describes content that is gone.
+    /// Both are ordinary, neither is an error.
+    fn bind(&self, file: &FileId) -> impl Future<Output = Result<Option<Root>>>;
+    /// Record that `file` hashes to `root`, replacing any previous binding.
+    fn set_bind(&self, file: &FileId, root: Root) -> impl Future<Output = Result<()>>;
 
-/// Length of the bearer-capability secret carried in a blob ticket, and of the
-/// auth token opening the fetch stream (the raw secret, or its Argon2id stretch
-/// when passworded — same size either way).
-pub const SECRET_LEN: usize = 32;
+    /// Which chunk ranges of `root` this store can serve right now.
+    ///
+    /// Empty for a root it has never seen. This is the answer to "what can I
+    /// seed", and the source for both the availability grid and a scheduler.
+    fn present(&self, root: Root) -> impl Future<Output = Result<ChunkRanges>>;
 
-/// Length of the SHA-256 content hash that addresses a blob.
-pub const HASH_LEN: usize = 32;
+    /// The outboard for `root`, if one has been built.
+    fn outboard(&self, root: Root) -> impl Future<Output = Result<Option<Outboard>>>;
+    /// Store an outboard, making its ranges servable.
+    fn put_outboard(
+        &self,
+        root: Root,
+        outboard: Outboard,
+        present: ChunkRanges,
+    ) -> impl Future<Output = Result<()>>;
 
-/// Fetch stream close code: the presented bearer secret matched no blob's secret.
-pub const BAD_SECRET: u32 = 1;
+    /// Read verified bytes for `ranges` of the file at `file`.
+    ///
+    /// Takes a [`FileId`] rather than a bare [`Root`] because a store does not
+    /// necessarily hold the bytes: a filesystem backend reads them back out of
+    /// the caller's own file, and needs to know which one. The root is resolved
+    /// through [`Self::bind`], so **the version gate applies to every read** —
+    /// a file that moved under the store is refused rather than served from a
+    /// stale outboard.
+    ///
+    /// Errors rather than returning short when a requested range is absent: a
+    /// short read is how a half-written mirror silently truncates a file, and
+    /// distinguishing "EOF" from "I do not have this" is the difference.
+    fn read_ranges(
+        &self,
+        file: &FileId,
+        ranges: &ChunkRanges,
+    ) -> impl Future<Output = Result<Vec<u8>>>;
 
-/// Fetch stream close code: the requested content hash is not in the store.
-pub const UNKNOWN_BLOB: u32 = 2;
-
-/// Fetch stream close code: an orderly done from the producer.
-pub const DONE: u32 = 0;
-
-/// Best-effort wait (≤5s) for the endpoint to publish reachable addresses, so a
-/// freshly-minted ticket resolves immediately. Never blocks forever.
-async fn wait_online(endpoint: &Endpoint) {
-    let _ = tokio::time::timeout(Duration::from_secs(5), endpoint.online()).await;
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{BlobServer, ContentId, fetch};
-    use fofoca_protocol::mesh::LookupOpts;
-    use rand::RngCore;
-    use std::fs;
-    use std::path::PathBuf;
-
-    /// A throwaway file under the OS temp dir holding `bytes`; the caller drops it.
-    fn temp_file(bytes: &[u8]) -> PathBuf {
-        let path = std::env::temp_dir().join(format!("fofoca-blob-src-{}", rand::rng().next_u64()));
-        fs::write(&path, bytes).expect("write temp file");
-        path
-    }
-
-    fn temp_spool() -> PathBuf {
-        std::env::temp_dir().join(format!("fofoca-blob-spool-{}", rand::rng().next_u64()))
-    }
-
-    /// Start a loopback producer serving `payload`, fetch it back over a second
-    /// loopback endpoint, and return the fetched bytes.
-    async fn round_trip(payload: &[u8]) -> Vec<u8> {
-        let server = BlobServer::start(LookupOpts::loopback(), temp_spool(), None)
-            .await
-            .expect("start producer");
-        let src = temp_file(payload);
-        let ticket = server
-            .register(&src, ContentId::new("blob-test-content"))
-            .await
-            .expect("register");
-        let mut out = Vec::new();
-        fetch(&ticket, &mut out, None).await.expect("fetch");
-        fs::remove_file(&src).ok();
-        server.shutdown().await;
-        out
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn round_trips_a_blob_byte_for_byte() {
-        let payload = vec![7u8; 200_000];
-        assert_eq!(round_trip(&payload).await, payload);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn round_trips_an_empty_blob() {
-        assert_eq!(round_trip(b"").await, b"");
-    }
-
-    /// The whole produce → reference → consume path through the **public** surface
-    /// only: [`offload`] mints a ticket, `encode`/`decode` round-trips it as the
-    /// string an application would ship over gossip, and [`fetch`] streams the
-    /// bytes back. Nothing here names an application type, which is the point —
-    /// this is the shape any consumer writes, whatever its data model.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn offload_to_fetch_needs_no_application_type() {
-        let payload: Vec<u8> = (0..40_000_u32).map(|byte| byte.to_le_bytes()[0]).collect();
-        let src = temp_file(&payload);
-        let mut server: Option<BlobServer> = None;
-
-        let ticket = super::offload(
-            &mut server,
-            &LookupOpts::loopback(),
-            super::OffloadRequest {
-                path: src.clone(),
-                spool_dir: temp_spool(),
-                content_id: ContentId::new("generic-consumer-group"),
-                password: None,
-            },
-        )
-        .await
-        .expect("offload");
-
-        // Raw bytes, so no base64/UTF-8 detour: the payload cycles 0..=255,
-        // which a frame body would reject outright.
-        let wire = ticket.encode();
-        let decoded = super::BlobTicket::decode(&wire).expect("ticket round-trips as a string");
-
-        let mut out = Vec::new();
-        fetch(&decoded, &mut out, None).await.expect("fetch");
-        assert_eq!(out, payload, "bytes must survive byte-for-byte");
-
-        // Content-addressed dedup: the same bytes offload to the same ticket
-        // without re-hashing.
-        let again = super::offload(
-            &mut server,
-            &LookupOpts::loopback(),
-            super::OffloadRequest {
-                path: src.clone(),
-                spool_dir: temp_spool(),
-                content_id: ContentId::new("generic-consumer-group"),
-                password: None,
-            },
-        )
-        .await
-        .expect("second offload");
-        assert_eq!(again.sha256_hex(), ticket.sha256_hex());
-
-        fs::remove_file(&src).ok();
-        if let Some(server) = server {
-            server.shutdown().await;
-        }
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn passworded_blob_requires_the_password() {
-        use fofoca_protocol::crypto::Password;
-        let password = Password::new("hunter2".to_owned());
-        let server =
-            BlobServer::start(LookupOpts::loopback(), temp_spool(), Some(password.clone()))
-                .await
-                .unwrap();
-        let src = temp_file(b"secret bytes");
-        let ticket = server
-            .register(&src, ContentId::new("blob-test-content"))
-            .await
-            .unwrap();
-        assert!(ticket.password, "the ticket must be password-protected");
-
-        // Missing password and a wrong password are both refused.
-        let mut out = Vec::new();
-        assert!(
-            fetch(&ticket, &mut out, None).await.is_err(),
-            "a passworded ticket must not redeem without the password"
-        );
-        out.clear();
-        assert!(
-            fetch(&ticket, &mut out, Some(Password::new("wrong".to_owned())))
-                .await
-                .is_err(),
-            "a wrong password must be refused"
-        );
-        // The mesh password fetches byte-for-byte.
-        out.clear();
-        fetch(&ticket, &mut out, Some(password))
-            .await
-            .expect("fetch");
-        assert_eq!(out, b"secret bytes");
-
-        fs::remove_file(&src).ok();
-        server.shutdown().await;
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_bad_secret_is_refused() {
-        let server = BlobServer::start(LookupOpts::loopback(), temp_spool(), None)
-            .await
-            .unwrap();
-        let src = temp_file(b"secret payload");
-        let mut ticket = server
-            .register(&src, ContentId::new("blob-test-content"))
-            .await
-            .unwrap();
-        ticket.secret = [0u8; super::SECRET_LEN]; // forge a wrong bearer secret
-        let mut out = Vec::new();
-        assert!(
-            fetch(&ticket, &mut out, None).await.is_err(),
-            "a wrong secret must be refused"
-        );
-        fs::remove_file(&src).ok();
-        server.shutdown().await;
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn an_unknown_hash_is_refused() {
-        let server = BlobServer::start(LookupOpts::loopback(), temp_spool(), None)
-            .await
-            .unwrap();
-        let src = temp_file(b"real content");
-        let mut ticket = server
-            .register(&src, ContentId::new("blob-test-content"))
-            .await
-            .unwrap();
-        ticket.sha256 = [0xabu8; super::HASH_LEN]; // a hash the store doesn't hold
-        let mut out = Vec::new();
-        assert!(
-            fetch(&ticket, &mut out, None).await.is_err(),
-            "an unknown hash must be refused"
-        );
-        fs::remove_file(&src).ok();
-        server.shutdown().await;
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_size_disagreement_is_rejected() {
-        let server = BlobServer::start(LookupOpts::loopback(), temp_spool(), None)
-            .await
-            .unwrap();
-        let src = temp_file(b"exactly this many bytes");
-        let mut ticket = server
-            .register(&src, ContentId::new("blob-test-content"))
-            .await
-            .unwrap();
-        ticket.size += 1; // producer will offer the true size, which won't match
-        let mut out = Vec::new();
-        assert!(
-            fetch(&ticket, &mut out, None).await.is_err(),
-            "a size disagreement must be rejected"
-        );
-        fs::remove_file(&src).ok();
-        server.shutdown().await;
-    }
+    /// Take bytes from a third party, verify them against `root`, and keep what
+    /// verifies — materializing them at `file`.
+    ///
+    /// `file` is the destination, and naming it here is what preserves the
+    /// crate's central property: **the store never chooses where bytes live.**
+    /// A mirror decides that; the store verifies and records. `file.size` is the
+    /// full length of the content, not of this write.
+    ///
+    /// Returns the ranges now held. A failure leaves the store unchanged, so a
+    /// peer that sends garbage costs its own bytes and nothing else.
+    fn write_verified(
+        &self,
+        file: &FileId,
+        root: Root,
+        encoded: &[u8],
+        ranges: &ChunkRanges,
+    ) -> impl Future<Output = Result<ChunkRanges>>;
 }

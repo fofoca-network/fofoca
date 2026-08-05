@@ -4,8 +4,12 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 authors = ["Caio Gondim <me@caiogondim.com>"]
-description = "out-of-band content-addressed blob transfer for fofoca"
+description = "verified byte ranges over data you already own: bao outboards, chunk availability, and the storage seam iroh-blobs lacks"
 license = "MIT"
+repository = "https://github.com/fofoca-network/fofoca"
+readme = "README.md"
+keywords = ["bao", "blake3", "verification", "p2p", "wasm"]
+categories = ["network-programming", "encoding", "wasm"]
 publish = false
 
 [lints]
@@ -15,26 +19,75 @@ workspace = true
 name = "fofoca_blobs"
 path = "src/lib.rs"
 
-# The one crate that sits *above* the engine rather than below it: blob
-# transfer needs endpoint construction, which it takes from the engine's
-# quarantined `net` facade. Nothing in the engine calls back into it, so the
-# edge stays one-way and the engine no longer carries it. See
-# docs/mesh-slimming.md.
+# **This crate must not depend on the network layer.** No `fofoca`, no
+# `fofoca-protocol`, no `iroh`. It never sees a manifest, a ticket, a mesh or an
+# ALPN — it takes a key, a size, an mtime and byte ranges, and hands back
+# verified bytes. That is what keeps the seam honest, what keeps the workspace's
+# "only `fofoca` names `iroh`" property true from this side, and what makes the
+# crate publishable on its own. Enforced by
+# `the_crate_does_not_know_about_the_network_layer` in `tests/isolation.rs`.
+#
+# Every dependency must also build for `wasm32-unknown-unknown`: the browser
+# runs the same store a host does. `tokio`, anything with `fs`, and anything
+# host-only belong behind a backend, not here.
 [dependencies]
-fofoca = { path = "../fofoca" }
-fofoca-protocol = { path = "../fofoca-protocol" }
-fofoca-util = { path = "../fofoca-util" }
-iroh.workspace = true
-tokio.workspace = true
-serde.workspace = true
-serde_json.workspace = true
+# `default-features = false` drops `fs` *and* `tokio_fsm`, and the second one is
+# the one that matters: it pulls `iroh-io`, which is std/fs-bound. `validate`
+# comes back because `valid_ranges` is how a store answers "what do I hold?".
+# Measured wasm-clean: the resulting cdylib has zero imports, and the wasm
+# dependency set carries neither `iroh-io` nor `tokio`.
+bao-tree = { version = "0.16", default-features = false, features = ["validate"] }
+blake3 = { version = "1.8.5", default-features = false, features = ["std"] }
+# `bao_tree::ChunkRanges` *is* a `range_collections::RangeSet2`, but the crate is
+# not re-exported, so iterating one needs the dependency named directly. Already
+# in the graph via bao-tree, and wasm-clean.
+range-collections = "0.4"
 anyhow.workspace = true
-bytes.workspace = true
-tracing.workspace = true
-bs58.workspace = true
-sha2.workspace = true
-rand.workspace = true
 
-[dev-dependencies]
-fofoca-protocol = { path = "../fofoca-protocol", features = ["test-fixtures"] }
-proptest.workspace = true
+# Browser-only. Kept under a target cfg rather than a feature so a native build
+# never sees `wasm-bindgen` at all, and the isolation tests stay honest about
+# what this crate pulls in on the host.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies.web-sys]
+version = "0.3"
+# `FileSystemSyncAccessHandle` is the only OPFS API with read/write at an
+# arbitrary offset, and it exists *only inside a Worker* — hence
+# `DedicatedWorkerGlobalScope` rather than `Window`. Verified reachable from
+# Rust, in Safari.
+features = [
+  # IndexedDB: the main-thread-capable backend. Event-based rather than
+  # promise-based, hence `IdbRequest` and `IdbTransaction` being named here.
+  "IdbFactory",
+  "IdbDatabase",
+  "IdbOpenDbRequest",
+  "IdbRequest",
+  "IdbTransaction",
+  "IdbTransactionMode",
+  "IdbObjectStore",
+  "DomException",
+  "FileSystemDirectoryHandle",
+  "FileSystemFileHandle",
+  "FileSystemGetDirectoryOptions",
+  "FileSystemGetFileOptions",
+  "FileSystemReadWriteOptions",
+  "FileSystemSyncAccessHandle",
+  "StorageManager",
+  "WorkerNavigator",
+  "DedicatedWorkerGlobalScope",
+]
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"
+
+[features]
+default = []
+# Browsers have no native BLAKE3 — `crypto.subtle` does not offer it — so wasm
+# is the only implementation and SIMD is the only lever. Measured at 1.80x on
+# hashing and 1.72x on outboard construction, for +12 KB of module. Pair with
+# `-C target-feature=+simd128`; the flag is *assumed*, not detected, so a build
+# without it produces a module that fails validation.
+wasm-simd = ["blake3/wasm32_simd"]

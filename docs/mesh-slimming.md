@@ -315,10 +315,13 @@ Items 4 and 6 of the backlog below, plus the whole of Part 2, are **implemented*
 | `fofoca-reassembly` | multipart body reassembly | |
 | `fofoca-directory` | the discovery-mesh ad codec | |
 | `fofoca` | daemon, gossip, lifecycle, transport, lookup, beacon | 436 |
-| `fofoca-blobs` | blob transfer (sits *above* the engine — it needs `net`) | |
 
-The load-bearing property, p2panda's rule 1: **only `fofoca` and
-`-blobs` name `iroh`.** `fofoca-protocol` builds on `iroh-base` alone and
+The blob-transfer crate this table originally listed has since been deleted —
+it had no consumer here, and the `fofoca-blobs` name now belongs to an unrelated
+crate that depends on nothing in this workspace. See `FORKED.md`.
+
+The load-bearing property, p2panda's rule 1: **only `fofoca` names `iroh`.**
+`fofoca-protocol` builds on `iroh-base` alone and
 resolves 138 crates against the engine's 436, with **no tokio, QUIC, TLS or DNS**
 anywhere in its tree. Getting there took three changes: a local 32-byte
 `TopicId` newtype so the wire crate need not name iroh-gossip, moving the

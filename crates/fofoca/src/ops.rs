@@ -1,5 +1,5 @@
 //! What a consumer *does* from inside a hook: send, merge a shared document,
-//! offload a blob, advertise into a directory, mint an invite.
+//! advertise into a directory, mint an invite.
 //!
 //! Every entry point here takes the state and context the engine already handed
 //! the hook, so none of it can be called out of band.
@@ -20,10 +20,6 @@ pub mod doc {
     pub use crate::doc::wire::merge_body;
     pub use crate::doc::wire::{change_body, encrypt_body};
 }
-
-// Content-addressed payloads too large for a gossip frame live in
-// `fofoca-blobs`, which sits above this crate (it needs `net`'s
-// endpoint construction) and so cannot be re-exported from here.
 
 /// The directory: a well-known mesh whose traffic is other meshes' ids.
 pub mod directory {
