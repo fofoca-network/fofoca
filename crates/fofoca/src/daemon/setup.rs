@@ -194,7 +194,7 @@ async fn build_member_endpoint(
     build: &SetupBuild<'_>,
 ) -> Result<(
     Endpoint,
-    Option<iroh_multihop_transport::MultihopHandle>,
+    Option<fofoca_iroh_multihop_transport::MultihopHandle>,
     fofoca_iroh_webrtc_transport::WebRtcHandle,
 )> {
     if let Some(injected) = build.injected.as_ref() {
@@ -406,7 +406,7 @@ struct Assembled {
     /// Host-only: the transport forwards real UDP packets, so off a host the
     /// field's own type does not exist.
     #[cfg(feature = "host")]
-    multihop: Option<iroh_multihop_transport::MultihopHandle>,
+    multihop: Option<fofoca_iroh_multihop_transport::MultihopHandle>,
     /// This peer's `WebRTC` transport handle, threaded into `EventLoopState` so
     /// the session manager can negotiate with peers as it learns of them, and
     /// so a consumer can read its live direct-peer count.

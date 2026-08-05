@@ -500,7 +500,9 @@ fn handle_link_state(message: &Message, state: &mut EventLoopState) {
         let Some(handle) = state.multihop.as_ref() else {
             return; // multihop off: nothing consumes the routing table
         };
-        match serde_json::from_str::<iroh_multihop_transport::LinkVector>(message.body.as_str()) {
+        match serde_json::from_str::<fofoca_iroh_multihop_transport::LinkVector>(
+            message.body.as_str(),
+        ) {
             Ok(vector) => {
                 let updated = handle.feed_topology(vector);
                 tracing::debug!(target: "fofoca::gossip",

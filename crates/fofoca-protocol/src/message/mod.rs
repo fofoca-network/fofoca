@@ -318,7 +318,7 @@ pub enum MessageKind {
     MetaDigest,
     /// A multihop-routing **link-state** advertisement: the author's own measured
     /// links + underlay address (`body` is a serialized
-    /// [`iroh_multihop_transport::LinkVector`]). Broadcast
+    /// `fofoca_iroh_multihop_transport::LinkVector`). Broadcast
     /// plumbing like `Digest`/`Ping` — never logged, never surfaced, never
     /// chain/DAG-folded; every node folds the freshest vector per origin into its
     /// routing graph. Ephemeral (a fresh vector supersedes the old by `seq`), so
@@ -639,7 +639,7 @@ impl Message {
     }
 
     /// A multihop link-state advertisement; `vector_json` is a serialized
-    /// [`iroh_multihop_transport::LinkVector`].
+    /// `fofoca_iroh_multihop_transport::LinkVector`.
     ///
     /// `host`-only with the transport that mints the vectors. The *kind* stays
     /// portable — a browser still receives and ignores a peer's advertisement.

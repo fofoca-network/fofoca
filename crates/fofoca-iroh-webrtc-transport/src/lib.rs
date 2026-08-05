@@ -6,7 +6,7 @@
 //! unordered** (`maxRetransmits: 0`): QUIC above it owns loss recovery and
 //! congestion control, so reliable ordered SCTP underneath would stack a
 //! second retransmission loop on every loss. Structure follows
-//! [iroh-multihop-transport](https://github.com/fofoca-network/iroh-multihop-transport)
+//! [fofoca-iroh-multihop-transport](https://github.com/fofoca-network/fofoca/tree/main/crates/fofoca-iroh-multihop-transport)
 //! and the upstream
 //! [iroh-tor-transport](https://github.com/n0-computer/iroh-tor-transport):
 //! a transport factory, a per-endpoint receiver, a registry-backed sender, and

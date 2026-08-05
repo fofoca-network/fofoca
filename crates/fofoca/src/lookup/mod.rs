@@ -61,7 +61,7 @@ pub struct TransportHandles {
     /// Source-routed multi-hop: reach a peer with no direct path by relaying
     /// through intermediate peers. Host-only — it forwards real UDP packets.
     #[cfg(feature = "host")]
-    pub multihop: Option<iroh_multihop_transport::MultihopHandle>,
+    pub multihop: Option<fofoca_iroh_multihop_transport::MultihopHandle>,
     /// QUIC over a `WebRTC` data channel. The browser's only way onto the
     /// mesh, and an opportunistic extra path for a native peer.
     pub webrtc: Option<fofoca_iroh_webrtc_transport::WebRtcHandle>,
@@ -443,8 +443,9 @@ pub(crate) async fn build_peer_webrtc(
 /// multihop peer negotiates nothing. Kept rather than skipped so the wiring has
 /// one shape, and so making the two coexist later is a change in one place.
 ///
-/// `host`-only with multihop itself — `iroh-multihop-transport` is not in the
-/// wasm dependency table, so a browser peer has no multihop path to detach for.
+/// `host`-only with multihop itself — `fofoca-iroh-multihop-transport` is not
+/// in the wasm dependency table, so a browser peer has no multihop path to
+/// detach for.
 #[cfg(feature = "host")]
 pub(crate) fn detached_webrtc_handle(
     local: iroh::EndpointId,
@@ -468,7 +469,7 @@ fn new_webrtc_handle(local: iroh::EndpointId) -> fofoca_iroh_webrtc_transport::W
 }
 
 /// A peer endpoint with the multi-hop transport registered, plus the
-/// [`MultihopHandle`](iroh_multihop_transport::MultihopHandle) that owns the
+/// [`MultihopHandle`](fofoca_iroh_multihop_transport::MultihopHandle) that owns the
 /// forwarding underlay and routing table. The app endpoint's key is pinned so it
 /// matches the handle's advertised hop identity. The underlay is a second,
 /// plain peer endpoint dedicated to hop-by-hop packet forwarding.
@@ -478,13 +479,13 @@ fn new_webrtc_handle(local: iroh::EndpointId) -> fofoca_iroh_webrtc_transport::W
 #[cfg(feature = "host")]
 pub(crate) async fn build_peer_multihop(
     lookups: &LookupOpts,
-) -> Result<(Endpoint, iroh_multihop_transport::MultihopHandle)> {
+) -> Result<(Endpoint, fofoca_iroh_multihop_transport::MultihopHandle)> {
     let mut key_bytes = [0u8; 32];
     rand::RngCore::fill_bytes(&mut rand::rng(), &mut key_bytes);
     let secret = SecretKey::from_bytes(&key_bytes);
     let underlay =
         build_endpoint(lookups, None, None, Vec::new(), TransportHandles::default()).await?;
-    let handle = iroh_multihop_transport::MultihopHandle::new(secret.public(), underlay);
+    let handle = fofoca_iroh_multihop_transport::MultihopHandle::new(secret.public(), underlay);
     let endpoint = build_endpoint(
         lookups,
         Some(secret),

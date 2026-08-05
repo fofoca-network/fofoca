@@ -7,10 +7,10 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use fofoca_iroh_multihop_transport::{MULTIHOP_TRANSPORT_ID, MultihopHandle};
 use iroh::endpoint::{Connection, presets};
 use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 use iroh::{Endpoint, EndpointId, RelayMode, SecretKey, TransportAddr};
-use iroh_multihop_transport::{MULTIHOP_TRANSPORT_ID, MultihopHandle};
 
 const ECHO_ALPN: &[u8] = b"multihop-test/echo/1";
 

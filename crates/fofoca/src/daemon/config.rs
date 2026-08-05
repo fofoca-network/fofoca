@@ -169,7 +169,7 @@ pub struct EventLoopConfig {
     /// has to disappear rather than just hold `None` — its type does not exist
     /// there.
     #[cfg(feature = "host")]
-    pub(crate) multihop: Option<iroh_multihop_transport::MultihopHandle>,
+    pub(crate) multihop: Option<fofoca_iroh_multihop_transport::MultihopHandle>,
     /// This peer's `WebRTC` transport handle. Portable: it is the browser's
     /// only direct path onto the mesh, and an extra candidate path for a native
     /// peer. `run()` moves it into `EventLoopState::webrtc`.

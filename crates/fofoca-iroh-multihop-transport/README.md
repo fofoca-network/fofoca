@@ -1,4 +1,4 @@
-# iroh-multihop-transport
+# fofoca-iroh-multihop-transport
 
 A source-routed, multi-hop [iroh](https://github.com/n0-computer/iroh) **custom
 transport**. It lets a peer reach a destination it cannot dial directly by
@@ -31,10 +31,14 @@ It briefly had its own repo, on the reasoning that it has no fofoca dependency
 and its audience is any iroh user. That is still true, and it still names only
 crates.io versions of `iroh`/`iroh-base` — but a second repo bought nothing and
 cost a rev pin to bump on every change, so it lives here again. Nothing in this
-workspace is allowed to leak into it.
+workspace is allowed to leak into it. The `fofoca-` prefix marks who maintains
+the crate, not what it depends on.
 
 A consumer that patches `iroh` to a fork must patch `iroh-base` to the same repo
 and rev, or the graph ends up with two `iroh_base` versions and `CustomAddr`
-stops unifying (E0308). The `1.0.1` floor in `Cargo.toml` exists so that a
-consumer patching to a 1.0.1 fork still gets its patch applied; see the comment
-there before raising it.
+stops unifying (E0308). The `iroh` requirement comes from
+`[workspace.dependencies]` rather than this manifest, and the version there is a
+*floor* every consumer's patch has to satisfy: a requirement a patch does not
+satisfy is not an error — cargo ignores the patch and resolves unpatched
+crates.io alongside it, which is the same two-`iroh_base` graph by another road.
+Read the comment on that entry before raising it.

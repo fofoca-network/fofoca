@@ -35,9 +35,9 @@ fofoca-util          no deps of consequence          (13 crates resolved)
         └── fofoca         + iroh, iroh-gossip  (436 crates)
               └── fofoca-ffi
 
-fofoca-blobs                    + bao-tree, blake3   (standalone)
-fofoca-iroh-webrtc-transport    + iroh, str0m        (standalone)
-iroh-multihop-transport         + iroh               (standalone)
+fofoca-blobs                      + bao-tree, blake3   (standalone)
+fofoca-iroh-webrtc-transport      + iroh, str0m        (standalone)
+fofoca-iroh-multihop-transport    + iroh               (standalone)
 ```
 
 The bottom three are off the tree: none depends on anything in this workspace.
@@ -341,6 +341,25 @@ Divergences from upstream, in the order they were made.
     all. agent-gossip does, in two places (its directory advertiser and
     `api::Session`). Nothing is contended and no guard is held across an `.await`;
     the `Mutex` is bought purely for the `Sync`.
+
+27. **`iroh-multihop-transport` is now `fofoca-iroh-multihop-transport`.** It was
+    the last member without the namespace prefix, while its sibling custom
+    transport `fofoca-iroh-webrtc-transport` — equally iroh-generic, equally
+    `publish = false` — has carried it since it arrived in change 19. The prefix
+    marks who maintains a crate, not what it depends on, so it says nothing that
+    contradicts the invariant from change 20: the crate still has no fofoca
+    dependency, still names only crates.io `iroh`/`iroh-base`, and nothing here
+    may leak into it.
+
+    The `[lib]` target moved with the package, so the import path is
+    `fofoca_iroh_multihop_transport`. Keeping the old lib name would have left a
+    package and its import path disagreeing for no gain — and would have been the
+    one asymmetry with the webrtc transport that the rename exists to remove.
+
+    Changes 13 and 20 are left as written. They record a repository that really
+    was named `iroh-multihop-transport`, and the
+    [standalone repo](https://github.com/fofoca-network/iroh-multihop-transport)
+    they point at still is.
 
 ## Fork pins — where each one lives, and why
 

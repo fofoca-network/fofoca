@@ -27,9 +27,9 @@ fofoca-util          host helpers, no deps of consequence   (13 crates resolved)
         └── fofoca         the engine, + iroh, iroh-gossip (436 crates)
               └── fofoca-ffi     the C ABI
 
-fofoca-blobs                    verified byte ranges, + bao-tree, blake3
-fofoca-iroh-webrtc-transport    QUIC over a WebRTC data channel, + iroh
-iroh-multihop-transport         QUIC relayed through peers, + iroh
+fofoca-blobs                      verified byte ranges, + bao-tree, blake3
+fofoca-iroh-webrtc-transport      QUIC over a WebRTC data channel, + iroh
+fofoca-iroh-multihop-transport    QUIC relayed through peers, + iroh
 ```
 
 The bottom three are standalone: they depend on nothing else here.
@@ -52,9 +52,9 @@ not exist there. One crate, two mutually exclusive backends behind features —
 disagree about the transport id or the envelope shape fail to connect with no
 useful error.
 
-[`iroh-multihop-transport`](crates/iroh-multihop-transport) is the other custom
-transport: source-routed relaying through intermediate peers, for when no direct
-path exists at all.
+[`fofoca-iroh-multihop-transport`](crates/fofoca-iroh-multihop-transport) is the
+other custom transport: source-routed relaying through intermediate peers, for
+when no direct path exists at all.
 
 None of the three knows what a mesh is, and the engine takes only the multihop
 one. The other two meet it in a consumer.

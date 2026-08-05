@@ -71,7 +71,7 @@ host = [
     "fofoca-logging/host",
     "fofoca-reassembly/host",
     "fofoca-directory/host",
-    "dep:iroh-multihop-transport",
+    "dep:fofoca-iroh-multihop-transport",
     "dep:interprocess",
     "dep:libc",
     # Base tokio is the portable floor (`sync`, `macros`, `time`, `rt`); these
@@ -105,7 +105,7 @@ n0-future.workspace = true
 # The multi-hop iroh custom transport: reach a peer with no direct path by
 # relaying its QUIC packets through intermediate peers. Registered on the
 # peer endpoint (the `--multihop` flag).
-iroh-multihop-transport = { workspace = true, optional = true }
+fofoca-iroh-multihop-transport = { workspace = true, optional = true }
 # Leaf crate: runtime dirs, clock, tuning dials, bounded containers, build stamp.
 fofoca-util = { path = "../fofoca-util", default-features = false, features = ["async-io"] }
 # Wire vocabulary: messages, mesh ids, nicknames, identity, sealing, invites.

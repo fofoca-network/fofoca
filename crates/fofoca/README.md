@@ -88,9 +88,7 @@ layer never borrows another layer's term.
 | `logging` | The `tracing` directive filter, the deferred per-member file sink, and the per-message logger |
 | `util` | Cross-cutting helpers, the build version stamp, and `consts` — where every tunable knob lives |
 
-It also re-exports [`iroh_multihop_transport`](../iroh-multihop-transport) so
-the app can name types like `LinkVector` without a second direct dependency,
-and re-exports `async_trait` so a consumer annotates its seam impls as
+It re-exports `async_trait` so a consumer annotates its seam impls as
 `#[fofoca::async_trait]` rather than version-matching its own.
 
 ## Test it

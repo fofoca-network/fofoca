@@ -7,7 +7,8 @@ unreliable + unordered (`maxRetransmits: 0`): QUIC above it owns loss recovery
 and congestion control, so the channel stays a plain datagram pipe instead of
 stacking a second retransmission loop.
 
-Structure follows `iroh-multihop-transport` and the upstream
+Structure follows [`fofoca-iroh-multihop-transport`](../fofoca-iroh-multihop-transport)
+and the upstream
 [iroh-tor-transport](https://github.com/n0-computer/iroh-tor-transport): a
 transport factory, a per-endpoint receiver, a registry-backed sender, and a
 per-session driver pumping the connection.

@@ -212,9 +212,9 @@ pub struct EventLoopState {
     /// on the peer endpoint. Owns the routing table (fed from received
     /// `LinkState` frames) and the underlay endpoint. `None` when multihop is off
     /// or on a non-peer (beacon/rendezvous) endpoint. See
-    /// [`iroh_multihop_transport`].
+    /// [`fofoca_iroh_multihop_transport`].
     #[cfg(feature = "host")]
-    pub(crate) multihop: Option<iroh_multihop_transport::MultihopHandle>,
+    pub(crate) multihop: Option<fofoca_iroh_multihop_transport::MultihopHandle>,
     /// The `WebRTC` transport handle, when one is registered on this peer's
     /// endpoint. Portable — it is the browser's only direct path, and an
     /// opportunistic extra one for a native peer. `None` on the beacon.
@@ -942,7 +942,7 @@ impl EventLoopState {
     /// The multi-hop transport handle, when `--multihop` registered one.
     #[cfg(feature = "host")]
     #[must_use]
-    pub fn multihop(&self) -> Option<&iroh_multihop_transport::MultihopHandle> {
+    pub fn multihop(&self) -> Option<&fofoca_iroh_multihop_transport::MultihopHandle> {
         self.multihop.as_ref()
     }
 

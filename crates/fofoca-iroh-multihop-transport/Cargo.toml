@@ -1,5 +1,5 @@
 [package]
-name = "iroh-multihop-transport"
+name = "fofoca-iroh-multihop-transport"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -16,7 +16,7 @@ publish = false
 workspace = true
 
 [lib]
-name = "iroh_multihop_transport"
+name = "fofoca_iroh_multihop_transport"
 path = "src/lib.rs"
 
 [dependencies]
