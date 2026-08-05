@@ -295,18 +295,89 @@ Divergences from upstream, in the order they were made.
     `util` facades are `pub use fofoca_protocol::*` — the mechanism by which
     the split crates keep their old module paths.
 
-## Patch pins — do not drop
+24. **The upstream app's remaining engine delta, merged back in.** `agent-gossip`
+    kept developing the engine after the divergence commit; this repo took the
+    three things it was ahead on and the app then dropped its copy entirely
+    (`crates/agent-habilis-mesh` and its satellites are gone from that repo, and
+    it now consumes this one as a sibling path dependency). What came across:
 
-`[patch.crates-io]` in the workspace root pins `iroh`, `iroh-base` and
-`iroh-dns` to `fofoca-network/iroh` rev `f9cb1f4fd1b69e904770516029fa0afac0fd3ce4`
-(mapped_addrs eviction + relay teardown fixes) and `iroh-gossip` to
-`fofoca-network/iroh-gossip` rev
-`c779c0661fc9429e86852570be9bdc00fb47fdd9` (connection-churn leak fix).
+    - The **directed-frame confinement fix** (upstream `0b9f438`).
+      `MessageLog::missing_in_window` takes a `MissingQuery` carrying *who is
+      asking*, and `resendable_to` refuses to offer a frame with a sole
+      addressee to anyone but that addressee; anti-entropy resends now route
+      through `transport::deliver` instead of straight onto gossip. Before this,
+      a directed message between two peers reached the whole mesh during
+      backfill. Hand-ported, not cherry-picked — `event_loop.rs` and `recv.rs`
+      had moved ~200 and ~105 lines ahead here for the wasm and admission work.
+    - **`IdleCounters`** (`daemon/state.rs`): one counter per `select!` arm,
+      drained onto the `mesh census` line each `state_refresh` tick as a delta.
+      Plain `u64` behind `&mut EventLoopState`, because the arms measured fire up
+      to 150×/min and a `debug!` per wakeup would price its own instrumentation
+      into the measurement. This repo's two extra beacon arms (`rung_rx.changed`,
+      `probe_verdict`) count as `external`, which keeps `wakeups` equal to the
+      column sum while still reading 0 on a settled daemon.
+    - The **`netwatch` RTM_MISS pin** — see below. It was the one patch upstream
+      had that this repo did not, and it is worth 2.01% → 0.06% of a core idle.
+
+25. **`ops::blob` restored, behind a default-off `blob` feature.** Change 5
+    deleted the blob crate wholesale on the grounds that `fofoca-blobs` replaced
+    it. It does not: `fofoca-blobs` is a verified-range *metadata store* that
+    states in its own module docs that it has no transport, no ALPN and no
+    framing, while `ops::blob` is the transport — a `habilis-mesh/blob/1` server,
+    a ticket, and fetch/offload over QUIC. They are complements. agent-share is
+    the proof: it uses `fofoca-blobs` *and* hand-built ~6,850 LOC of `MOUNT_ALPN`
+    transfer on top. agent-gossip needs the transport for A2A payload offload, so
+    `crates/fofoca/src/blob/` came back unchanged (same wire format, same ALPN)
+    behind a feature that implies `host`. Consumers that don't enable it —
+    mallorca, agent-share — pay neither the code size nor the spool directory.
+
+    The one test that could not come back as-is is the invite↔blob cross-parse
+    assertion: `invite` now lives in `fofoca-protocol`, which cannot see `blob`.
+    It moved to `blob/ticket.rs`, which can see both.
+
+26. **`SetupBuild::protocols` is a `Mutex`, not a `RefCell`.** `RefCell` is not
+    `Sync`, which made `SetupBuild` not `Send`, which made the whole `setup_mesh`
+    future not `Send` — so a consumer could not `tokio::spawn` a mesh setup at
+    all. agent-gossip does, in two places (its directory advertiser and
+    `api::Session`). Nothing is contended and no guard is held across an `.await`;
+    the `Mutex` is bought purely for the `Sync`.
+
+## Fork pins — where each one lives, and why
+
+Three forks are in play: `fofoca-network/{iroh, iroh-gossip, net-tools}`. They do
+**not** all live in the same place, and the placement is a rule rather than an
+accident.
+
+> **The rule.** `[patch.crates-io]` redirects *someone else's* dependency edge; a
+> direct `git` dependency only redirects *your own*. So a fork belongs on a
+> dependency edge — where it needs no restating — exactly when **no crate we do
+> not control names it from crates.io**. Otherwise it has to be a `[patch]`, and
+> a `[patch]` is honoured only in a workspace root and is **not** inherited, so
+> every consumer must carry a copy.
+
+The one-line test when adding a fork: `cargo tree -i <crate>`. If everything
+listed is ours, it goes on a dependency edge; if a third party appears, it is a
+patch.
+
+| fork | lives as | why |
+|---|---|---|
+| `iroh-gossip` | a **direct git dep** in this workspace's `[workspace.dependencies]` | `fofoca` is the only crate in the graph that names it, so consumers inherit it and restate nothing |
+| `netwatch` + `portmapper` | **git deps inside the `iroh` fork's own `iroh/Cargo.toml`** | `iroh` and `portmapper` both name netwatch from crates.io, so no dep edge *here* could redirect them — but the fork's own edges can. They move as a pair: the fork's `portmapper` takes `netwatch` by path, so splitting them puts two netwatch crates in one graph and the types cross the boundary |
+| `iroh`, `iroh-base`, `iroh-dns` | `[patch.crates-io]`, **restated by every consumer** | `iroh-relay`, the mdns/mainline address-lookup crates, `iroh-gossip` and the consumers themselves all name these from crates.io. Nothing we declare can redirect a third party's edge |
+
+So a consumer carries **three** patch lines, not five, and the two that left are
+the two it had no business knowing about.
 
 `iroh-base` must stay pinned to the **same repo and rev as `iroh`**: the forked
 `iroh` uses its workspace-local copy, and mixing that with the crates.io release
 puts two `iroh_base` versions in the graph, which makes types from
 iroh-gossip and the address-lookup crates fail to unify (E0308).
+
+Current revs: `iroh`/`iroh-base`/`iroh-dns` →
+`fofoca-network/iroh` (mapped_addrs eviction + relay teardown, **plus** the
+netwatch/portmapper repoint); `iroh-gossip` →
+`c779c0661fc9429e86852570be9bdc00fb47fdd9`; `net-tools` →
+`e02960255ef2f5b2ba4aa3d4cf195e0b8673f370`.
 
 ## Verifying a change
 

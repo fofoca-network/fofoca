@@ -96,7 +96,23 @@ iroh = { version = "1.0.2", default-features = false, features = ["tls-ring", "u
 iroh-base = { version = "1.0.2", default-features = false, features = ["key"] }
 # `default-features = false` for the same reason as `iroh`: the browser leg
 # cannot carry the host-only defaults.
-iroh-gossip = { version = "0.101", default-features = false, features = ["net"] }
+#
+# A **direct git dep**, not a version plus a `[patch.crates-io]` entry, and that
+# is the whole point: `fofoca` is the only crate in the graph that names
+# iroh-gossip, so the fork can ride our own dependency edge and every consumer
+# inherits it with no patch table entry of its own. A `[patch]` would have to be
+# restated in each consumer's workspace root, because cargo does not inherit one
+# — and which revision of a leak fix the engine needs is nobody else's business.
+#
+# The rule, for the next pin: a fork can live here exactly when no crate we do
+# not control names it from crates.io. `iroh`, `iroh-base`, `iroh-dns` fail that
+# test (iroh-relay, the address-lookup crates and the consumers themselves name
+# them), so those stay in `[patch.crates-io]` below.
+#
+# `version` is kept alongside `git` so the pin degrades to the published crate
+# if the fix lands upstream. Branch fix/superseded-conn-leak-0.101 (rebased onto
+# v0.101.0): the connection-churn leak fix, upstream PR n0-computer/iroh-gossip#147.
+iroh-gossip = { version = "0.101", git = "https://github.com/fofoca-network/iroh-gossip", rev = "c779c0661fc9429e86852570be9bdc00fb47fdd9", default-features = false, features = ["net"] }
 # Named directly by both custom transports: `RecvMeta` appears in the
 # `CustomEndpoint::poll_recv` signature. This is the quinn fork iroh runs on,
 # and it resolves to the same crates.io release iroh itself depends on.
@@ -255,9 +271,18 @@ opt-level = 3
 # forked `iroh` pulls its workspace-local copies of them — without these the
 # graph carries two `iroh_base`/`iroh_dns` versions (fork vs crates.io) and
 # types from iroh-gossip/lookups clash (E0308).
-iroh = { git = "https://github.com/fofoca-network/iroh", rev = "f9cb1f4fd1b69e904770516029fa0afac0fd3ce4" }
-iroh-base = { git = "https://github.com/fofoca-network/iroh", rev = "f9cb1f4fd1b69e904770516029fa0afac0fd3ce4" }
-iroh-dns = { git = "https://github.com/fofoca-network/iroh", rev = "f9cb1f4fd1b69e904770516029fa0afac0fd3ce4" }
-# Branch fix/superseded-conn-leak-0.101 (rebased onto v0.101.0): the
-# connection-churn leak fix (upstream PR n0-computer/iroh-gossip#147).
-iroh-gossip = { git = "https://github.com/fofoca-network/iroh-gossip", rev = "c779c0661fc9429e86852570be9bdc00fb47fdd9" }
+#
+# Branch fix/netwatch-fork-pin (off f9cb1f4, the mapped_addrs + relay-teardown
+# tip): the fork now names the net-tools fork for its own `netwatch` and
+# `portmapper` deps, so that pin arrives transitively and no consumer restates
+# it. Bumping this rev is what carries an iroh fix to every consumer.
+iroh = { git = "https://github.com/fofoca-network/iroh", rev = "a1c166834f5c16fd266089bb8516a5a577b48c74" }
+iroh-base = { git = "https://github.com/fofoca-network/iroh", rev = "a1c166834f5c16fd266089bb8516a5a577b48c74" }
+iroh-dns = { git = "https://github.com/fofoca-network/iroh", rev = "a1c166834f5c16fd266089bb8516a5a577b48c74" }
+# NOTE: no `iroh-gossip` entry. It moved to a direct git dep in
+# `[workspace.dependencies]` above, so it rides our own dependency edge and
+# consumers inherit it without restating anything. See the comment there.
+# NOTE: no `netwatch` entry either. The `iroh` fork now names the net-tools fork
+# directly (both `netwatch` and `portmapper`, which must move together), so the
+# RTM_MISS fix arrives transitively and no consumer restates it. See
+# `iroh/Cargo.toml` in the fork for the measurement and the reasoning.

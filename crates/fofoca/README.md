@@ -2,9 +2,10 @@
 
 The serverless gossip-network **engine** — everything that moves, signs,
 routes, gates, and heals bytes between peers, with no knowledge of what those
-bytes mean. It is the crate [`agent-gossip`](../agent-gossip) is built on, and
-it is deliberately not the crate that knows about A2A — `cargo task layering`
-fails the build if it learns.
+bytes mean. It is deliberately not a crate that knows about any one
+application: three separate consumers are built on it — `agent-gossip` (an A2A
+gossip network for AI agents), `agent-share`, and `mallorca` (through
+[`fofoca-ffi`](../fofoca-ffi)'s C ABI).
 
 Peers find each other without a server, form a partial mesh over
 [iroh](https://github.com/n0-computer/iroh) QUIC links, and keep the mesh alive
@@ -14,28 +15,27 @@ sealed to their addressee.
 
 ## Why it is a separate crate
 
-The engine/application split is a boundary, not a folder. `agent-gossip` owns
-the A2A data model, the CLI, the MCP server, and the library `api`; this crate
-owns the transport and protocol beneath all three. The split buys three things:
+The engine/application split is a boundary, not a folder — and since the split
+it is a repository boundary. Each consumer owns its own data model, its own
+frontends, its own vocabulary; this crate owns the transport and protocol
+beneath all of them. The split buys three things:
 
 - **The payload stays opaque.** The engine routes on a frame's tag and
-  addressee and never parses its body. That claim is *enforced* by having a
-  second, independent consumer: [`examples/mesh-pipe`](../../examples/mesh-pipe)
-  pipes raw bytes over the same mesh, depends on this crate only, and never on
-  `agent-gossip`. Let an application assumption leak down into the engine and
-  mesh-pipe stops compiling — and `cargo task layering` catches the naming half
-  of the same mistake before that.
-- **iroh stays an internal detail.** No `iroh` type crosses `agent-gossip`'s
+  addressee and never parses its body. That claim is *enforced* by having
+  independent consumers with nothing in common: `agent-gossip` carries A2A
+  ProtoJSON, `mallorca` carries an Odin game's state over the C ABI. Let one
+  application's assumption leak down into the engine and the others stop
+  compiling.
+- **iroh stays an internal detail.** No `iroh` type need cross a consumer's
   public surface. Version bumps and the forked revs pinned in the workspace
-  root's `[patch.crates-io]` are contained here.
+  root's `[patch.crates-io]` are contained here — though note each consumer must
+  restate that patch table, since cargo does not inherit it across workspaces.
 - **The wire is testable on its own.** The frame format, every crypto
-  byte-domain, and `runtime_base()` live here, so `cargo task test` runs
-  `--workspace` rather than `-p agent-gossip` — scoped to the app, a stale
-  engine snapshot stayed green.
+  byte-domain, and `runtime_base()` live here, so `cargo test --workspace` in
+  this repo is a full check of the wire without standing up any application.
 
-It is workspace-internal (`publish = false`). `agent-gossip` re-exports the
-curated public surface, so downstream code names `agent_gossip::MeshId`, not
-`fofoca::protocol::MeshId`.
+It is workspace-internal (`publish = false`); consumers take it as a path or git
+dependency and re-export whatever surface suits them.
 
 ## The application seam
 
@@ -60,7 +60,7 @@ duplicating it.
 
 > A minimal receive-only consumer implements `classify` + `on_app_frame`, sets
 > the three associated types to trivial types, and takes the defaults for
-> everything else — about 40 lines. mesh-pipe is exactly that.
+> everything else — about 40 lines. See `examples/mesh_peer.rs`.
 
 Outbound, the payload-agnostic primitive is
 `gossip::send_app(state, ctx, tag, to, corr, body)` — build → sign → route.
@@ -102,22 +102,30 @@ engine through the surface users actually get.
 
 ```sh
 cargo test -p fofoca     # this crate's unit + property tests
-cargo task test                      # the whole workspace suite
+cargo test --workspace   # every crate here
 ```
 
 > Run the full suite in the background — it takes minutes. The remaining floors
 > are iroh-bound (a 15s direct-path idle timeout, a ~36s beacon handoff), not
 > ours.
 
-Four features, all off by default and never in a release build:
-`test-fixtures` (exposes cross-crate `Message` builders), `bench` and
-`adversarial` (both imply it, exposing `pub(crate)` hot paths and
-crafted-message constructors to the app's harness), and `dhat-heap` (gates out
-the daemon's `process::exit` so a heap profile can flush).
+Features off by default and never in a release build: `test-fixtures` (exposes
+cross-crate `Message` builders), `adversarial` (implies it, exposing
+`pub(crate)` hot paths and crafted-message constructors to a consumer's
+harness), and `dhat-heap` (gates out the daemon's `process::exit` so a heap
+profile can flush).
 
-`build.rs` stamps the git version via
+`blob` is the other off-by-default one, and the only one that is not a test
+affordance: it compiles in the blob-offload side-channel (`ops::blob`) and
+implies `host`, since it spools to disk and stands up its own iroh endpoint. Not
+to be confused with the [`fofoca-blobs`](../fofoca-blobs) crate — that is a
+verified-range metadata store with no transport, and the two are complements.
+
+`fofoca-util`'s `build.rs` stamps *this repo's* git version via
 [`vergen-gitcl`](https://crates.io/crates/vergen-gitcl) into
-`util::version::VERSION`.
+`util::version::VERSION`. A consumer's own `--version` should lead with its own
+crate version and its own stamp; `GIT_STAMP` here names a commit in this
+history, not theirs.
 
 ## Two things that will bite you
 

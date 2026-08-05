@@ -72,4 +72,3 @@ AR=/opt/homebrew/opt/llvm/bin/llvm-ar \
 cargo check -p fofoca-iroh-webrtc-transport --features web --target wasm32-unknown-unknown
 ```
 
-`cargo task web-wasm` wraps this.
