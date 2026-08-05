@@ -552,7 +552,8 @@ async fn handle_shard(
     // fragment body, matching the pre-thread behavior of the internal classify.
     let shard_class = message.kind.app_tag().map(|_| app.classify(message));
     // Only a small group's shards enter the message log (anti-entropy heals
-    // them like any message); a big group would evict the mesh's whole
+    // them like any message — point-to-point when the shard is directed, so
+    // the addressee still recovers); a big group would evict the mesh's whole
     // anti-entropy history, so its shards stay out of the log — on the send
     // side too (`shard_fits_log`) — and the group heals via shard repair.
     // (RPC shards are plumbing — `retain_and_index` skips them by kind
@@ -1234,7 +1235,7 @@ mod retain_own_broadcast_tests {
     use std::time::Instant;
 
     use super::retain_own_broadcast;
-    use crate::daemon::message_log::WindowRange;
+    use crate::daemon::message_log::{MissingQuery, WindowRange};
     use crate::daemon::state::{EventLoopState, MeshSecrets, StateInit};
     use crate::protocol::{MeshId, Message, Nickname};
 
@@ -1306,14 +1307,17 @@ mod retain_own_broadcast_tests {
         // We advertise what we hold; they compute what we are missing.
         let window = us.message_log.recent_window(64).expect("non-empty log");
         let have: HashSet<[u8; 16]> = window.ids.into_iter().collect();
-        let offered = them.message_log.missing_in_window(
-            WindowRange {
+        let offered = them.message_log.missing_in_window(MissingQuery {
+            range: WindowRange {
                 lo: window.lo,
                 hi: window.hi,
             },
-            &have,
-            64,
-        );
+            have: &have,
+            max: 64,
+            // "us" is the peer whose digest advertised the window; presence is
+            // undirected, so the addressee gate passes it either way.
+            requester: &Nickname::from("us"),
+        });
         assert!(
             offered.is_empty(),
             "two converged peers must have nothing to re-send; got {} message(s) — \
