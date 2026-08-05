@@ -74,27 +74,26 @@ uuid = { version = "1", features = ["v4"] }
 # end up with two `iroh`/`iroh_base` crates in one graph — at which point the
 # `CustomTransport` impls stop satisfying the trait iroh hands back (E0308).
 #
-# `1.0.1`, not `1.0.2`, and that is a floor rather than a preference. Both
-# transports here are also consumed by `agent-habilis/agent-share`, whose
-# `[patch.crates-io]` supplies a 1.0.1 fork; a `1.0.2` requirement is not
-# satisfied by 1.0.1, so cargo would quietly ignore that patch and resolve
-# unpatched crates.io alongside it. `1.0.1` is satisfied by both forks, and the
-# patch below still pulls 1.0.2 here. Raise it when every consumer pins the
-# same fork.
+# The version has to match what every consumer's `[patch.crates-io]` supplies,
+# not just this one's. A requirement the patch does not satisfy is not an error:
+# cargo silently ignores the patch and resolves unpatched crates.io alongside
+# it, and the two `iroh_base` crates that result surface as an E0308 nowhere
+# near the manifest at fault. `agent-habilis/agent-share` now pins the same fork
+# and rev as the patch table below, so both sides see 1.0.2.
 #
 # `default-features = false` because the browser backend of the WebRTC
 # transport cannot have them: iroh's defaults drag `tokio/net` -> `mio`, which
 # refuses to build for wasm32. A member cannot turn off default features that
 # the workspace entry turns on, so the off position has to live here and the
 # engine re-adds what it wants by name.
-iroh = { version = "1.0.1", default-features = false, features = ["tls-ring", "unstable-custom-transports"] }
+iroh = { version = "1.0.2", default-features = false, features = ["tls-ring", "unstable-custom-transports"] }
 # The dependency-light half of iroh: keys, endpoint addresses, relay URLs — no
 # QUIC, TLS or DNS. `fofoca-protocol` depends on this rather than `iroh`
 # so the wire vocabulary carries no network stack (docs/mesh-slimming.md). The
 # `[patch.crates-io]` entry below repoints it at the same fork as `iroh`, so
 # both halves stay one version. `relay` is a default that `fofoca-protocol`
 # adds back; the transports do not need it.
-iroh-base = { version = "1.0.1", default-features = false, features = ["key"] }
+iroh-base = { version = "1.0.2", default-features = false, features = ["key"] }
 # `default-features = false` for the same reason as `iroh`: the browser leg
 # cannot carry the host-only defaults.
 iroh-gossip = { version = "0.101", default-features = false, features = ["net"] }
