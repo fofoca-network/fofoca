@@ -25,6 +25,11 @@ pub mod ops;
 pub mod runtime;
 
 pub(crate) mod beacon;
+// The blob-offload side-channel, re-exported through [`ops::blob`]. Its own
+// feature because it is the one part of the engine a consumer can genuinely not
+// want: it spools to disk and stands up a second iroh endpoint on its own ALPN.
+#[cfg(feature = "blob")]
+pub(crate) mod blob;
 pub(crate) mod daemon;
 pub(crate) mod gossip;
 pub(crate) mod lifecycle;

@@ -21,6 +21,15 @@ pub mod doc {
     pub use crate::doc::wire::{change_body, encrypt_body};
 }
 
+/// Handing a peer a payload too large for a gossip frame: offload it to a
+/// local store, send the ticket, let the peer fetch it over the blob ALPN.
+#[cfg(feature = "blob")]
+pub mod blob {
+    pub use crate::blob::{
+        BlobServer, BlobTicket, ContentId, HASH_LEN, OffloadRequest, SECRET_LEN, fetch, offload,
+    };
+}
+
 /// The directory: a well-known mesh whose traffic is other meshes' ids.
 pub mod directory {
     pub use crate::directory::{Ad, Listing, ListingChange, Listings, directory_mesh};

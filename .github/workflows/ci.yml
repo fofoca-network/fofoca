@@ -35,6 +35,12 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # `blob` is off by default (only agent-gossip enables it), so the line
+      # above never lints `src/blob/` — ~1,300 lines including its own ALPN
+      # server. `--all-features` below only *checks* it.
+      - name: Clippy (blob)
+        run: cargo clippy -p fofoca --features blob --all-targets -- -D warnings
+
       - name: Check
         run: cargo check --workspace --all-targets
 
@@ -93,6 +99,11 @@ jobs:
 
       - name: Test
         run: cargo test --workspace
+
+      # Not covered by `--workspace` above: `blob` is off by default, so its
+      # ticket round-trips and the loopback offload→fetch test never run there.
+      - name: Test (blob)
+        run: cargo test -p fofoca --features blob
 
       # Not covered by `--workspace` above: the loopback suite is behind
       # `required-features = ["native"]`, so a default-feature test run skips

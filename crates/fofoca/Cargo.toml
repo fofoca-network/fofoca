@@ -31,6 +31,17 @@ adversarial = ["test-fixtures", "fofoca-protocol/adversarial", "fofoca-doc/adver
 # `main`) can flush `dhat-heap.json`. The app's `dhat-heap` feature forwards to
 # this one. Never in a normal build.
 dhat-heap = []
+# Off by default. The blob-offload side-channel: a `habilis-mesh/blob/1` ALPN
+# server, a ticket, and fetch/offload, for handing a peer a payload too large to
+# ride a gossip frame. `agent-gossip` enables it for A2A payload offload; the
+# consumers that don't (mallorca, agent-share) pay neither the code size nor the
+# spool directory.
+#
+# Implies `host`: it spools to disk and stands up its own iroh endpoint, and a
+# browser has neither. Not to be confused with the `fofoca-blobs` crate — that
+# is a verified-range *metadata store* with no transport, no ALPN and no
+# framing, and the two are complements rather than alternatives.
+blob = ["host"]
 
 # Discovery legs and the control socket, each gating its own dependency tree.
 # `default` keeps a from-source build behaving exactly as before; an embedder
