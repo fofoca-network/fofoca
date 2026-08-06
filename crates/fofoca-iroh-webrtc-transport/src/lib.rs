@@ -49,10 +49,15 @@ mod ice_uri;
 // session, and teardown on drop rather than on a cleanup branch.
 //
 // Compiled in every configuration even so, because this is the only place that
-// logic is *provable*: the browser backend cannot be tested at all (no
-// `RTCPeerConnection` in node, no webdriver in CI), so its decisions were
-// pulled out into a payload-generic type that `cargo test` reaches whatever
-// features are on.
+// logic is provable *cheaply*: the browser backend needs a real browser and a
+// webdriver to test (there is no `RTCPeerConnection` in node, and CI has no
+// webdriver), so its decisions were pulled out into a payload-generic type that
+// `cargo test` reaches whatever features are on.
+//
+// "Cheaply", not "at all", as this used to say: `tests/browser_loopback.rs`
+// does drive the browser backend end to end against Chrome, and it is where a
+// question about the *transport* — as opposed to this registry's bookkeeping —
+// gets answered. It is a local run, not a CI one.
 #[cfg_attr(
     not(feature = "web"),
     expect(
@@ -111,8 +116,8 @@ mod web;
 pub use web::{
     AttachError, BrowserHubTransport, BrowserRtcTransport, BrowserSession, BrowserSessionGuard,
     IceServer, IceServers, PendingAnswer as BrowserPendingAnswer,
-    PendingOffer as BrowserPendingOffer, answer as browser_answer, log_signal_sdps,
-    offer as browser_offer,
+    PendingOffer as BrowserPendingOffer, SessionCounters, SessionCounts, answer as browser_answer,
+    log_signal_sdps, offer as browser_offer,
 };
 
 /// A registered `WebRTC` transport, ready to hand to an iroh endpoint builder.
@@ -261,6 +266,32 @@ impl WebRtcHandle {
         remote: &iroh_base::EndpointId,
     ) -> Option<(String, String)> {
         self.inner.selected_remote_candidate(remote).await
+    }
+
+    /// Bytes and messages this session's data channel has carried, as
+    /// `(bytes_sent, bytes_received, messages_sent, messages_received)`.
+    ///
+    /// The measure to use when the question is "did our traffic move?" — see
+    /// [`BrowserHubTransport::data_channel_bytes`] for why the ICE candidate
+    /// pair is not a dependable stand-in for it.
+    pub async fn data_channel_bytes(
+        &self,
+        remote: &iroh_base::EndpointId,
+    ) -> Option<(f64, f64, f64, f64)> {
+        self.inner.data_channel_bytes(remote).await
+    }
+
+    /// What this session's outbound lane did with the datagrams QUIC handed it
+    /// — sent, and dropped by each of the three routes that can drop one.
+    ///
+    /// The lane is lossy by design and silent by consequence: `poll_send`
+    /// cannot park without stalling every transport, so it discards and
+    /// reports success. A consumer diagnosing a stalled transfer — or deciding
+    /// whether to demote a peer to the relay — otherwise has nothing to go on
+    /// but the transfer not finishing. See [`SessionCounters`].
+    #[must_use]
+    pub fn session_counters(&self, remote: &iroh_base::EndpointId) -> Option<SessionCounts> {
+        self.inner.session_counters(remote)
     }
 
     /// Tear down the session for `remote`, if any.

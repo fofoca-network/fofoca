@@ -1570,15 +1570,27 @@ async fn maybe_reclaim(
 }
 
 /// Whether this session's beacon is subject to the periodic rival
-/// re-check shed: only a **public** `EagerProbed` co-host. `EagerProbed`
-/// claimants share a `rendezvous_id` with concurrent peers (topic joiners,
-/// directory advertisers) and can double-claim inside each other's probe
-/// window; every other policy either owns the identity from t=0 (`Eager`
-/// creator), meshes before claiming (`Deferred`), or never claims
-/// (`Never`). A loopback mesh's port ladder arbitrates atomically at bind
-/// time (`AddrInUse` + identity probe), so no split exists to fix there.
+/// re-check shed: any **public** co-host that had to *probe* for the
+/// identity rather than owning it.
+///
+/// `EagerProbed` claimants share a `rendezvous_id` with concurrent peers
+/// (topic joiners, directory advertisers) and can double-claim inside each
+/// other's probe window. `Deferred` was excluded here on the premise that it
+/// "meshes before claiming" — but `may_cohost` also lets an unmeshed joiner
+/// claim after the co-host grace, and a meshed one still claims on the word of
+/// a probe. When that probe could not resolve the id (the defect
+/// `beacon::spawn_rival_probe` documents), *every* survivor of a departed
+/// origin claimed a duplicate, and this shed was the one mechanism that would
+/// have re-arbitrated it — switched off for the policy that needed it. So the
+/// gate is now "did a probe decide this claim", which is the property that
+/// makes a same-id split possible in the first place.
+///
+/// Still excluded: `Eager` (the mesh origin owns the identity from t=0, and
+/// shedding it would churn the only beacon a cold mesh has), `Never` (claims
+/// nothing), and every loopback mesh — a port ladder arbitrates atomically at
+/// bind time (`AddrInUse` + identity probe), so no split exists to fix there.
 fn rival_recheck_applies(policy: CoHostPolicy, public: bool) -> bool {
-    policy == CoHostPolicy::EagerProbed && public
+    matches!(policy, CoHostPolicy::EagerProbed | CoHostPolicy::Deferred) && public
 }
 
 /// When the next rival re-check shed should run, from the moment of a
@@ -1586,10 +1598,18 @@ fn rival_recheck_applies(policy: CoHostPolicy, public: bool) -> bool {
 /// deterministic endpoint-id phase offset — the tie-break that orders
 /// simultaneous claimants so the earlier one sheds, finds the later
 /// one's still-held beacon, and yields. Later rounds run the steady
-/// cadence (lone vs meshed tier) plus fresh random jitter, breaking the
-/// residual both-shed-together collision geometrically.
-fn next_recheck_delay(round: u32, meshed: bool, endpoint_id: EndpointId) -> Duration {
-    use crate::util::consts::RIVAL_RECHECK_OFFSET_SPAN_SECS;
+/// cadence plus fresh random jitter, breaking the residual
+/// both-shed-together collision geometrically.
+///
+/// `links` is the live gossip-link count, and it alone picks the steady tier:
+/// a shed's cost is what the blip disturbs, which is how many peers are on the
+/// other end of it. That subsumes the `meshed` flag this used to take — a
+/// holder with no live links is lone by any useful reading, whether or not it
+/// once met a peer — and it is what stops a two-tab mesh from waiting out a
+/// cadence priced for two multi-member islands. See
+/// [`RIVAL_RECHECK_SMALL_ROSTER`](crate::util::consts::RIVAL_RECHECK_SMALL_ROSTER).
+fn next_recheck_delay(round: u32, links: usize, endpoint_id: EndpointId) -> Duration {
+    use crate::util::consts::{RIVAL_RECHECK_OFFSET_SPAN_SECS, RIVAL_RECHECK_SMALL_ROSTER};
     use crate::util::tuning::{
         rival_recheck_first_secs, rival_recheck_meshed_secs, rival_recheck_secs,
     };
@@ -1601,7 +1621,7 @@ fn next_recheck_delay(round: u32, meshed: bool, endpoint_id: EndpointId) -> Dura
         let offset_ms = u64::from_le_bytes(prefix) % (RIVAL_RECHECK_OFFSET_SPAN_SECS * 1000);
         return Duration::from_secs(rival_recheck_first_secs()) + Duration::from_millis(offset_ms);
     }
-    let base_secs = if meshed {
+    let base_secs = if links > RIVAL_RECHECK_SMALL_ROSTER {
         rival_recheck_meshed_secs()
     } else {
         rival_recheck_secs()
@@ -1625,7 +1645,11 @@ fn schedule_rival_recheck(
     if !rival_recheck_applies(policy, params.bind_ports.is_empty()) {
         return;
     }
-    let delay = next_recheck_delay(state.rival_recheck_rounds, state.meshed, endpoint.id());
+    let delay = next_recheck_delay(
+        state.rival_recheck_rounds,
+        state.linked_endpoints.len(),
+        endpoint.id(),
+    );
     state.next_rival_recheck = Some(Instant::now() + delay);
 }
 
@@ -1793,18 +1817,22 @@ mod tests {
     }
 
     #[test]
-    fn rival_recheck_gates_on_eager_probed_and_public() {
-        // The shed exists for shared-rendezvous claimants racing each other:
-        // topic joiners and directory advertisers, both `EagerProbed` on a
-        // public (ephemeral, address-lookup) rendezvous.
+    fn rival_recheck_gates_on_probed_claims_and_public() {
+        // The shed exists for claimants that took the identity on the word of
+        // a probe and can therefore have raced each other into a same-id
+        // split: directory advertisers and topic joiners (`EagerProbed`)…
         assert!(rival_recheck_applies(CoHostPolicy::EagerProbed, true));
+        // …and ordinary joiners (`Deferred`), which this used to exclude.
+        // Regression: a survivor of a departed origin claims on a probe like
+        // anyone else, and with the shed off there was nothing to re-arbitrate
+        // the duplicate beacons that followed. See `rival_recheck_applies`.
+        assert!(rival_recheck_applies(CoHostPolicy::Deferred, true));
         // The loopback port ladder arbitrates atomically at bind time — no
         // split to fix, shedding would only churn the beacon.
         assert!(!rival_recheck_applies(CoHostPolicy::EagerProbed, false));
-        // Every other policy either owns the identity from t=0, meshes
-        // before claiming, or never claims.
+        assert!(!rival_recheck_applies(CoHostPolicy::Deferred, false));
+        // The origin owns the identity from t=0 and a consumer claims nothing.
         assert!(!rival_recheck_applies(CoHostPolicy::Eager, true));
-        assert!(!rival_recheck_applies(CoHostPolicy::Deferred, true));
         assert!(!rival_recheck_applies(CoHostPolicy::Never, true));
     }
 
@@ -1818,15 +1846,15 @@ mod tests {
         // is the tie-break ordering simultaneous claimants, so per-call
         // randomness would defeat it.
         assert_eq!(
-            next_recheck_delay(0, false, id(1)),
-            next_recheck_delay(0, false, id(1))
+            next_recheck_delay(0, 0, id(1)),
+            next_recheck_delay(0, 0, id(1))
         );
 
         // Base + phase offset, offset strictly inside the span.
         let base = Duration::from_secs(RIVAL_RECHECK_FIRST_SECS);
         let span = Duration::from_secs(RIVAL_RECHECK_OFFSET_SPAN_SECS);
         for byte in 0..8u8 {
-            let delay = next_recheck_delay(0, false, id(byte));
+            let delay = next_recheck_delay(0, 0, id(byte));
             assert!(
                 delay >= base && delay < base + span,
                 "out of bounds: {delay:?}"
@@ -1835,15 +1863,16 @@ mod tests {
 
         // Distinct ids must (in practice) spread across the span — all-equal
         // offsets would mean the tie-break never orders anyone.
-        let all_equal = (1..8u8).all(|byte| {
-            next_recheck_delay(0, false, id(byte)) == next_recheck_delay(0, false, id(0))
-        });
+        let all_equal = (1..8u8)
+            .all(|byte| next_recheck_delay(0, 0, id(byte)) == next_recheck_delay(0, 0, id(0)));
         assert!(!all_equal, "phase offsets did not spread across ids");
     }
 
     #[test]
     fn steady_recheck_delay_is_jittered_within_bounds() {
-        use crate::util::consts::{RIVAL_RECHECK_MESHED_SECS, RIVAL_RECHECK_SECS};
+        use crate::util::consts::{
+            RIVAL_RECHECK_MESHED_SECS, RIVAL_RECHECK_SECS, RIVAL_RECHECK_SMALL_ROSTER,
+        };
 
         let id = iroh::SecretKey::from_bytes(&[9; 32]).public();
 
@@ -1851,10 +1880,29 @@ mod tests {
         let lone_base = Duration::from_secs(RIVAL_RECHECK_SECS);
         let meshed_base = Duration::from_secs(RIVAL_RECHECK_MESHED_SECS);
         for _ in 0..8 {
-            let lone = next_recheck_delay(1, false, id);
+            let lone = next_recheck_delay(1, 0, id);
             assert!(lone >= lone_base && lone <= lone_base * 2);
-            let meshed = next_recheck_delay(1, true, id);
+            let meshed = next_recheck_delay(1, RIVAL_RECHECK_SMALL_ROSTER + 1, id);
             assert!(meshed >= meshed_base && meshed <= meshed_base * 2);
+        }
+    }
+
+    #[test]
+    fn a_small_roster_rechecks_at_the_brisk_cadence() {
+        use crate::util::consts::{RIVAL_RECHECK_SECS, RIVAL_RECHECK_SMALL_ROSTER};
+
+        let id = iroh::SecretKey::from_bytes(&[9; 32]).public();
+        let lone_base = Duration::from_secs(RIVAL_RECHECK_SECS);
+
+        // The workload this exists for: an origin dies and two survivors are
+        // left holding same-id beacons. Waiting out a cadence priced for two
+        // multi-member islands is how that split lasted minutes.
+        for links in 0..=RIVAL_RECHECK_SMALL_ROSTER {
+            let delay = next_recheck_delay(1, links, id);
+            assert!(
+                delay <= lone_base * 2,
+                "a {links}-link roster must not pay the island backstop cadence: {delay:?}"
+            );
         }
     }
 

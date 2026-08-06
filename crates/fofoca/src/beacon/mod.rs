@@ -165,6 +165,31 @@ impl Drop for Rendezvous {
     }
 }
 
+/// The rendezvous's **dialable** address: the id plus somewhere to reach it.
+///
+/// One construction, two callers that must not drift — the hint a joiner
+/// pre-registers on its peer endpoint (`daemon::setup::register_rendezvous`)
+/// and the target [`spawn_rival_probe`] dials. They are the same address by
+/// definition: the probe asks "is anyone serving the identity a joiner would
+/// reach?", so asking it anywhere else answers a different question.
+///
+/// - Private (a non-empty ladder): every loopback rung, because iroh's
+///   node-id dial reaches whichever rung our beacon actually bound.
+/// - Public: `bootstrap_relay`, the single rung the beacon homes on
+///   ([`beacon_lookups`]) — a relay-direct dial with no lookup round-trip.
+/// - `None`: relay disabled and no ladder, so there is nothing to name and
+///   only mDNS/DHT can resolve the id.
+pub(crate) fn rendezvous_addr(params: &RendezvousParams) -> Option<EndpointAddr> {
+    let mut addr = EndpointAddr::new(params.id);
+    if !params.bind_ports.is_empty() {
+        for &port in &params.bind_ports {
+            addr = addr.with_ip_addr(SocketAddr::from((Ipv4Addr::LOCALHOST, port)));
+        }
+        return Some(addr);
+    }
+    Some(addr.with_relay_url(params.bootstrap_relay.clone()?))
+}
+
 /// A public probe-before-claim running **off** the event loop.
 ///
 /// The probe answers one question — does a beacon already serve this
@@ -257,6 +282,16 @@ fn verdict_of(result: Result<bool, oneshot::error::RecvError>) -> bool {
 /// even while the rival's live addresses sit in the address book. A fresh
 /// endpoint has no history to get stuck on.
 ///
+/// Which is exactly why it must be handed [`rendezvous_addr`] rather than a
+/// bare id. A throwaway endpoint has no address book, and nothing else will
+/// fill the gap: endpoints are built on `presets::Minimal`, which wires **no
+/// N0 pkarr/DNS** on purpose (see `lookup::build_endpoint`), and mDNS/DHT are
+/// `host`-only. So a bare `EndpointAddr::new(id)` is unresolvable in a browser
+/// and in any relay-only mesh — the dial times out, the verdict reads "free",
+/// and every surviving member claims a duplicate same-id beacon that captures
+/// its own bootstrap dial. Probe-before-claim was a no-op exactly where it
+/// mattered most; naming the address is what makes it answer its question.
+///
 /// The endpoint is built here, on the loop, rather than inside the task:
 /// it costs milliseconds, and holding it lets a departure close it (see
 /// [`RivalProbe::abort_and_close`]). `None` ⇒ the build failed, so we
@@ -283,9 +318,12 @@ async fn spawn_rival_probe(params: &RendezvousParams) -> Option<RivalProbe> {
     let budget = Duration::from_secs(HEAL_PROBE_SECS.min(heal_interval_secs()));
     let (tx, rx) = oneshot::channel();
     let endpoint = prober.clone();
-    let id = params.id;
+    // Falls back to the bare id only when there is genuinely nothing to name
+    // (relay disabled, no ladder) — there mDNS/DHT are the sole resolution
+    // channel and the endpoint's own lookups are all the probe can use.
+    let target = rendezvous_addr(params).unwrap_or_else(|| EndpointAddr::new(params.id));
     let task = n0_future::task::spawn(async move {
-        let found_rival = probe_connect(&prober, EndpointAddr::new(id), budget).await;
+        let found_rival = probe_connect(&prober, target, budget).await;
         prober.close().await;
         // A closed receiver means the loop moved on (departure, or the
         // beacon arrived another way); the verdict is simply stale.
@@ -590,7 +628,7 @@ async fn claim(
 mod tests {
     use super::{
         Endpoint, LookupOpts, Rendezvous, RendezvousParams, RivalProbe, SecretKey, TopicId, ensure,
-        oneshot, probe_verdict, releasable, verdict_of, watch,
+        oneshot, probe_verdict, releasable, rendezvous_addr, verdict_of, watch,
     };
 
     /// A real endpoint that touches nothing: `LookupOpts::loopback` binds
@@ -664,6 +702,51 @@ mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
+    }
+
+    #[test]
+    fn a_public_rendezvous_is_named_at_its_relay_rung() {
+        let mut params = public_params();
+        params.bootstrap_relay = Some("https://relay.example/".parse().expect("relay url"));
+
+        let addr = rendezvous_addr(&params).expect("a public rendezvous has a rung to name");
+
+        assert_eq!(addr.id, params.id);
+        assert!(
+            addr.addrs
+                .iter()
+                .any(|addr| matches!(addr, iroh::TransportAddr::Relay(_))),
+            "the probe must dial the rung the beacon homes on, not a bare id"
+        );
+    }
+
+    #[test]
+    fn a_private_rendezvous_is_named_at_every_ladder_rung() {
+        let mut params = public_params();
+        params.bind_ports = vec![4001, 4002, 4003];
+
+        let addr = rendezvous_addr(&params).expect("a ladder is always nameable");
+
+        let rungs = addr
+            .addrs
+            .iter()
+            .filter(|addr| matches!(addr, iroh::TransportAddr::Ip(_)))
+            .count();
+        assert_eq!(
+            rungs, 3,
+            "iroh's node-id dial reaches whichever rung the beacon bound, so name them all"
+        );
+    }
+
+    #[test]
+    fn nothing_to_name_is_none_not_a_bare_id() {
+        // Relay disabled and no ladder: mDNS/DHT are the only resolution
+        // channel, and handing back a bare id would look like an address the
+        // caller could dial when it is not one.
+        let params = public_params();
+        assert!(params.bootstrap_relay.is_none() && params.bind_ports.is_empty());
+
+        assert!(rendezvous_addr(&params).is_none());
     }
 
     #[test]

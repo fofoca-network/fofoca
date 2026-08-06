@@ -5,6 +5,7 @@
 //! session after offering; the producer attaches each peer that signals in.
 
 use std::io;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
@@ -41,9 +42,56 @@ pub(crate) struct InboundPacket {
     pub(crate) payload: Vec<u8>,
 }
 
+/// What one session's outbound lane did with the datagrams QUIC handed it.
+///
+/// Every drop on this lane is silent by construction: `poll_send` must not
+/// park (it would stall iroh's shared send loop across every transport), so it
+/// discards and reports success, and the pump discards again when the channel
+/// is congested or refuses the write. That is a defensible design and an
+/// undiagnosable one — a stalled transfer and a healthy idle one produce the
+/// same absence of evidence.
+///
+/// These are that evidence. Read them through
+/// [`BrowserHubTransport::session_counters`]; a consumer deciding whether to
+/// demote a peer to the relay can then say *why* rather than inferring it from
+/// a transfer that did not finish.
+#[derive(Debug, Default)]
+pub struct SessionCounters {
+    /// Datagrams handed to `RTCDataChannel.send` without it throwing.
+    pub sent: AtomicU64,
+    /// Dropped by `poll_send`: the outbound queue was full, which means the
+    /// pump had not been scheduled since the queue drained. QUIC is told the
+    /// send succeeded, so these are invisible above.
+    pub dropped_queue_full: AtomicU64,
+    /// Dropped by the pump: `bufferedAmount` was at or over [`BUFFER_CAP`].
+    pub dropped_congested: AtomicU64,
+    /// Dropped by the pump: `send` threw. A non-zero count here means the
+    /// channel is refusing traffic, not merely slow.
+    pub dropped_refused: AtomicU64,
+}
+
+/// A snapshot of [`SessionCounters`], since the counters themselves are not
+/// `Clone` and reading four atomics separately would not be one moment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionCounts {
+    pub sent: u64,
+    pub dropped_queue_full: u64,
+    pub dropped_congested: u64,
+    pub dropped_refused: u64,
+}
+
+impl SessionCounts {
+    /// Total datagrams discarded on this lane, by any of the three routes.
+    #[must_use]
+    pub fn dropped(&self) -> u64 {
+        self.dropped_queue_full + self.dropped_congested + self.dropped_refused
+    }
+}
+
 #[derive(Debug)]
 struct SessionHandle {
     out_tx: mpsc::Sender<Vec<u8>>,
+    counters: Arc<SessionCounters>,
     /// Keeps the peer connection and data channel alive.
     keepalive: SessionKeepalive,
 }
@@ -189,6 +237,7 @@ impl BrowserHubTransport {
 
         let (out_tx, mut out_rx) = mpsc::channel::<Vec<u8>>(OUT_QUEUE);
         let (mut inbound_sender, mut inbound_receiver) = mpsc::channel::<Vec<u8>>(IN_QUEUE);
+        let counters = Arc::new(SessionCounters::default());
 
         let onmessage = Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
             let Some(bytes) = message_bytes(&event) else {
@@ -251,27 +300,52 @@ impl BrowserHubTransport {
 
         {
             let data_channel = data_channel.clone();
+            let counters = Arc::clone(&counters);
             wasm_bindgen_futures::spawn_local(async move {
                 // Rate-limited visibility for the lossy gate: without it a
                 // congested channel is indistinguishable from a broken one.
-                let mut dropped: u64 = 0;
+                let mut congested: u64 = 0;
+                let mut refused: u64 = 0;
                 while let Some(datagram) = out_rx.next().await {
-                    if data_channel.buffered_amount() < BUFFER_CAP {
-                        let _ = data_channel.send_with_u8_array(&datagram);
-                    } else {
-                        dropped += 1;
-                        if dropped == 1 || dropped.is_multiple_of(256) {
+                    if data_channel.buffered_amount() >= BUFFER_CAP {
+                        congested += 1;
+                        counters.dropped_congested.fetch_add(1, Ordering::Relaxed);
+                        if congested == 1 || congested.is_multiple_of(256) {
                             web_sys::console::warn_1(&JsValue::from_str(&format!(
                                 "[fofoca webrtc] dropping outbound datagrams \
-                                 (bufferedAmount over cap); total {dropped} for {remote}"
+                                 (bufferedAmount over cap); total {congested} for {remote}"
                             )));
                         }
+                        continue;
+                    }
+                    // `send` throws, and this used to swallow it. Chrome raises
+                    // `InvalidStateError` once the channel is no longer open and
+                    // `OperationError` when its send buffer is exceeded, and a
+                    // channel that has started refusing every write is
+                    // indistinguishable from a healthy idle one if nobody looks
+                    // — a stall with no error anywhere, which is precisely the
+                    // shape of report this lane has been getting.
+                    if let Err(error) = data_channel.send_with_u8_array(&datagram) {
+                        refused += 1;
+                        counters.dropped_refused.fetch_add(1, Ordering::Relaxed);
+                        if refused == 1 || refused.is_multiple_of(256) {
+                            web_sys::console::warn_1(&JsValue::from_str(&format!(
+                                "[fofoca webrtc] data channel refused a send for \
+                                 {remote} (ready_state={:?}, bufferedAmount={}); \
+                                 total {refused}: {error:?}",
+                                data_channel.ready_state(),
+                                data_channel.buffered_amount(),
+                            )));
+                        }
+                    } else {
+                        counters.sent.fetch_add(1, Ordering::Relaxed);
                     }
                 }
-                if dropped > 0 {
+                if congested > 0 || refused > 0 {
                     web_sys::console::log_1(&JsValue::from_str(&format!(
-                        "[fofoca webrtc] session for {remote} dropped \
-                         {dropped} outbound datagrams over its lifetime"
+                        "[fofoca webrtc] session for {remote} dropped {congested} \
+                         outbound datagrams to congestion and {refused} to refused \
+                         sends over its lifetime"
                     )));
                 }
             });
@@ -279,6 +353,7 @@ impl BrowserHubTransport {
 
         Ok(BrowserSessionGuard(reservation.fulfil(SessionHandle {
             out_tx,
+            counters,
             keepalive: SessionKeepalive {
                 peer_connection,
                 data_channel,
@@ -359,6 +434,68 @@ impl BrowserHubTransport {
         ))
     }
 
+    /// Bytes and messages this session's **data channel** has carried, as
+    /// `(bytes_sent, bytes_received, messages_sent, messages_received)`.
+    ///
+    /// The counterpart to [`Self::selected_pair_stats`], and the one to reach
+    /// for when the question is "did our traffic move?". That reader answers a
+    /// different question — how much crossed the selected ICE candidate pair,
+    /// framing included — and it is measurably not a reliable proxy for this
+    /// one: on a connection that had just carried a verified megabyte, the
+    /// candidate pair and its transport row were both observed reporting 7400
+    /// bytes and 28 packets. Whatever the browser was describing there, it was
+    /// not what the data channel had done.
+    ///
+    /// That matters beyond tidiness, because "wire counters stay flat" is the
+    /// kind of observation a caller demotes a peer to the relay on. This row is
+    /// reported by the SCTP layer that actually carries our datagrams, names
+    /// this channel by its `label`, and cannot be confused with another pair.
+    ///
+    /// `None` when there is no live session or the browser reports no
+    /// `data-channel` row for it yet.
+    pub async fn data_channel_bytes(&self, remote: &EndpointId) -> Option<(f64, f64, f64, f64)> {
+        let peer_connection = self
+            .sessions
+            .with_live(remote, |handle| handle.keepalive.peer_connection.clone())?;
+        let report = JsFuture::from(peer_connection.get_stats()).await.ok()?;
+        let iter = js_sys::try_iter(&report).ok().flatten()?;
+        for entry in iter.flatten() {
+            let Ok(row) = entry.dyn_into::<js_sys::Array>() else {
+                continue;
+            };
+            let Ok(stats) = row.get(1).dyn_into::<js_sys::Object>() else {
+                continue;
+            };
+            let text = |key: &str| {
+                Reflect::get(&stats, &JsValue::from_str(key))
+                    .ok()
+                    .and_then(|value| value.as_string())
+            };
+            // By label, not by "the first data-channel row": a peer connection
+            // carries exactly one channel for us, but nothing stops a future
+            // one from carrying more, and picking arbitrarily is how the
+            // candidate-pair reader went wrong.
+            if text("type").as_deref() != Some("data-channel")
+                || text("label").as_deref() != Some(crate::DATA_CHANNEL_LABEL)
+            {
+                continue;
+            }
+            let number = |key: &str| {
+                Reflect::get(&stats, &JsValue::from_str(key))
+                    .ok()
+                    .and_then(|value| value.as_f64())
+                    .unwrap_or(0.0)
+            };
+            return Some((
+                number("bytesSent"),
+                number("bytesReceived"),
+                number("messagesSent"),
+                number("messagesReceived"),
+            ));
+        }
+        None
+    }
+
     /// Selected ICE **local** candidate for a live session, if any.
     ///
     /// The other half of [`Self::selected_remote_candidate`]. Without it a tab
@@ -370,6 +507,69 @@ impl BrowserHubTransport {
             .sessions
             .with_live(remote, |handle| handle.keepalive.peer_connection.clone())?;
         selected_candidate_from_stats(&peer_connection, "localCandidateId").await
+    }
+
+    /// What this session's outbound lane has done with the datagrams QUIC gave
+    /// it — see [`SessionCounters`] for why the numbers exist at all.
+    ///
+    /// `None` when there is no live session. Counting starts at `attach`, so a
+    /// reconnected peer's counts are its own.
+    #[must_use]
+    pub fn session_counters(&self, remote: &EndpointId) -> Option<SessionCounts> {
+        self.sessions.with_live(remote, |handle| SessionCounts {
+            sent: handle.counters.sent.load(Ordering::Relaxed),
+            dropped_queue_full: handle.counters.dropped_queue_full.load(Ordering::Relaxed),
+            dropped_congested: handle.counters.dropped_congested.load(Ordering::Relaxed),
+            dropped_refused: handle.counters.dropped_refused.load(Ordering::Relaxed),
+        })
+    }
+
+    /// Push datagrams into the inbound path as if the channel had just
+    /// delivered them, tagged as coming from `remote`.
+    ///
+    /// For the answerer's pre-attach backlog and nothing else: the browser
+    /// gives a data channel no inbound buffer, so traffic that lands between
+    /// `ondatachannel` and `attach` is lost unless something holds it. See the
+    /// buffering handler in `web::jsep::answer`.
+    ///
+    /// Non-blocking, like the live pump: a full queue drops rather than parks,
+    /// because parking here would stall the negotiation that is trying to
+    /// finish. Logged when it happens — silently discarding a QUIC Initial is
+    /// exactly the failure this method exists to prevent.
+    pub(crate) fn inject_inbound(&self, remote: EndpointId, datagrams: Vec<Vec<u8>>) {
+        let mut inbound_tx = self.inbound_tx.clone();
+        let mut dropped = 0usize;
+        for payload in datagrams {
+            if inbound_tx
+                .try_send(InboundPacket {
+                    from: remote,
+                    payload,
+                })
+                .is_err()
+            {
+                dropped += 1;
+            }
+        }
+        if dropped > 0 {
+            web_sys::console::warn_1(&JsValue::from_str(&format!(
+                "[fofoca webrtc] inbound queue full; dropped {dropped} \
+                 pre-attach datagram(s) for {remote}"
+            )));
+        }
+    }
+
+    /// The live session's `RTCPeerConnection`, if there is one.
+    ///
+    /// The escape hatch for diagnostics this hub does not wrap. The readers
+    /// above answer the questions a roster needs — which candidate pair, how
+    /// many bytes, what round trip — by picking one row out of `getStats` and
+    /// summarising it; when that summary disagrees with what demonstrably
+    /// crossed the connection, the only way to find out *which* row was picked
+    /// is to walk the report yourself.
+    #[must_use]
+    pub fn peer_connection(&self, remote: &EndpointId) -> Option<RtcPeerConnection> {
+        self.sessions
+            .with_live(remote, |handle| handle.keepalive.peer_connection.clone())
     }
 
     /// Tear down the session for `remote`, if any.
@@ -430,35 +630,77 @@ async fn selected_pair_from_stats(
         by_id.insert(id, obj);
     }
 
-    let mut selected_pair_id = None;
-    for stats in by_id.values() {
-        let ty = Reflect::get(stats, &JsValue::from_str("type"))
-            .ok()
-            .and_then(|value| value.as_string())
-            .unwrap_or_default();
-        if ty == "transport" {
-            selected_pair_id = Reflect::get(stats, &JsValue::from_str("selectedCandidatePairId"))
-                .ok()
-                .and_then(|value| value.as_string());
-            if selected_pair_id.is_some() {
-                break;
-            }
-        }
-        if ty == "candidate-pair"
-            && Reflect::get(stats, &JsValue::from_str("selected"))
-                .ok()
-                .and_then(|value| value.as_bool())
-                == Some(true)
-        {
-            selected_pair_id = Reflect::get(stats, &JsValue::from_str("id"))
-                .ok()
-                .and_then(|value| value.as_string());
-            break;
-        }
-    }
-    let pair_id = selected_pair_id?;
+    let pair_id = selected_pair_id(&by_id)?;
     let pair = by_id.get(&pair_id)?.clone();
     Some((by_id, pair))
+}
+
+/// Id of the candidate pair actually carrying traffic, in preference order.
+///
+/// The order matters and the *independence from iteration order* matters more.
+/// This used to be a single pass over the report that took whichever answer it
+/// met first, and `by_id` is a `HashMap` — so which row it met first was not
+/// stable between calls. Worse, a `transport` row without a
+/// `selectedCandidatePairId` assigned `None` over an id an earlier
+/// `candidate-pair` row had already supplied, throwing away a correct answer.
+///
+/// The symptom was a reader that intermittently described a pair that was not
+/// carrying anything: byte counters frozen at the handshake's few `KiB` while a
+/// megabyte demonstrably crossed the connection. Caught by
+/// `tests/browser_loopback.rs`, whose bulk case asserts the counters move —
+/// and it is worth knowing that "wire counters stay flat" was also the evidence
+/// a consumer reported for a transfer stall, which this could have produced on
+/// its own.
+///
+/// 1. `transport.selectedCandidatePairId` — the standard field, and the only
+///    one Chrome reliably populates.
+/// 2. `candidate-pair.selected` — the legacy flag, still emitted by some
+///    browsers and by older Chrome.
+/// 3. A `succeeded` + `nominated` pair — what the other two are derived from,
+///    for a browser that publishes neither.
+fn selected_pair_id(by_id: &std::collections::HashMap<String, js_sys::Object>) -> Option<String> {
+    let field = |stats: &js_sys::Object, key: &str| {
+        Reflect::get(stats, &JsValue::from_str(key))
+            .ok()
+            .and_then(|value| value.as_string())
+    };
+    let flag = |stats: &js_sys::Object, key: &str| {
+        Reflect::get(stats, &JsValue::from_str(key))
+            .ok()
+            .and_then(|value| value.as_bool())
+            == Some(true)
+    };
+    let of_type = |wanted: &'static str| {
+        let mut rows: Vec<&js_sys::Object> = by_id
+            .values()
+            .filter(|stats| field(stats, "type").as_deref() == Some(wanted))
+            .collect();
+        // A stable tie-break so a report with more than one candidate row
+        // yields the same answer on every call.
+        rows.sort_by_key(|stats| field(stats, "id").unwrap_or_default());
+        rows
+    };
+
+    if let Some(id) = of_type("transport")
+        .into_iter()
+        .find_map(|stats| field(stats, "selectedCandidatePairId"))
+    {
+        return Some(id);
+    }
+    let pairs = of_type("candidate-pair");
+    if let Some(id) = pairs
+        .iter()
+        .find(|stats| flag(stats, "selected"))
+        .and_then(|stats| field(stats, "id"))
+    {
+        return Some(id);
+    }
+    pairs
+        .iter()
+        .find(|stats| {
+            field(stats, "state").as_deref() == Some("succeeded") && flag(stats, "nominated")
+        })
+        .and_then(|stats| field(stats, "id"))
 }
 
 /// Address + candidate type for one side of the selected pair.
@@ -584,7 +826,7 @@ impl CustomEndpoint for BrowserHubEndpoint {
     }
 }
 
-fn message_bytes(event: &MessageEvent) -> Option<Vec<u8>> {
+pub(crate) fn message_bytes(event: &MessageEvent) -> Option<Vec<u8>> {
     let data = event.data();
     if let Ok(buffer) = data.clone().dyn_into::<js_sys::ArrayBuffer>() {
         return Some(js_sys::Uint8Array::new(&buffer).to_vec());
@@ -632,14 +874,20 @@ impl CustomSender for BrowserHubSender {
             .segment_size
             .unwrap_or_else(|| transmit.contents.len().max(1));
         // Clone the sender out under the lock, then queue outside it.
-        let Some(mut out_tx) = self
-            .sessions
-            .with_live(&remote, |handle| handle.out_tx.clone())
-        else {
+        let Some((mut out_tx, counters)) = self.sessions.with_live(&remote, |handle| {
+            (handle.out_tx.clone(), Arc::clone(&handle.counters))
+        }) else {
             return Poll::Ready(Err(io::Error::from(io::ErrorKind::NotConnected)));
         };
         for chunk in transmit.contents.chunks(chunk_size) {
-            let _ = out_tx.try_send(chunk.to_vec());
+            // Never `Pending`: that would stall iroh's shared send loop for
+            // every transport. Drop and let QUIC retransmit — but *count* it,
+            // because we are about to report success for a datagram nobody
+            // will ever send, and without the counter that lie leaves no trace
+            // anywhere. See `SessionCounters`.
+            if out_tx.try_send(chunk.to_vec()).is_err() {
+                counters.dropped_queue_full.fetch_add(1, Ordering::Relaxed);
+            }
         }
         Poll::Ready(Ok(()))
     }

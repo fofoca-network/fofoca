@@ -210,6 +210,9 @@ pub struct PendingAnswer {
     peer_connection: OpenPeerConnection,
     /// Filled by `ondatachannel` when the remote opens the channel.
     channel_rx: futures::channel::oneshot::Receiver<RtcDataChannel>,
+    /// Datagrams that arrived before the hub's handler was installed, in
+    /// arrival order — see the buffering handler in [`answer`].
+    backlog: std::rc::Rc<std::cell::RefCell<Vec<Vec<u8>>>>,
     callbacks: Vec<JsValue>,
 }
 
@@ -341,15 +344,49 @@ pub async fn answer(
 
     let (channel_tx, channel_rx) = futures::channel::oneshot::channel::<RtcDataChannel>();
     let channel_tx = std::cell::RefCell::new(Some(channel_tx));
-    let ondatachannel =
+    // Everything that arrives before the hub's own `onmessage` is installed.
+    //
+    // The offerer has no such gap: it owns the channel from `create_data_channel`
+    // and attaches before the channel opens. The answerer only meets the channel
+    // in `ondatachannel` — by which time it is already `open` — and cannot attach
+    // from here, because `attach` needs the hub and the authenticated remote id,
+    // neither of which this closure has. Between this event and
+    // `PendingAnswer::complete` there is at least one turn of the microtask
+    // queue, and the browser gives a data channel no inbound buffer: whatever
+    // the offerer sent in that window is simply gone.
+    //
+    // A QUIC Initial lost there is survivable — QUIC retransmits it. A *burst*
+    // lost there is not the same thing: the channel is negotiated
+    // `maxRetransmits: 0`, so SCTP will not resend, and QUIC's own recovery
+    // rides the same lane. So the handler goes on immediately and buffers, and
+    // `complete` hands the backlog to the hub in arrival order.
+    let backlog: std::rc::Rc<std::cell::RefCell<Vec<Vec<u8>>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut callbacks: Vec<JsValue> = Vec::new();
+    let early = {
+        let backlog = std::rc::Rc::clone(&backlog);
+        Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |event: web_sys::MessageEvent| {
+            if let Some(bytes) = super::transport::message_bytes(&event) {
+                backlog.borrow_mut().push(bytes);
+            }
+        })
+    };
+    let ondatachannel = {
+        let early = early.as_ref().unchecked_ref::<js_sys::Function>().clone();
         Closure::<dyn FnMut(RtcDataChannelEvent)>::new(move |event: RtcDataChannelEvent| {
             let channel = event.channel();
             channel.set_binary_type(web_sys::RtcDataChannelType::Arraybuffer);
+            channel.set_onmessage(Some(&early));
             if let Some(tx) = channel_tx.borrow_mut().take() {
                 let _ = tx.send(channel);
             }
-        });
+        })
+    };
     peer_connection.set_ondatachannel(Some(ondatachannel.as_ref().unchecked_ref()));
+    // Retained for the peer connection's lifetime: `attach` replaces the
+    // handler, but the closure must outlive the moment it is detached or a
+    // still-queued event would invoke freed memory.
+    callbacks.push(early.into_js_value());
 
     let offer_init = RtcSessionDescriptionInit::new(RtcSdpType::Offer);
     offer_init.set_sdp(sdp);
@@ -376,11 +413,13 @@ pub async fn answer(
         endpoint_id: local.to_string(),
         sdp: local_sdp,
     };
+    callbacks.push(ondatachannel.into_js_value());
     Ok((
         PendingAnswer {
             peer_connection,
             channel_rx,
-            callbacks: vec![ondatachannel.into_js_value()],
+            backlog,
+            callbacks,
         },
         envelope,
     ))
@@ -402,6 +441,7 @@ impl PendingAnswer {
         let Self {
             peer_connection,
             channel_rx,
+            backlog,
             callbacks,
         } = self;
 
@@ -424,11 +464,25 @@ impl PendingAnswer {
 
         // Attach before Open — same race as the offerer path: the peer may
         // dial the mount ALPN the instant its channel is open. Same guard, for
-        // the same reason; see `PendingOffer::complete`.
+        // the same reason; see `PendingOffer::complete`. `attach` installs the
+        // hub's own `onmessage`, replacing the buffering one.
         let pc = peer_connection.release();
         let guard = hub
             .attach(remote, pc.clone(), data_channel.clone(), callbacks)
             .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        // Hand over what arrived before that handler existed, in arrival order
+        // and before anything the hub receives itself — the channel is
+        // unordered, so this is not a sequencing promise, only a refusal to
+        // reorder what we already hold. Taken (not cloned) so the buffer cannot
+        // be delivered twice if this is ever called again.
+        let early = std::mem::take(&mut *backlog.borrow_mut());
+        if !early.is_empty() {
+            web_sys::console::log_1(&JsValue::from_str(&format!(
+                "[fofoca webrtc] delivered {} datagram(s) buffered before attach for {remote}",
+                early.len()
+            )));
+            hub.inject_inbound(remote, early);
+        }
         wait_channel_open(&data_channel, &pc).await?;
         guard.commit();
         Ok(BrowserSession { remote })

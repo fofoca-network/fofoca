@@ -116,20 +116,20 @@ pub(crate) async fn handle_gossip_event(
             } else {
                 state.linked_endpoints.remove(&node_id);
             }
-            // Arm the fast reclaim burst only on a real beacon-loss /
-            // isolation signal: the rendezvous link dropped, or that
-            // was our last tracked peer. A plain HyParView shuffle (a
-            // peer flapping while others remain) must NOT arm
-            // it, or initial multi-node convergence pays a needless
-            // ~6s bind storm on every non-beacon node.
-            if is_rendezvous || state.linked_endpoints.is_empty() {
+            if arms_reclaim(
+                is_rendezvous,
+                state.linked_endpoints.len(),
+                state.rendezvous_linked,
+            ) {
                 state.reclaim_until =
                     Some(Instant::now() + Duration::from_secs(RECLAIM_WINDOW_SECS));
                 tracing::info!(target: "fofoca::gossip",
                     reason = if is_rendezvous {
                         "rendezvous-loss"
-                    } else {
+                    } else if state.linked_endpoints.is_empty() {
                         "last-peer"
+                    } else {
+                        "beaconless"
                     },
                     "armed fast reclaim window"
                 );
@@ -167,6 +167,34 @@ pub(crate) async fn handle_gossip_event(
             tracing::warn!(target: "fofoca::gossip", "gossip stream ended; heal arm will resubscribe");
         }
     }
+}
+
+/// Whether a `NeighborDown` should arm the fast reclaim burst — the
+/// event-driven half of beacon failover, as opposed to waiting out a heal
+/// tick.
+///
+/// Three signals, all meaning "there may be no beacon and we could be the one
+/// to stand it up":
+///
+/// - `is_rendezvous` — the link we lost *was* the beacon.
+/// - `links_left == 0` — that was our last tracked peer; we are isolated.
+/// - `!rendezvous_linked` — we hold no live beacon link at all. This is the
+///   case the first two miss and the one the kill-the-producer drill lives in:
+///   two tabs plus an origin, the origin dies, and each tab is still linked to
+///   the other. Not isolated, and the tab that meshed via the origin's *peer*
+///   endpoint never had a rendezvous link to lose — so nothing armed, and
+///   failover waited out the 15s heal cadence.
+///
+/// The narrow gate this replaces existed to keep a plain HyParView shuffle (a
+/// peer flapping while others remain) from making initial multi-node
+/// convergence pay a needless ~6s bind storm on every non-beacon node. That
+/// storm needed a *claim*, and a claim needs a probe that says the rendezvous
+/// is free — which during convergence it is not. The probe could only say so
+/// because it was dialing an id it had no way to resolve; see
+/// `beacon::spawn_rival_probe`. **This widening is only safe with that fix**:
+/// a convergence-time probe now finds the origin's beacon and nobody binds.
+fn arms_reclaim(is_rendezvous: bool, links_left: usize, rendezvous_linked: bool) -> bool {
+    is_rendezvous || links_left == 0 || !rendezvous_linked
 }
 
 /// Drain the message payloads a dead subscription buffered before its
@@ -1192,6 +1220,41 @@ fn is_loggable(kind: &MessageKind) -> bool {
             // this infra predicate; an App kind never reaches here.
             | MessageKind::App { .. }
     )
+}
+
+#[cfg(test)]
+mod arms_reclaim_tests {
+    use super::arms_reclaim;
+
+    #[test]
+    fn the_beacon_link_dropping_arms_it() {
+        assert!(arms_reclaim(true, 3, false));
+    }
+
+    #[test]
+    fn losing_the_last_peer_arms_it() {
+        // Isolated: nobody left to mesh through, so a beacon may be ours to
+        // stand up even if we never held a link to the old one.
+        assert!(arms_reclaim(false, 0, false));
+    }
+
+    #[test]
+    fn any_loss_while_beaconless_arms_it() {
+        // The kill-the-producer drill: two tabs and an origin, the origin
+        // dies, each tab still linked to the other. Not the rendezvous, not
+        // isolation — and before this the tab armed nothing and waited out the
+        // heal cadence.
+        assert!(arms_reclaim(false, 1, false));
+    }
+
+    #[test]
+    fn a_shuffle_under_a_healthy_beacon_does_not() {
+        // A peer flapping while the beacon link is live is HyParView doing its
+        // job. Arming here is what would make initial convergence pay a bind
+        // storm on every non-beacon node.
+        assert!(!arms_reclaim(false, 1, true));
+        assert!(!arms_reclaim(false, 64, true));
+    }
 }
 
 #[cfg(test)]

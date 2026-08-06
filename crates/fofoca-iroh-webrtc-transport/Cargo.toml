@@ -127,6 +127,26 @@ web-sys = { workspace = true, optional = true, features = [
 tokio.workspace = true
 n0-error = "1"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+# The browser test's timers and its concurrent JSEP join. Already in the
+# dependency closure via iroh on both targets; named here so the test target
+# does not rely on that.
+n0-future.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"
+# DOM, for `browser_matrix.rs` to publish its results table and the
+# `#matrix-done` marker that `cargo task e2e` waits on. Deliberately a *dev*
+# dependency: the transport touches no document, and a feature added to the
+# shipped `web-sys` entry would be on for every consumer that never asked.
+web-sys = { workspace = true, features = [
+    "Document",
+    "Element",
+    "HtmlElement",
+    "Node",
+    # `Location`, so the sweep can read the CPU throttle the driver named in
+    # the query string — a page cannot observe a throttle applied to it.
+    "Location",
+] }
 
 # The loopback test stands up two native endpoints, so it only exists under
 # `native`. Declared rather than left implicit: `--all-targets` (what clippy and
@@ -135,3 +155,17 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 [[test]]
 name = "loopback"
 required-features = ["native"]
+
+# Its browser twin, and the only coverage browser↔browser has. Same reason for
+# being declared: `--all-targets` off wasm32 must not try to build it.
+[[test]]
+name = "browser_loopback"
+required-features = ["web"]
+
+# The configuration sweep the fast suite above is deliberately not: same
+# harness, every traffic shape, minutes rather than seconds. Driven by
+# `cargo task e2e`, which runs it once per browser / build profile /
+# main-thread pressure level.
+[[test]]
+name = "browser_matrix"
+required-features = ["web"]

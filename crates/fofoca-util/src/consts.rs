@@ -257,6 +257,21 @@ pub const RIVAL_RECHECK_SECS: u64 = 30;
 /// Flag: `--rival-recheck-meshed-secs`.
 pub const RIVAL_RECHECK_MESHED_SECS: u64 = 300;
 
+/// Roster size (live gossip links) at or below which a *meshed* holder uses
+/// the brisk lone cadence ([`RIVAL_RECHECK_SECS`]) instead of the slow
+/// [`RIVAL_RECHECK_MESHED_SECS`] backstop.
+///
+/// The slow cadence is priced for the case it was written for: two
+/// **multi-member** islands, where a shed's beacon blip costs a healthy gossip
+/// something and the split is rare. A two-tab mesh left behind by a departed
+/// origin is neither — the split is the routine outcome of that departure, and
+/// a shed there disturbs almost nobody. So the tier is chosen by how much a
+/// shed actually costs, which is roster size, not by the meshed flag alone.
+///
+/// A pure const with no flag, like [`RIVAL_RECHECK_OFFSET_SPAN_SECS`]: it
+/// picks between two cadences that already have their own knobs.
+pub const RIVAL_RECHECK_SMALL_ROSTER: usize = 4;
+
 /// Span of the deterministic per-node phase offset added to the first shed,
 /// derived from the peer endpoint id. Orders simultaneous claimants so
 /// the earlier-offset node sheds first, finds the other's still-held beacon,

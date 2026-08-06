@@ -1,9 +1,8 @@
-use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::Result;
-use iroh::{Endpoint, EndpointAddr, RelayUrl};
+use iroh::{Endpoint, RelayUrl};
 use rand::RngCore;
 use tokio::sync::{mpsc, watch};
 
@@ -141,30 +140,30 @@ fn spawn_startup_rung_confirmation(
 /// partition): the startup hint may now point at a dead path, so the
 /// relay-homed `rendezvous_id` address is registered again before the
 /// long re-bootstrap probe.
+/// The address itself comes from [`crate::beacon::rendezvous_addr`], shared
+/// with the rival probe's dial target: the probe asks whether anyone serves
+/// the identity *a joiner would reach*, so the two must name the same place or
+/// it is answering a different question.
 pub(crate) fn register_rendezvous(endpoint: &Endpoint, params: &RendezvousParams) {
-    let mut addr = EndpointAddr::new(params.id);
-    if !params.bind_ports.is_empty() {
-        for &port in &params.bind_ports {
-            addr = addr.with_ip_addr(SocketAddr::from((Ipv4Addr::LOCALHOST, port)));
-        }
+    // Relay disabled (not in the allowlist) or private without a port ladder:
+    // nothing to pre-register — joiners resolve the rendezvous id via
+    // mDNS/DHT only.
+    let Some(addr) = crate::beacon::rendezvous_addr(params) else {
+        return;
+    };
+    if params.bind_ports.is_empty() {
+        tracing::info!(
+            target: "fofoca::lookup",
+            relay = ?params.bootstrap_relay,
+            "pre-registered rendezvous at the relay rung for zero-lookup dial"
+        );
+    } else {
         // Explicit target: needs RendezvousParams, so can't live in lookups.
         tracing::info!(
             target: "fofoca::lookup",
             rungs = params.bind_ports.len(),
             "pre-registered rendezvous on the loopback port ladder"
         );
-    } else if let Some(relay) = params.bootstrap_relay.clone() {
-        tracing::info!(
-            target: "fofoca::lookup",
-            relay = %relay,
-            "pre-registered rendezvous at the relay rung for zero-lookup dial"
-        );
-        addr = addr.with_relay_url(relay);
-    } else {
-        // Relay disabled (not in the allowlist) or private without a
-        // port ladder: nothing to pre-register — joiners resolve the
-        // rendezvous id via mDNS/DHT only.
-        return;
     }
     let _ = add_peer_addr(endpoint, addr);
 }
