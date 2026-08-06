@@ -13,6 +13,11 @@ and the upstream
 transport factory, a per-endpoint receiver, a registry-backed sender, and a
 per-session driver pumping the connection.
 
+**Start with [`examples/chat-webrtc`](../../examples/chat-webrtc)** if you want
+to see this working rather than read about it: a chat room a browser tab and a
+terminal both join, with no signalling server, in about 700 lines. Its README is
+also where the three things this transport needs from iroh are written down.
+
 ## One crate, two backends
 
 `str0m` and `tokio` do not target `wasm32`; `web-sys` does not exist off the

@@ -126,6 +126,13 @@ CC=$(brew --prefix llvm)/bin/clang CC_wasm32_unknown_unknown=$(brew --prefix llv
 `fofoca-blobs`'s eight OPFS tests need a real browser and are not in CI:
 `wasm-pack test --headless --chrome crates/fofoca-blobs`.
 
+[`examples/chat-webrtc`](examples/chat-webrtc) is a runnable demonstration of
+the browser leg on its own: a chat room a tab and a terminal both join, where
+the tab's connection is QUIC over a `WebRTC` data channel and there is no
+signalling server. It is a workspace of its own and depends on nothing here but
+`fofoca-iroh-webrtc-transport`, so it doubles as a check that a consumer of that
+crate restates no iroh pin.
+
 To build the C ABI as a static library:
 
 ```bash

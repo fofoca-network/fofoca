@@ -1,0 +1,136 @@
+:root {
+  color-scheme: light dark;
+  --fg: light-dark(#1a1a1a, #e8e8e8);
+  --dim: light-dark(#6a6a6a, #909090);
+  --bg: light-dark(#fdfdfd, #16181c);
+  --line: light-dark(#e2e2e2, #2c2f36);
+  --webrtc: light-dark(#0a7a3d, #4ade80);
+  --fallback: light-dark(#9a6b00, #fbbf24);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/* Load-bearing. The user agent's `[hidden] { display: none }` is a plain
+   element rule, so any `display` set in a class rule below outranks it — and
+   both forms here set one. Without this the join form stays on screen after
+   joining and the compose box shows before. */
+[hidden] {
+  display: none !important;
+}
+
+body {
+  margin: 0 auto;
+  padding: 2rem 1.25rem 3rem;
+  max-width: 46rem;
+  font: 15px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--fg);
+  background: var(--bg);
+}
+
+h1 {
+  margin: 0;
+  font-size: 1.15rem;
+  font-weight: 600;
+}
+
+.status,
+.ice {
+  margin: 0.35rem 0 0;
+  color: var(--dim);
+  font-size: 0.85rem;
+}
+
+/* The badge the demo turns on. Green only when the data channel is carrying
+   the connection; amber for any fallback, so "it works" and "it works over
+   WebRTC" can never be mistaken for each other at a glance. */
+.status::before {
+  content: '';
+  display: inline-block;
+  width: 0.55rem;
+  height: 0.55rem;
+  margin-right: 0.5rem;
+  border-radius: 50%;
+  vertical-align: baseline;
+  background: var(--dim);
+}
+
+.status[data-path='webrtc'] {
+  color: var(--webrtc);
+}
+
+.status[data-path='webrtc']::before {
+  background: var(--webrtc);
+}
+
+.status[data-path='relay']::before,
+.status[data-path='ip']::before {
+  background: var(--fallback);
+}
+
+main {
+  margin-top: 1.5rem;
+}
+
+.join {
+  display: grid;
+  gap: 0.75rem;
+  padding-bottom: 1.5rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.join label {
+  display: grid;
+  gap: 0.3rem;
+  color: var(--dim);
+  font-size: 0.8rem;
+}
+
+input {
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font: inherit;
+  color: var(--fg);
+  background: transparent;
+}
+
+button {
+  justify-self: start;
+  padding: 0.5rem 1.1rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font: inherit;
+  color: var(--bg);
+  background: var(--fg);
+  cursor: pointer;
+}
+
+.log {
+  margin: 1.25rem 0;
+  padding: 0;
+  list-style: none;
+}
+
+.log li {
+  padding: 0.12rem 0;
+  overflow-wrap: anywhere;
+}
+
+.log .system {
+  color: var(--dim);
+}
+
+.log .system::before {
+  content: '* ';
+}
+
+.compose {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.compose input {
+  flex: 1;
+}

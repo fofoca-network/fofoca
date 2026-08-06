@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>chat over iroh + WebRTC</title>
+    <link rel="stylesheet" href="./src/style.css" />
+  </head>
+  <body>
+    <header>
+      <h1>chat over iroh <span aria-hidden="true">+</span> WebRTC</h1>
+      <!-- The point of the whole example: which transport is actually carrying
+           the connection. "Connected" alone would be true over the relay too. -->
+      <p id="status" class="status" data-path="none">not connected</p>
+      <p id="ice" class="ice"></p>
+    </header>
+
+    <main>
+      <form id="join" class="join">
+        <label>
+          ticket
+          <input id="ticket" name="ticket" placeholder="paste the ticket the room printed" required />
+        </label>
+        <label>
+          nick
+          <input id="nick" name="nick" placeholder="your name" required />
+        </label>
+        <button type="submit">join</button>
+      </form>
+
+      <ol id="log" class="log" aria-live="polite"></ol>
+
+      <form id="compose" class="compose" hidden>
+        <input id="text" name="text" placeholder="say something" autocomplete="off" required />
+        <button type="submit">send</button>
+      </form>
+    </main>
+
+    <script type="module" src="./src/main.ts"></script>
+  </body>
+</html>

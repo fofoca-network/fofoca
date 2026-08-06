@@ -69,6 +69,28 @@ pub use addr::{WEBRTC_TRANSPORT_ID, custom_addr, parse_custom_addr};
 pub use ice_uri::accept_ice_uri;
 pub use signaling::{MAX_ENVELOPE_BYTES, SIGNAL_VERSION, SignalEnvelope};
 
+/// The iroh this crate is built against. **Take it from here, never as your own
+/// dependency.**
+///
+/// The transport implements traits from a fork pin (`unstable-custom-transports`
+/// is not on crates.io yet). A consumer that names `iroh` itself resolves a
+/// second copy, and the `CustomTransport` impls below then stop satisfying the
+/// trait iroh hands back — an E0308 whose message points nowhere near the
+/// manifest at fault. Re-exporting is what lets a consumer carry no version, no
+/// git rev and no `[patch.crates-io]`; see the workspace `Cargo.toml` for the
+/// rule this preserves.
+///
+/// Only present when a backend is on: `iroh` is an optional dependency, and the
+/// always-compiled protocol half deliberately reaches no further than
+/// [`iroh_base`].
+#[cfg(any(feature = "native", feature = "web"))]
+pub use iroh;
+/// The dependency-light half — keys, endpoint addresses, relay URLs, no QUIC or
+/// TLS. Always available, so a wasm-clean wire crate can name an
+/// [`iroh_base::EndpointAddr`] without pulling in a network stack. Same
+/// take-it-from-here rule as [`iroh`].
+pub use iroh_base;
+
 /// Label of the single data channel each session carries. Both ends must use
 /// the same string or the channel never opens.
 pub const DATA_CHANNEL_LABEL: &str = "iroh";

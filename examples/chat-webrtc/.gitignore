@@ -1,0 +1,9 @@
+target/
+
+# wasm-bindgen output: generated from chat-web on every build.
+chat-web/dist/
+
+web/node_modules/
+web/dist/
+# Written by scripts/wasm-asset.ts, carries the current wasm's content hash.
+web/src/wasm-path.ts

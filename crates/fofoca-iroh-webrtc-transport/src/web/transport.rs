@@ -465,6 +465,16 @@ async fn selected_pair_from_stats(
 ///
 /// `side` is the stats field naming the candidate to follow —
 /// `remoteCandidateId` for the peer, `localCandidateId` for us.
+///
+/// **The address may be empty, and a caller must render that case.** A browser
+/// only reports a candidate's address in `getStats` when that address has
+/// already gone out on the wire; anything it considers private it withholds,
+/// leaving `address` and `ip` both null. Measured: Safari withholds it for
+/// `host` *and* `prflx` and names only `srflx`; Chrome withholds it for
+/// `prflx`. The candidate **type** is reported in every one of those cases, and
+/// "we paired on a host candidate whose address the browser will not name" is a
+/// far more useful answer than the `None` this used to return — which a caller
+/// cannot tell apart from "there is no session".
 async fn selected_candidate_from_stats(
     peer_connection: &RtcPeerConnection,
     side: &str,
@@ -482,7 +492,8 @@ async fn selected_candidate_from_stats(
             Reflect::get(remote, &JsValue::from_str("ip"))
                 .ok()
                 .and_then(|value| value.as_string())
-        })?;
+        })
+        .unwrap_or_default();
     let kind = Reflect::get(remote, &JsValue::from_str("candidateType"))
         .ok()
         .and_then(|value| value.as_string())
