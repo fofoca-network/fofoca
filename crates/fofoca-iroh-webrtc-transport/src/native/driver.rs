@@ -142,8 +142,19 @@ pub(crate) async fn drive_until_channel_ready(
                 // The destination must be the advertised candidate address,
                 // not the socket's 0.0.0.0 bind — str0m matches it against
                 // its local ICE candidate.
-                let receive = Receive::new(Protocol::Udp, src, advertised, &buf[..len])
-                    .context("str0m receive input")?;
+                //
+                // A datagram that does not parse is noise, not failure — the
+                // same tolerance `drive_session` has. The media socket is
+                // shared with the STUN gather, and the gather probes its
+                // servers concurrently: the losing server's Binding Success
+                // lands here after the winner returned, and str0m rejects it
+                // ("no message integrity") because it is a plain RFC 5389
+                // reply, not an ICE-authenticated one. Failing the whole
+                // handshake for a stray reply killed real connects.
+                let Ok(receive) = Receive::new(Protocol::Udp, src, advertised, &buf[..len]) else {
+                    tracing::trace!(%src, "ignoring a datagram str0m cannot parse during the handshake");
+                    continue;
+                };
                 rtc.handle_input(Input::Receive(Instant::now(), receive))
                     .context("str0m receive input")?;
             }
