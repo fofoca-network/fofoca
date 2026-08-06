@@ -98,36 +98,36 @@ uuid = { version = "1", features = ["v4"] }
 # Branch fix/netwatch-fork-pin: the mapped_addrs eviction (iroh#4294), the
 # relay-teardown `join_next` drain, and netwatch/portmapper pinned to the
 # net-tools fork so the RTM_MISS fix arrives transitively too.
-iroh = { version = "1.0.2", git = "https://github.com/fofoca-network/iroh", rev = "a1c166834f5c16fd266089bb8516a5a577b48c74", default-features = false, features = ["tls-ring", "unstable-custom-transports"] }
+iroh = { version = "=1.0.3", git = "https://github.com/fofoca-network/iroh", rev = "b7e07872a6d28a9b7971ecfaca8db69c4bddd2de", default-features = false, features = ["tls-ring", "unstable-custom-transports"] }
 # The dependency-light half of iroh: keys, endpoint addresses, relay URLs — no
 # QUIC, TLS or DNS. `fofoca-protocol` depends on this rather than `iroh` so the
 # wire vocabulary carries no network stack (docs/mesh-slimming.md). Same repo and
 # rev as `iroh` above, necessarily: the forked `iroh` uses its workspace-local
 # copy, and mixing that with the published one is the two-`iroh_base` failure.
 # `relay` is a default `fofoca-protocol` adds back; the transports do not need it.
-iroh-base = { version = "1.0.2", git = "https://github.com/fofoca-network/iroh", rev = "a1c166834f5c16fd266089bb8516a5a577b48c74", default-features = false, features = ["key"] }
+iroh-base = { version = "=1.0.3", git = "https://github.com/fofoca-network/iroh", rev = "b7e07872a6d28a9b7971ecfaca8db69c4bddd2de", default-features = false, features = ["key"] }
 # Only `iroh-mainline-address-lookup` names it, and only under `dht`. Pinned to
 # the same rev for the same reason as `iroh-base`.
-iroh-dns = { version = "1.0.2", git = "https://github.com/fofoca-network/iroh", rev = "a1c166834f5c16fd266089bb8516a5a577b48c74" }
+iroh-dns = { version = "=1.0.3", git = "https://github.com/fofoca-network/iroh", rev = "b7e07872a6d28a9b7971ecfaca8db69c4bddd2de" }
 # The mDNS + mainline-DHT address-lookup providers, extracted from iroh core in
 # the 1.0 line. Forked for one reason only: they sat between this crate and iroh
 # and named iroh/iroh-base/iroh-dns from crates.io, which is what forced every
 # consumer to carry a patch table. The fork holds no functional change and has no
 # upstream path — n0 will not point their crates at ours — so delete it the
 # moment the iroh pins themselves become unnecessary.
-iroh-mdns-address-lookup = { version = "0.4", git = "https://github.com/fofoca-network/iroh-address-lookups", rev = "890b65407594f55105e438154ce4a41a62431c09" }
-iroh-mainline-address-lookup = { version = "0.4", git = "https://github.com/fofoca-network/iroh-address-lookups", rev = "890b65407594f55105e438154ce4a41a62431c09" }
+iroh-mdns-address-lookup = { version = "=0.4.0", git = "https://github.com/fofoca-network/iroh-address-lookups", rev = "53cf1ee6cc10a9b8c4805a5f7fe4d39570d86aa1" }
+iroh-mainline-address-lookup = { version = "=0.4.0", git = "https://github.com/fofoca-network/iroh-address-lookups", rev = "53cf1ee6cc10a9b8c4805a5f7fe4d39570d86aa1" }
 # `default-features = false` for the same reason as `iroh`: the browser leg
 # cannot carry the host-only defaults.
 #
 # Branch fix/fofoca-iroh-pin: the connection-churn leak fix (upstream PR
 # n0-computer/iroh-gossip#147) plus its own iroh/iroh-base repoint, since this
 # crate is another that sat between us and iroh.
-iroh-gossip = { version = "0.101", git = "https://github.com/fofoca-network/iroh-gossip", rev = "46efd641d55ebe3a606e11c6d6800519ea643be5", default-features = false, features = ["net"] }
+iroh-gossip = { version = "=0.101.0", git = "https://github.com/fofoca-network/iroh-gossip", rev = "57dcb6b8e5c0645c951830faf6b84b5893ee83c1", default-features = false, features = ["net"] }
 # Named directly by both custom transports: `RecvMeta` appears in the
 # `CustomEndpoint::poll_recv` signature. This is the quinn fork iroh runs on,
 # and it resolves to the same crates.io release iroh itself depends on.
-noq-udp = "1.0.1"
+noq-udp = "=1.1.0"
 # The portable clock. Off wasm32 this is `pub use std::time::*` and pulls in
 # nothing, so on a host these *are* the std types; only a browser gets the
 # `Performance.now()` / `Date.now()` implementation. Without it every
