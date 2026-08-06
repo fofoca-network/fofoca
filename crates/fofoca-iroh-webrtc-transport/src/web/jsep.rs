@@ -6,7 +6,10 @@
 //!
 //! Vanilla ICE: candidates ride inside the SDP, so gathering must complete
 //! *before* the envelope goes out. There is no trickle message to add them
-//! later.
+//! later — and that stays fast because [`wait_ice_complete`] settles for the
+//! candidates in hand once they cover NAT traversal, instead of waiting out
+//! `complete` (which Chromium withholds until every STUN server answered or
+//! timed out).
 
 use wasm_bindgen::JsCast as _;
 use wasm_bindgen::prelude::*;
@@ -28,9 +31,17 @@ const CHANNEL_OPEN_DEADLINE_MS: f64 = 60_000.0;
 /// truncation is implied.
 const CHANNEL_OPEN_DEADLINE_MS_I32: i32 = 60_000;
 /// How long to let gathering run before settling for the candidates in hand.
-/// Host is instant and srflx costs one STUN round trip, so this is generous —
-/// it was sized for TURN allocate, which no longer happens.
+/// This is the ceiling for the no-candidate case only: with a usable set in
+/// hand, [`wait_ice_complete`] exits after [`ICE_QUIET_MS`] instead. Chromium
+/// reports `complete` only once *every* configured STUN server answered or
+/// exhausted its ~9.5 s retransmission ladder, so a single blocked server used
+/// to cost this whole deadline on every connect.
 const ICE_GATHERING_DEADLINE_MS: f64 = 10_000.0;
+/// How long gathering may stay quiet — no new candidate line — before the set
+/// in hand is taken as complete enough. One srflx (when servers are
+/// configured) plus one host/mdns candidate is all a connect needs; the quiet
+/// period lets a second prompt server still get its candidate in.
+const ICE_QUIET_MS: f64 = 400.0;
 const POLL_MS: i32 = 50;
 
 /// One `RTCIceServer` entry.
@@ -108,15 +119,19 @@ impl IceServers {
 /// filters what we control, but the configuration can still be rejected for a
 /// reason we have not met yet — and a peer connection with no ICE servers still
 /// gathers host candidates, which is strictly better than none at all.
-fn new_peer_connection(ice: &IceServers) -> Result<RtcPeerConnection, JsValue> {
+/// Also reports whether the connection ended up with STUN servers, because
+/// the gathering wait must not hold out for a srflx candidate that can never
+/// arrive — neither on the `host_only()` config nor on this degraded retry.
+fn new_peer_connection(ice: &IceServers) -> Result<(RtcPeerConnection, bool), JsValue> {
     match RtcPeerConnection::new_with_configuration(&ice.to_configuration()) {
-        Ok(peer_connection) => Ok(peer_connection),
+        Ok(peer_connection) => Ok((peer_connection, !ice.0.is_empty())),
         Err(error) => {
             web_sys::console::warn_1(&JsValue::from_str(&format!(
                 "[fofoca webrtc] the browser refused the ICE configuration \
                  ({error:?}); retrying with no ICE servers (host candidates only)"
             )));
             RtcPeerConnection::new_with_configuration(&IceServers::host_only().to_configuration())
+                .map(|peer_connection| (peer_connection, false))
                 .map_err(|retry_error| js_err("RTCPeerConnection", &retry_error))
         }
     }
@@ -233,7 +248,8 @@ pub async fn offer(
     local: EndpointId,
     ice: &IceServers,
 ) -> Result<(PendingOffer, SignalEnvelope), JsValue> {
-    let peer_connection = OpenPeerConnection::new(new_peer_connection(ice)?);
+    let (peer_connection, expects_srflx) = new_peer_connection(ice)?;
+    let peer_connection = OpenPeerConnection::new(peer_connection);
     // Unreliable + unordered: the channel carries QUIC datagrams, and QUIC
     // already owns loss recovery and congestion control. Reliable ordered
     // SCTP underneath it would stack a second retransmission loop and
@@ -255,7 +271,7 @@ pub async fn offer(
     JsFuture::from(peer_connection.set_local_description(&offer_init))
         .await
         .map_err(|error| js_err("setLocalDescription", &error))?;
-    wait_ice_complete(&peer_connection).await;
+    wait_ice_complete(&peer_connection, expects_srflx).await;
     let local_sdp = peer_connection
         .local_description()
         .ok_or_else(|| JsValue::from_str("no local description after gathering"))?
@@ -340,7 +356,8 @@ pub async fn answer(
         return Err(JsValue::from_str("expected an offer envelope"));
     };
 
-    let peer_connection = OpenPeerConnection::new(new_peer_connection(ice)?);
+    let (peer_connection, expects_srflx) = new_peer_connection(ice)?;
+    let peer_connection = OpenPeerConnection::new(peer_connection);
 
     let (channel_tx, channel_rx) = futures::channel::oneshot::channel::<RtcDataChannel>();
     let channel_tx = std::cell::RefCell::new(Some(channel_tx));
@@ -401,7 +418,7 @@ pub async fn answer(
     JsFuture::from(peer_connection.set_local_description(&answer_init))
         .await
         .map_err(|error| js_err("setLocalDescription", &error))?;
-    wait_ice_complete(&peer_connection).await;
+    wait_ice_complete(&peer_connection, expects_srflx).await;
     let local_sdp = peer_connection
         .local_description()
         .ok_or_else(|| JsValue::from_str("no local description after gathering"))?
@@ -524,20 +541,62 @@ fn any_err(context: &str, error: impl std::fmt::Display) -> JsValue {
     JsValue::from_str(&format!("{context}: {error}"))
 }
 
-async fn wait_ice_complete(peer_connection: &RtcPeerConnection) {
+/// Wait for ICE gathering — until `complete`, until the candidates in hand
+/// settle, or until the deadline.
+///
+/// Vanilla ICE, deliberately: candidates ride inside the SDP, so gathering
+/// must finish before the envelope is written. Early exit — not trickle — is
+/// how that stays fast: once a usable set is quiet for [`ICE_QUIET_MS`], the
+/// SDP ships with the candidates in hand, which is exactly what the browser
+/// itself falls back to when a STUN server never answers. Trickle would only
+/// shave the quiet period, at the price of a wire-format change plus
+/// capability negotiation across every signal carrier — rejected in
+/// agent-share's `docs/research/connect-latency.md`. Fewer `a=candidate`
+/// lines is legal SDP, so old and new peers interop unchanged.
+///
+/// `expects_srflx` guards NAT traversal: with no TURN by policy, srflx is the
+/// only rung that crosses a NAT, so the early exit refuses to fire before one
+/// arrives — unless the connection has no STUN servers and srflx can never
+/// come.
+async fn wait_ice_complete(peer_connection: &RtcPeerConnection, expects_srflx: bool) {
     let deadline = now_ms() + ICE_GATHERING_DEADLINE_MS;
+    let mut candidates_seen = 0usize;
+    let mut last_change_ms = now_ms();
     loop {
         if peer_connection.ice_gathering_state() == RtcIceGatheringState::Complete {
             return;
         }
+        let now = now_ms();
         // Always proceed after the deadline — previously we looped forever when
         // gathering stalled with zero `a=candidate` lines. Callers then check
         // for candidates and hard-fail if none landed.
-        if now_ms() >= deadline {
+        if now >= deadline {
             return;
+        }
+        // The browser keeps `localDescription` current as candidates gather,
+        // so polling it needs no event plumbing beyond the loop that must
+        // exist for the deadline anyway.
+        if let Some(description) = peer_connection.local_description() {
+            let (host, mdns, srflx, relay, other) = count_candidates(&description.sdp());
+            let total = host + mdns + srflx + relay + other;
+            if total != candidates_seen {
+                candidates_seen = total;
+                last_change_ms = now;
+            }
+            if gathering_settled(host + mdns, srflx, now - last_change_ms, expects_srflx) {
+                return;
+            }
         }
         sleep_ms(POLL_MS).await;
     }
+}
+
+/// Whether the candidate set in hand is enough to stop gathering early.
+///
+/// `local` counts host plus mdns lines: Chrome obfuscates host candidates as
+/// mDNS `.local` names, so counting `host` alone would never see them.
+fn gathering_settled(local: usize, srflx: usize, quiet_ms: f64, expects_srflx: bool) -> bool {
+    local >= 1 && (srflx >= 1 || !expects_srflx) && quiet_ms >= ICE_QUIET_MS
 }
 
 fn now_ms() -> f64 {
@@ -671,4 +730,43 @@ async fn sleep_ms(millis: i32) {
         }
     });
     let _ = JsFuture::from(promise).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ICE_QUIET_MS, gathering_settled};
+
+    const QUIET: f64 = ICE_QUIET_MS;
+
+    #[test]
+    fn no_candidates_never_settles() {
+        assert!(!gathering_settled(0, 0, QUIET * 100.0, true));
+        assert!(!gathering_settled(0, 0, QUIET * 100.0, false));
+    }
+
+    #[test]
+    fn srflx_is_required_when_stun_servers_are_configured() {
+        // Host-only in hand: keep waiting — srflx is the only NAT rung.
+        assert!(!gathering_settled(2, 0, QUIET, true));
+        assert!(gathering_settled(2, 1, QUIET, true));
+    }
+
+    #[test]
+    fn srflx_is_waived_without_stun_servers() {
+        // host_only() / degraded config: srflx can never arrive.
+        assert!(gathering_settled(1, 0, QUIET, false));
+    }
+
+    #[test]
+    fn a_fresh_candidate_resets_the_quiet_period() {
+        assert!(!gathering_settled(1, 1, QUIET - 1.0, true));
+        assert!(gathering_settled(1, 1, QUIET, true));
+    }
+
+    #[test]
+    fn srflx_alone_is_not_enough() {
+        // No host/mdns line yet means gathering only just started; the local
+        // candidates are instant, so their absence says "keep waiting".
+        assert!(!gathering_settled(0, 1, QUIET, true));
+    }
 }
