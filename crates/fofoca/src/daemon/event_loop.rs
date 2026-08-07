@@ -707,6 +707,11 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
                 let claimed = beacon::claim_after_probe(&rendezvous_params, &endpoint, &mut rendezvous, found_rival).await;
                 if claimed {
                     schedule_rival_recheck(&mut state, cohost, &rendezvous_params, &endpoint);
+                } else if found_rival {
+                    // A rival holds the identity: this arbitration epoch is
+                    // settled, so a later claim (the rival died) starts the
+                    // re-check backoff from its brisk base again.
+                    state.rival_recheck_rounds = 0;
                 }
             }
             _ = intervals.reclaim.tick() => {
@@ -1601,14 +1606,21 @@ fn rival_recheck_applies(policy: CoHostPolicy, public: bool) -> bool {
 /// cadence plus fresh random jitter, breaking the residual
 /// both-shed-together collision geometrically.
 ///
-/// `links` is the live gossip-link count, and it alone picks the steady tier:
-/// a shed's cost is what the blip disturbs, which is how many peers are on the
-/// other end of it. That subsumes the `meshed` flag this used to take — a
-/// holder with no live links is lone by any useful reading, whether or not it
-/// once met a peer — and it is what stops a two-tab mesh from waiting out a
-/// cadence priced for two multi-member islands. See
+/// `roster` is the membership count (`EventLoopState::peers`), and it picks
+/// the steady tier: a shed's cost is what the blip disturbs, which is how
+/// many members may be bootstrapped through this beacon. The live-link count
+/// this used to read mismeasured exactly when it mattered — a survivor
+/// claiming right after an origin's death holds two links in a twenty-member
+/// mesh, links regrow over seconds, and by shed time the whole mesh paid a
+/// cadence priced for a two-tab room. The roster survives that churn. See
 /// [`RIVAL_RECHECK_SMALL_ROSTER`](crate::util::consts::RIVAL_RECHECK_SMALL_ROSTER).
-fn next_recheck_delay(round: u32, links: usize, endpoint_id: EndpointId) -> Duration {
+///
+/// Small rosters also back off geometrically: each steady round doubles the
+/// brisk base, capped at the island backstop. A re-check that keeps finding
+/// no rival is evidence there is none, and without the backoff a stable
+/// two-tab mesh blipped its beacon every 30-60s forever. Rounds reset when a
+/// rival wins an arbitration, so a fresh claim epoch starts brisk again.
+fn next_recheck_delay(round: u32, roster: usize, endpoint_id: EndpointId) -> Duration {
     use crate::util::consts::{RIVAL_RECHECK_OFFSET_SPAN_SECS, RIVAL_RECHECK_SMALL_ROSTER};
     use crate::util::tuning::{
         rival_recheck_first_secs, rival_recheck_meshed_secs, rival_recheck_secs,
@@ -1621,10 +1633,16 @@ fn next_recheck_delay(round: u32, links: usize, endpoint_id: EndpointId) -> Dura
         let offset_ms = u64::from_le_bytes(prefix) % (RIVAL_RECHECK_OFFSET_SPAN_SECS * 1000);
         return Duration::from_secs(rival_recheck_first_secs()) + Duration::from_millis(offset_ms);
     }
-    let base_secs = if links > RIVAL_RECHECK_SMALL_ROSTER {
-        rival_recheck_meshed_secs()
+    let backstop_secs = rival_recheck_meshed_secs();
+    let base_secs = if roster > RIVAL_RECHECK_SMALL_ROSTER {
+        backstop_secs
     } else {
+        // Doublings capped well before the shift could overflow; the base is
+        // capped at the backstop regardless.
+        let doublings = round.saturating_sub(1).min(6);
         rival_recheck_secs()
+            .saturating_mul(1u64 << doublings)
+            .min(backstop_secs)
     };
     // Jitter spans the full base: two split holders re-jitter from
     // near-aligned schedules every round, and the wider the span the more
@@ -1645,11 +1663,7 @@ fn schedule_rival_recheck(
     if !rival_recheck_applies(policy, params.bind_ports.is_empty()) {
         return;
     }
-    let delay = next_recheck_delay(
-        state.rival_recheck_rounds,
-        state.linked_endpoints.len(),
-        endpoint.id(),
-    );
+    let delay = next_recheck_delay(state.rival_recheck_rounds, state.peers.len(), endpoint.id());
     state.next_rival_recheck = Some(Instant::now() + delay);
 }
 
@@ -1897,13 +1911,41 @@ mod tests {
         // The workload this exists for: an origin dies and two survivors are
         // left holding same-id beacons. Waiting out a cadence priced for two
         // multi-member islands is how that split lasted minutes.
-        for links in 0..=RIVAL_RECHECK_SMALL_ROSTER {
-            let delay = next_recheck_delay(1, links, id);
+        for roster in 0..=RIVAL_RECHECK_SMALL_ROSTER {
+            let delay = next_recheck_delay(1, roster, id);
             assert!(
                 delay <= lone_base * 2,
-                "a {links}-link roster must not pay the island backstop cadence: {delay:?}"
+                "a {roster}-member roster must not pay the island backstop cadence: {delay:?}"
             );
         }
+    }
+
+    #[test]
+    fn rival_free_rounds_back_off_geometrically_to_the_backstop() {
+        use crate::util::consts::{RIVAL_RECHECK_MESHED_SECS, RIVAL_RECHECK_SECS};
+
+        let id = iroh::SecretKey::from_bytes(&[9; 32]).public();
+
+        // Each rival-free round doubles the brisk base, capped at the island
+        // backstop: a stable small mesh must stop blipping its beacon every
+        // half-minute forever.
+        for round in 1..=8u32 {
+            let expected =
+                (RIVAL_RECHECK_SECS << round.saturating_sub(1).min(6)).min(RIVAL_RECHECK_MESHED_SECS);
+            let base = Duration::from_secs(expected);
+            for _ in 0..4 {
+                let delay = next_recheck_delay(round, 0, id);
+                assert!(
+                    delay >= base && delay <= base * 2,
+                    "round {round}: expected base {expected}s, got {delay:?}"
+                );
+            }
+        }
+
+        // A large roster pays the backstop from round one, backoff or not.
+        let backstop = Duration::from_secs(RIVAL_RECHECK_MESHED_SECS);
+        let delay = next_recheck_delay(1, 20, id);
+        assert!(delay >= backstop && delay <= backstop * 2);
     }
 
     #[test]

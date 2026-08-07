@@ -257,7 +257,7 @@ pub const RIVAL_RECHECK_SECS: u64 = 30;
 /// Flag: `--rival-recheck-meshed-secs`.
 pub const RIVAL_RECHECK_MESHED_SECS: u64 = 300;
 
-/// Roster size (live gossip links) at or below which a *meshed* holder uses
+/// Roster size (known live members) at or below which a *meshed* holder uses
 /// the brisk lone cadence ([`RIVAL_RECHECK_SECS`]) instead of the slow
 /// [`RIVAL_RECHECK_MESHED_SECS`] backstop.
 ///
