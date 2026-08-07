@@ -628,14 +628,24 @@ fn count_candidates(sdp: &str) -> (usize, usize, usize, usize, usize) {
         if !line.starts_with("a=candidate:") {
             continue;
         }
-        if line.contains(".local") {
-            mdns += 1;
-        } else if line.contains(" typ host") {
-            host += 1;
-        } else if line.contains(" typ srflx") {
+        // Classify on the candidate's own `typ` before looking for `.local`:
+        // a srflx line can carry an mDNS-obfuscated related address
+        // (`raddr abc.local`), and reading any `.local` as mdns kept srflx
+        // at zero — which held `gathering_settled` open for the browser's
+        // full gathering ladder. Only a host candidate is mdns-obfuscated
+        // as a whole.
+        if line.contains(" typ srflx") {
             srflx += 1;
         } else if line.contains(" typ relay") {
             relay += 1;
+        } else if line.contains(" typ host") {
+            if line.contains(".local") {
+                mdns += 1;
+            } else {
+                host += 1;
+            }
+        } else if line.contains(".local") {
+            mdns += 1;
         } else {
             other += 1;
         }
@@ -734,9 +744,26 @@ async fn sleep_ms(millis: i32) {
 
 #[cfg(test)]
 mod tests {
-    use super::{ICE_QUIET_MS, gathering_settled};
+    use super::{ICE_QUIET_MS, count_candidates, gathering_settled};
 
     const QUIET: f64 = ICE_QUIET_MS;
+
+    #[test]
+    fn a_srflx_with_an_mdns_raddr_counts_as_srflx() {
+        // Some browsers obfuscate the related address too: `raddr abc.local`
+        // on a srflx line. Reading any `.local` as mdns kept srflx at zero,
+        // which held `gathering_settled` open for the browser's full
+        // gathering ladder on every offer and answer.
+        let sdp =
+            "a=candidate:1 1 udp 1686052607 1.2.3.4 50000 typ srflx raddr abc.local rport 9\r\n";
+        assert_eq!(count_candidates(sdp), (0, 0, 1, 0, 0));
+    }
+
+    #[test]
+    fn an_mdns_obfuscated_host_still_counts_as_mdns() {
+        let sdp = "a=candidate:1 1 udp 2113937151 abcd1234.local 54321 typ host generation 0\r\n";
+        assert_eq!(count_candidates(sdp), (0, 1, 0, 0, 0));
+    }
 
     #[test]
     fn no_candidates_never_settles() {
