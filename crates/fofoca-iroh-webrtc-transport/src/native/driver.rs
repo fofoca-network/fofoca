@@ -14,6 +14,12 @@ use tokio::sync::mpsc;
 
 use super::session::{InboundPacket, SessionRegistry};
 
+/// Consecutive receive errors a live session tolerates before giving up. Sized
+/// to ride out a burst of ICMP port-unreachables (one per dead STUN server,
+/// which Windows surfaces here) while still ending a session whose socket has
+/// genuinely stopped reading. Any successful receive resets the count.
+const MAX_CONSECUTIVE_RECV_ERRORS: usize = 32;
+
 /// A `WebRTC` data channel negotiated via JSEP and ready to carry datagrams —
 /// the value handed to [`crate::WebRtcTransport::attach`].
 pub struct NegotiatedSession {
@@ -122,6 +128,7 @@ pub(crate) async fn drive_until_channel_ready(
     let mut buf = vec![0u8; 2000];
     let mut next_wake = Instant::now();
     let mut opened: Option<ChannelId> = None;
+    let mut noise = HandshakeNoise::default();
 
     while Instant::now() < give_up {
         let sleep_for = next_wake
@@ -135,7 +142,20 @@ pub(crate) async fn drive_until_channel_ready(
                     .context("str0m timeout input")?;
             }
             received = socket.recv_from(&mut buf) => {
-                let (len, src) = received.context("UDP recv during JSEP handshake")?;
+                // Never fatal, for the reason the STUN gather sharing this
+                // socket is not: Windows reports an ICMP port-unreachable from
+                // a dead server as a receive error, and several dead servers
+                // burst them. The deadline already bounds this loop, and the
+                // pause keeps a persistent error from spinning it hot.
+                let (len, src) = match received {
+                    Ok(pair) => pair,
+                    Err(error) => {
+                        tracing::debug!(%error, "transient error reading during the JSEP handshake");
+                        noise.recv_errors += 1;
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                        continue;
+                    }
+                };
                 if len == 0 {
                     continue;
                 }
@@ -143,24 +163,27 @@ pub(crate) async fn drive_until_channel_ready(
                 // not the socket's 0.0.0.0 bind — str0m matches it against
                 // its local ICE candidate.
                 //
-                // The media socket is shared with the STUN gather, and the
-                // gather probes its servers concurrently: a losing server's
-                // Binding Success lands here after the winner returned, and
-                // str0m rejects it ("no message integrity") because it is a
-                // plain RFC 5389 reply, not an ICE-authenticated one.
-                // Failing the whole handshake for that stray reply killed
-                // real connects — but only that known shape is tolerated.
-                // Anything else str0m cannot parse is the peer sending
-                // something we cannot speak, and timing out silently on it
-                // buries the named failure this loop used to give.
+                // This socket is reachable by anything that can route to the
+                // host candidate we advertised in the SDP, so an unparseable
+                // datagram says nothing about the peer we are negotiating
+                // with: a port scanner, a late reply from the STUN gather
+                // sharing this socket, or any stray sender produces one, and
+                // failing the handshake hands all of them a way to break it.
+                // The live-session loop below already treats such a datagram
+                // as noise; this loop disagreeing with it was the bug.
+                //
+                // What the old bail did buy was a *named* failure instead of a
+                // silent timeout, so the count is carried to the deadline and
+                // reported there.
                 let Ok(receive) = Receive::new(Protocol::Udp, src, advertised, &buf[..len]) else {
                     if super::stun::is_plain_stun_response(&buf[..len]) {
                         tracing::trace!(%src, "ignoring a late STUN gather reply during the handshake");
-                        continue;
+                    } else {
+                        tracing::debug!(%src, len, "ignoring an unparseable datagram during the handshake");
+                        noise.unparseable += 1;
+                        noise.last_source = Some(src);
                     }
-                    anyhow::bail!(
-                        "unparseable datagram from {src} during the JSEP handshake ({len} bytes)"
-                    );
+                    continue;
                 };
                 rtc.handle_input(Input::Receive(Instant::now(), receive))
                     .context("str0m receive input")?;
@@ -199,7 +222,36 @@ pub(crate) async fn drive_until_channel_ready(
         }
     }
 
-    anyhow::bail!("timed out waiting for the WebRTC data channel to open");
+    Err(noise.into_timeout_error())
+}
+
+/// What the handshake loop ignored while it waited, so a timeout can say
+/// whether anything was arriving and from where. Tolerating a stray datagram
+/// must not cost the named failure the old fail-fast gave.
+#[derive(Default)]
+struct HandshakeNoise {
+    unparseable: usize,
+    recv_errors: usize,
+    last_source: Option<SocketAddr>,
+}
+
+impl HandshakeNoise {
+    fn into_timeout_error(self) -> anyhow::Error {
+        let base = "timed out waiting for the WebRTC data channel to open";
+        match (self.unparseable, self.recv_errors) {
+            (0, 0) => anyhow::anyhow!("{base}"),
+            (unparseable, errors) => {
+                let from = self.last_source.map_or_else(
+                    || String::from("no source recorded"),
+                    |src| format!("last from {src}"),
+                );
+                anyhow::anyhow!(
+                    "{base}; ignored {unparseable} unparseable datagrams ({from}) \
+                     and {errors} receive errors"
+                )
+            }
+        }
+    }
 }
 
 enum SessionEnd {
@@ -227,6 +279,7 @@ pub(crate) async fn drive_session(
     } = session;
     let mut buf = vec![0u8; 2000];
     let mut next_wake = Instant::now();
+    let mut consecutive_recv_errors: usize = 0;
 
     let end = loop {
         let sleep_for = next_wake
@@ -241,8 +294,26 @@ pub(crate) async fn drive_session(
                 }
             }
             received = socket.recv_from(&mut buf) => {
-                let Ok((len, src)) = received else {
-                    break SessionEnd::Failed(anyhow::anyhow!("session UDP socket error"));
+                // A single receive error must not tear down a working session:
+                // this is the socket the STUN gather shares, and Windows
+                // reports an ICMP port-unreachable from a dead server as one.
+                // A *persistent* error still ends the session, since a socket
+                // that never reads again is not one to keep pumping.
+                let (len, src) = match received {
+                    Ok(pair) => {
+                        consecutive_recv_errors = 0;
+                        pair
+                    }
+                    Err(error) => {
+                        consecutive_recv_errors += 1;
+                        if consecutive_recv_errors >= MAX_CONSECUTIVE_RECV_ERRORS {
+                            break SessionEnd::Failed(anyhow::Error::new(error).context(
+                                "session UDP socket failed repeatedly",
+                            ));
+                        }
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                        continue;
+                    }
                 };
                 if len == 0 {
                     continue;
@@ -326,5 +397,93 @@ async fn pump_outputs(
             }
             Output::Event(_) => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ChannelReadyTarget, HandshakeNoise, bind_ephemeral_udp, build_rtc,
+        drive_until_channel_ready,
+    };
+    use std::net::{Ipv4Addr, SocketAddr};
+    use std::time::{Duration, Instant};
+    use tokio::net::UdpSocket;
+
+    #[test]
+    fn a_quiet_timeout_says_only_that_it_timed_out() {
+        let text = HandshakeNoise::default().into_timeout_error().to_string();
+        assert!(text.contains("timed out"), "{text}");
+        assert!(
+            !text.contains("unparseable"),
+            "nothing was ignored, so nothing should be reported: {text}"
+        );
+    }
+
+    #[test]
+    fn a_noisy_timeout_reports_what_it_ignored() {
+        // Tolerating stray datagrams must not cost the diagnosis the old
+        // fail-fast gave: a timeout has to say something was arriving.
+        let noise = HandshakeNoise {
+            unparseable: 3,
+            recv_errors: 1,
+            last_source: Some(SocketAddr::from((Ipv4Addr::LOCALHOST, 9999))),
+        };
+        let text = noise.into_timeout_error().to_string();
+        assert!(text.contains("timed out"), "{text}");
+        assert!(text.contains('3') && text.contains("unparseable"), "{text}");
+        assert!(text.contains("127.0.0.1:9999"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_stray_datagram_does_not_abort_the_handshake() {
+        // The socket is reachable by anything that can route to the host
+        // candidate we put in the SDP, so one garbage packet from a scanner
+        // used to kill a negotiation that was otherwise fine.
+        let (socket, advertised) = bind_ephemeral_udp().await.expect("bind media socket");
+        // The socket binds to the wildcard address, so reach it on loopback
+        // rather than the 0.0.0.0 that `local_addr` reports.
+        let local = SocketAddr::from((
+            Ipv4Addr::LOCALHOST,
+            socket.local_addr().expect("local addr").port(),
+        ));
+        let mut rtc = build_rtc(Instant::now());
+
+        let sender = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind sender");
+        let noise = tokio::spawn(async move {
+            for _ in 0..5u8 {
+                let _ = sender.send_to(&[0xFF; 32], local).await;
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        });
+
+        let started = Instant::now();
+        let outcome = drive_until_channel_ready(
+            &mut rtc,
+            &socket,
+            advertised,
+            &ChannelReadyTarget::Answerer,
+            Duration::from_millis(400),
+        )
+        .await;
+        let elapsed = started.elapsed();
+        noise.abort();
+
+        let error = outcome.expect_err("no channel can open without a peer");
+        let text = error.to_string();
+        assert!(
+            text.contains("timed out"),
+            "a stray datagram must not end the handshake early: {text}"
+        );
+        assert!(
+            elapsed >= Duration::from_millis(300),
+            "the loop returned after {elapsed:?}, so it bailed rather than waiting"
+        );
+        assert!(
+            text.contains("unparseable"),
+            "the timeout must name what it ignored: {text}"
+        );
     }
 }
