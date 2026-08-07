@@ -240,14 +240,35 @@ pub async fn gather_reflexive(socket: &UdpSocket, config: &IceConfig) -> Option<
     .await
 }
 
-/// [`gather_reflexive`] with the name resolution injected, so a test can
-/// hang or delay a lookup without real DNS.
-async fn gather_with_resolver<F, Fut>(
-    socket: &UdpSocket,
+/// The two socket calls the gather makes, as a seam: Windows surfaces an
+/// ICMP port-unreachable from a dead server as a `recv_from` error, and no
+/// real loopback socket reproduces that on macOS or Linux — a test fake
+/// implementing this can.
+trait ProbeSocket {
+    async fn send_to(&self, buffer: &[u8], target: SocketAddr) -> std::io::Result<usize>;
+    async fn recv_from(&self, buffer: &mut [u8]) -> std::io::Result<(usize, SocketAddr)>;
+}
+
+impl ProbeSocket for UdpSocket {
+    async fn send_to(&self, buffer: &[u8], target: SocketAddr) -> std::io::Result<usize> {
+        UdpSocket::send_to(self, buffer, target).await
+    }
+
+    async fn recv_from(&self, buffer: &mut [u8]) -> std::io::Result<(usize, SocketAddr)> {
+        UdpSocket::recv_from(self, buffer).await
+    }
+}
+
+/// [`gather_reflexive`] with the name resolution and the socket injected, so
+/// a test can hang a lookup or fake receive errors without real DNS or a
+/// platform that produces them.
+async fn gather_with_resolver<S, F, Fut>(
+    socket: &S,
     config: &IceConfig,
     resolve: F,
 ) -> Option<SocketAddr>
 where
+    S: ProbeSocket,
     F: Fn(String) -> Fut,
     Fut: Future<Output = std::io::Result<Option<SocketAddr>>> + Send + 'static,
 {
@@ -271,7 +292,6 @@ where
     // candidate. A probe sent after the mark goes without one.
     let mut retransmit_at = Some(start + (config.stun_timeout / 4).min(Duration::from_millis(500)));
     let mut buffer = vec![0u8; 1500];
-    let mut receive_errors = 0u8;
 
     // One loop for both jobs: a resolution lands whenever it lands, its probe
     // goes out that moment, and the socket is read the whole time. The serial
@@ -331,15 +351,15 @@ where
                 let received = match received {
                     Ok(Ok((len, _))) => len,
                     Ok(Err(error)) => {
-                        // A shared socket can surface transient errors (an ICMP
-                        // port-unreachable from a dead server, on some platforms);
-                        // give up only if they repeat.
-                        receive_errors += 1;
-                        if receive_errors >= 8 {
-                            tracing::debug!(%error, "giving up on STUN after repeated receive errors");
-                            return None;
-                        }
+                        // A shared socket can surface transient errors — on
+                        // Windows, an ICMP port-unreachable from a dead server
+                        // lands here, and several dead servers burst them. An
+                        // error never ends the gather: giving up early once
+                        // discarded a live server's answer still in flight,
+                        // and the deadline already bounds the loop. The pause
+                        // keeps a persistent error from spinning it hot.
                         tracing::debug!(%error, "transient error reading a STUN response");
+                        tokio::time::sleep(Duration::from_millis(10)).await;
                         continue;
                     }
                     // The retransmit mark or the deadline; the loop head decides.
@@ -672,6 +692,65 @@ mod tests {
             reflexive,
             Some("203.0.113.7:41234".parse().expect("addr")),
             "a resolution landing after half the budget must still be probed"
+        );
+    }
+
+    /// A fake socket whose `recv_from` fails `errors_left` times before it
+    /// delivers a Binding Success for the first probe sent through it — the
+    /// shape Windows produces when dead servers' ICMP port-unreachables
+    /// surface as receive errors while a live server's answer is in flight.
+    struct StormySocket {
+        errors_left: std::cell::Cell<usize>,
+        sent: std::cell::RefCell<Vec<(Vec<u8>, SocketAddr)>>,
+    }
+
+    impl super::ProbeSocket for StormySocket {
+        async fn send_to(&self, buffer: &[u8], target: SocketAddr) -> std::io::Result<usize> {
+            self.sent.borrow_mut().push((buffer.to_vec(), target));
+            Ok(buffer.len())
+        }
+
+        async fn recv_from(&self, buffer: &mut [u8]) -> std::io::Result<(usize, SocketAddr)> {
+            if self.errors_left.get() > 0 {
+                self.errors_left.set(self.errors_left.get() - 1);
+                return Err(std::io::Error::from(std::io::ErrorKind::ConnectionReset));
+            }
+            let (request, from) = self
+                .sent
+                .borrow()
+                .first()
+                .cloned()
+                .expect("a probe was sent before anything was received");
+            let transaction_id: [u8; TRANSACTION_ID_LEN] =
+                request[8..HEADER_LEN].try_into().expect("12 bytes");
+            let message = response(ATTR_XOR_MAPPED_ADDRESS, &xor_ipv4_value(), transaction_id);
+            buffer[..message.len()].copy_from_slice(&message);
+            Ok((message.len(), from))
+        }
+    }
+
+    #[tokio::test]
+    async fn an_error_burst_does_not_abort_a_gather_with_a_live_probe() {
+        // A burst of receive errors must not discard a live server's pending
+        // answer: the deadline already bounds the loop, so giving up early
+        // buys nothing and costs the only NAT-crossing candidate.
+        let socket = StormySocket {
+            errors_left: std::cell::Cell::new(10),
+            sent: std::cell::RefCell::new(Vec::new()),
+        };
+        let config = IceConfig {
+            stun_servers: vec!["203.0.113.9:3478".to_owned()],
+            stun_timeout: Duration::from_secs(2),
+        };
+        let reflexive =
+            super::gather_with_resolver(&socket, &config, |name: String| async move {
+                Ok(name.parse::<SocketAddr>().ok())
+            })
+            .await;
+        assert_eq!(
+            reflexive,
+            Some("203.0.113.7:41234".parse().expect("addr")),
+            "receive errors ended the gather while the answer was still coming"
         );
     }
 
