@@ -216,8 +216,9 @@ pub(crate) struct RivalProbe {
     /// [`Rendezvous`] retains its own: aborting the task drops the endpoint
     /// open, and iroh tears an unclosed endpoint down ungracefully. The
     /// task closes it on the happy path; this is for the departure that
-    /// cancels it first.
-    endpoint: Endpoint,
+    /// cancels it first. `None` when the probe never dialed — an
+    /// unanswerable target pre-resolves the verdict without an endpoint.
+    endpoint: Option<Endpoint>,
 }
 
 impl RivalProbe {
@@ -225,7 +226,10 @@ impl RivalProbe {
     /// counterpart to letting the task finish, and the same bounded shape as
     /// [`Rendezvous::shed_and_wait`] for the same reason.
     pub(crate) async fn abort_and_close(self) {
-        let endpoint = self.endpoint.clone();
+        let Some(endpoint) = self.endpoint.clone() else {
+            // Never dialed, nothing to close.
+            return;
+        };
         // Abort first, so the task is not still dialing while we close.
         drop(self);
         if n0_future::time::timeout(Duration::from_secs(RENDEZVOUS_CLOSE_SECS), endpoint.close())
@@ -292,11 +296,36 @@ fn verdict_of(result: Result<bool, oneshot::error::RecvError>) -> bool {
 /// its own bootstrap dial. Probe-before-claim was a no-op exactly where it
 /// mattered most; naming the address is what makes it answer its question.
 ///
+/// When there is nothing to name *and* no lookup that could resolve the bare
+/// id, the probe cannot answer its question at all, so it does not dial: it
+/// pre-resolves the verdict to "held". `gossip::recv::arms_reclaim`'s widened
+/// gate leans on the probe never reading "free" blind, and this branch is
+/// what makes that structural rather than configurational.
+///
 /// The endpoint is built here, on the loop, rather than inside the task:
 /// it costs milliseconds, and holding it lets a departure close it (see
 /// [`RivalProbe::abort_and_close`]). `None` ⇒ the build failed, so we
 /// cannot tell and must not claim blind; the next tick retries.
 async fn spawn_rival_probe(params: &RendezvousParams) -> Option<RivalProbe> {
+    let target = match rendezvous_addr(params) {
+        Some(addr) => addr,
+        // Nothing to name (relay disabled, no ladder). The bare id is a
+        // dialable target only while a lookup can resolve it — mDNS/DHT,
+        // when the mesh carries them and this build wires them.
+        None if bare_id_resolvable(&params.lookups) => EndpointAddr::new(params.id),
+        None => {
+            tracing::info!(target: "fofoca::beacon",
+                "rival probe has nothing to dial and no lookup to resolve the id; reading the rendezvous as held");
+            let (tx, rx) = oneshot::channel();
+            // The receiver is held below; this send cannot fail.
+            let _ = tx.send(true);
+            return Some(RivalProbe {
+                rx,
+                task: n0_future::task::spawn(async {}),
+                endpoint: None,
+            });
+        }
+    };
     let lookups = beacon_lookups(params);
     let prober = match build_endpoint(
         &lookups,
@@ -318,10 +347,6 @@ async fn spawn_rival_probe(params: &RendezvousParams) -> Option<RivalProbe> {
     let budget = Duration::from_secs(HEAL_PROBE_SECS.min(heal_interval_secs()));
     let (tx, rx) = oneshot::channel();
     let endpoint = prober.clone();
-    // Falls back to the bare id only when there is genuinely nothing to name
-    // (relay disabled, no ladder) — there mDNS/DHT are the sole resolution
-    // channel and the endpoint's own lookups are all the probe can use.
-    let target = rendezvous_addr(params).unwrap_or_else(|| EndpointAddr::new(params.id));
     let task = n0_future::task::spawn(async move {
         let found_rival = probe_connect(&prober, target, budget).await;
         prober.close().await;
@@ -329,7 +354,20 @@ async fn spawn_rival_probe(params: &RendezvousParams) -> Option<RivalProbe> {
         // beacon arrived another way); the verdict is simply stale.
         let _ = tx.send(found_rival);
     });
-    Some(RivalProbe { rx, task, endpoint })
+    Some(RivalProbe {
+        rx,
+        task,
+        endpoint: Some(endpoint),
+    })
+}
+
+/// Whether this build can resolve a bare endpoint id under `lookups` — the
+/// only condition a probe may dial one. mDNS and DHT are compile-time
+/// features and `host`-only, so a browser or a feature-trimmed build
+/// resolves nothing regardless of what the mesh id asks for.
+fn bare_id_resolvable(lookups: &LookupOpts) -> bool {
+    (cfg!(all(feature = "host", feature = "mdns")) && lookups.mdns)
+        || (cfg!(all(feature = "host", feature = "dht")) && lookups.dht)
 }
 
 /// Probe a `AddrInUse` private rung: is the listener *our* mesh's
@@ -628,7 +666,7 @@ async fn claim(
 mod tests {
     use super::{
         Endpoint, LookupOpts, Rendezvous, RendezvousParams, RivalProbe, SecretKey, TopicId, ensure,
-        oneshot, probe_verdict, releasable, rendezvous_addr, verdict_of, watch,
+        oneshot, probe_verdict, releasable, rendezvous_addr, spawn_rival_probe, verdict_of, watch,
     };
 
     /// A real endpoint that touches nothing: `LookupOpts::loopback` binds
@@ -653,7 +691,7 @@ mod tests {
         RivalProbe {
             rx,
             task: n0_future::task::spawn(std::future::pending()),
-            endpoint: loopback_endpoint().await,
+            endpoint: Some(loopback_endpoint().await),
         }
     }
 
@@ -767,6 +805,24 @@ mod tests {
         // Cleared, or the loop's arm would re-fire on the closed channel
         // forever and no later tick could ever start a fresh probe.
         assert!(slot.is_none(), "the slot is free for the next probe");
+    }
+
+    #[tokio::test]
+    async fn an_unanswerable_probe_reads_held_not_free() {
+        // Relay disabled, no ladder, and no mDNS/DHT on the mesh: the probe
+        // has no dialable address (`nothing_to_name_is_none_not_a_bare_id`
+        // pins that half) and no lookup that could resolve the bare id. A
+        // dial would only ever time out, and a timeout must not read as
+        // "free" — claiming blind is the duplicate-beacon collision the
+        // probe exists to prevent, and `gossip::recv::arms_reclaim`'s
+        // widened gate leans on exactly this.
+        let params = public_params();
+        let mut slot = spawn_rival_probe(&params).await;
+        assert!(slot.is_some(), "the probe reports a verdict, it does not vanish");
+        assert!(
+            probe_verdict(&mut slot).await,
+            "an unanswerable probe reads as held, never as free"
+        );
     }
 
     #[tokio::test]
