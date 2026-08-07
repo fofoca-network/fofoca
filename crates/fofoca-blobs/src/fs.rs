@@ -43,7 +43,7 @@ use bao_tree::ChunkRanges;
 use range_collections::range_set::RangeSetRange;
 
 use crate::sidecar::{format_binds, format_ranges, hex, parse_binds, parse_ranges};
-use crate::{BlobStore, FileId, Outboard, Root, decode_into, encode_ranges, extent_of};
+use crate::{BlobStore, FileId, Outboard, Root, decode_into, encode_from_outboard, extent_of};
 
 /// A store whose metadata lives under one directory and whose data does not.
 ///
@@ -232,6 +232,17 @@ impl BlobStore for FsStore {
             bail!("requested ranges are not all held");
         }
 
+        // Encode from the *stored* outboard rather than rebuilding one from the
+        // file. A file this store holds only part of still occupies its full
+        // length on disk, with the gaps left as the zeroes `set_len` wrote, so
+        // rebuilding hashes those zeroes as though they were content: the tree
+        // comes out under a root no peer shares, and every proof is rejected by
+        // whoever asked. The stored outboard carries the nodes the sender proved.
+        let outboard = self
+            .outboard(root)
+            .await?
+            .context("bound to a root whose outboard is gone")?;
+
         let bytes = Self::read_data(file)?;
         // Re-check after reading, not just before: a file can change *during*
         // the read, and encoding those bytes under the old root would emit a
@@ -244,7 +255,7 @@ impl BlobStore for FsStore {
                 file.size
             );
         }
-        encode_ranges(&bytes, &wanted)
+        encode_from_outboard(root, file.size, outboard, bytes, &wanted)
     }
 
     async fn write_verified(
@@ -256,8 +267,14 @@ impl BlobStore for FsStore {
     ) -> Result<ChunkRanges> {
         // Verify before touching the destination. A peer that sends garbage
         // must not be able to leave a partly-written file behind.
+        //
+        // The outboard is loaded first and handed back filled, because the nodes
+        // this stream proves are the only ones this store will ever have for the
+        // ranges it carries — the file itself cannot reproduce them once it has
+        // holes. See `decode_into`.
         let mut target = Vec::new();
-        let verified = decode_into(root, file.size, encoded, ranges, &mut target)?;
+        let mut outboard = self.outboard(root).await?.unwrap_or_default();
+        let verified = decode_into(root, file.size, encoded, ranges, &mut target, &mut outboard)?;
 
         // Sparse write: only the chunks that verified, at their real offsets,
         // so a mirror filling a large file from several peers does not rewrite
@@ -296,6 +313,10 @@ impl BlobStore for FsStore {
             .sync_all()
             .with_context(|| format!("flushing {}", file.key))?;
 
+        // Outboard before the range set, for the same reason the data goes
+        // first: a range advertised without the nodes that prove it is a range
+        // this store cannot actually answer for.
+        write_durably(&self.obao_path(root), &outboard)?;
         let held = self.load_ranges(root) | verified;
         self.save_ranges(root, &held)?;
         self.binds

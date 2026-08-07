@@ -37,7 +37,7 @@ use web_sys::{
     FileSystemSyncAccessHandle,
 };
 
-use crate::{BlobStore, FileId, Outboard, Root, decode_into, encode_ranges, extent_of};
+use crate::{BlobStore, FileId, Outboard, Root, decode_into, encode_from_outboard, extent_of};
 
 /// JS errors are not `std::error::Error`, so they cannot ride `?` into
 /// `anyhow`. Rendering them at the boundary keeps every signature in the crate
@@ -267,6 +267,15 @@ impl BlobStore for OpfsStore {
             bail!("requested ranges are not all held");
         }
 
+        // From the stored outboard, not one rebuilt from the file. A file held
+        // only in part is still full-length on disk, its gaps left as the zeroes
+        // `truncate` wrote; rebuilding hashes those zeroes as content and yields
+        // a root no peer shares, so every proof is rejected by whoever asked.
+        let outboard = self
+            .outboard(root)
+            .await?
+            .context("bound to a root whose outboard is gone")?;
+
         let bytes = Self::read_all(&file.key)
             .await?
             .context("the file this store bound is gone")?;
@@ -281,7 +290,7 @@ impl BlobStore for OpfsStore {
                 file.size
             );
         }
-        encode_ranges(&bytes, &wanted)
+        encode_from_outboard(root, file.size, outboard, bytes, &wanted)
     }
 
     async fn write_verified(
@@ -293,8 +302,13 @@ impl BlobStore for OpfsStore {
     ) -> Result<ChunkRanges> {
         // Verify before touching the destination, so a peer sending garbage
         // cannot leave a partly-written file behind.
+        //
+        // The outboard is carried in and handed back filled: the nodes a stream
+        // proves are the only ones this store will ever have for those ranges,
+        // since a file with holes cannot reproduce them. See `decode_into`.
         let mut target = Vec::new();
-        let verified = decode_into(root, file.size, encoded, ranges, &mut target)?;
+        let mut outboard = self.outboard(root).await?.unwrap_or_default();
+        let verified = decode_into(root, file.size, encoded, ranges, &mut target, &mut outboard)?;
 
         let handle = Self::handle(&file.key).await?;
         #[expect(
@@ -333,6 +347,10 @@ impl BlobStore for OpfsStore {
             .map_err(|error| js_err("flushing the destination", &error))?;
         handle.close();
 
+        // Outboard before the range set, for the same reason the data goes
+        // first: a range advertised without the nodes that prove it is a range
+        // this store cannot actually answer for.
+        Self::write_all(&self.obao_path(root), &outboard).await?;
         let held = self.present(root).await? | verified;
         Self::write_all(
             &self.ranges_path(root),

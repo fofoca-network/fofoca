@@ -278,8 +278,17 @@ macro_rules! backends {
 
                         let onward = mirror.store().read_ranges(&dest, &all).await.expect("re-serve");
                         let mut target = Vec::new();
-                        fofoca_blobs::decode_into(root, bytes.len() as u64, &onward, &all, &mut target)
-                            .expect("the mirror's bytes must verify");
+                        // A final consumer, so the outboard is discarded.
+                        let mut outboard = Vec::new();
+                        fofoca_blobs::decode_into(
+                            root,
+                            bytes.len() as u64,
+                            &onward,
+                            &all,
+                            &mut target,
+                            &mut outboard,
+                        )
+                        .expect("the mirror's bytes must verify");
                         assert_eq!(target, bytes, "a re-seeder must serve the same bytes");
                     });
                 }
@@ -338,6 +347,47 @@ macro_rules! backends {
                     });
                 }
 
+                /// **A partial mirror must serve proofs against the real root.**
+                /// A store that rebuilds the tree from its own file computes it
+                /// over the holes too, so the proofs it emits are against a root
+                /// nobody else has — and the receiver rejects every one. The
+                /// bytes look fine locally; the failure only shows up a hop away,
+                /// which is why this decodes the serve instead of trusting `is_ok`.
+                #[test]
+                fn a_partially_held_file_is_served_against_the_real_root() {
+                    block_on(async {
+                        let bytes = data(1 << 20);
+                        let (root, _) = build_outboard(&bytes);
+                        let head = ChunkRanges::from(ChunkNum(0)..ChunkNum(64));
+                        let partial = encode_ranges(&bytes, &head).expect("encode head");
+
+                        let harness = harness();
+                        let dest = harness.file("partial-serve.bin", bytes.len() as u64);
+                        harness
+                            .store()
+                            .write_verified(&dest, root, &partial, &head)
+                            .await
+                            .expect("write head");
+
+                        let onward = harness
+                            .store()
+                            .read_ranges(&dest, &head)
+                            .await
+                            .expect("the part it holds is servable");
+                        let mut target = Vec::new();
+                        let mut outboard = Vec::new();
+                        fofoca_blobs::decode_into(
+                            root,
+                            bytes.len() as u64,
+                            &onward,
+                            &head,
+                            &mut target,
+                            &mut outboard,
+                        )
+                        .expect("a partial mirror's proofs must verify against the original root");
+                    });
+                }
+
                 /// Partial availability accumulates rather than replacing, or a
                 /// mirror would forget every range but its last.
                 #[test]
@@ -362,6 +412,33 @@ macro_rules! backends {
                         let held = harness.store().present(root).await.expect("present");
                         assert!(first.is_subset(&held), "the first window survived");
                         assert!(second.is_subset(&held), "the second landed");
+
+                        // Read the first window back, not just its bookkeeping. A
+                        // store that writes each arrival over the whole file keeps
+                        // advertising the earlier window while serving the zeroes
+                        // that replaced it, and `present` alone cannot see that.
+                        let onward = harness
+                            .store()
+                            .read_ranges(&dest, &first)
+                            .await
+                            .expect("the first window is still servable");
+                        let mut target = Vec::new();
+                        let mut outboard = Vec::new();
+                        fofoca_blobs::decode_into(
+                            root,
+                            bytes.len() as u64,
+                            &onward,
+                            &first,
+                            &mut target,
+                            &mut outboard,
+                        )
+                        .expect("an earlier window must survive a later write");
+                        let end = usize::try_from(ChunkNum(64).to_bytes()).expect("fits");
+                        assert_eq!(
+                            &target[..end],
+                            &bytes[..end],
+                            "the first window must still be its own bytes, not zeroes"
+                        );
                     });
                 }
 

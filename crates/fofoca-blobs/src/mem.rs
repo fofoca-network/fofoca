@@ -15,8 +15,9 @@ use std::collections::HashMap;
 
 use anyhow::{Context, Result, bail};
 use bao_tree::ChunkRanges;
+use range_collections::range_set::RangeSetRange;
 
-use crate::{BlobStore, FileId, Outboard, Root, decode_into, encode_ranges, extent_of};
+use crate::{BlobStore, FileId, Outboard, Root, decode_into, encode_from_outboard, extent_of};
 
 /// What the store knows about one root.
 #[derive(Debug, Clone, Default)]
@@ -134,7 +135,14 @@ impl BlobStore for MemStore {
         if !wanted.is_subset(&entry.present) {
             bail!("requested ranges are not all held");
         }
-        encode_ranges(&entry.data, &wanted)
+        // From the stored outboard, never rebuilt from `data`: the gaps between
+        // held ranges are zeroes, and hashing those produces a root no peer
+        // shares, so every proof would be rejected by whoever asked for it.
+        let outboard = entry
+            .outboard
+            .clone()
+            .context("bound to a root whose outboard is gone")?;
+        encode_from_outboard(root, file.size, outboard, entry.data.as_slice(), &wanted)
     }
 
     async fn write_verified(
@@ -146,17 +154,35 @@ impl BlobStore for MemStore {
     ) -> Result<ChunkRanges> {
         // Verify into a scratch buffer first. Committing before the proof
         // checks out is what would let one bad peer corrupt a store.
-        let mut target = Vec::new();
-        let verified = decode_into(root, file.size, encoded, ranges, &mut target)?;
-
         let mut entries = self.entries.borrow_mut();
+        let mut outboard = entries
+            .get(&root)
+            .and_then(|entry| entry.outboard.clone())
+            .unwrap_or_default();
+        let mut target = Vec::new();
+        let verified = decode_into(root, file.size, encoded, ranges, &mut target, &mut outboard)?;
+
         let entry = entries.entry(root).or_default();
         let wanted = usize::try_from(file.size).context("file too large for this target")?;
         if entry.data.len() < wanted {
             entry.data.resize(wanted, 0);
         }
-        let copy = target.len().min(entry.data.len());
-        entry.data[..copy].copy_from_slice(&target[..copy]);
+        // Copy only what verified. `decode_into` sizes its target to the whole
+        // file and zero-fills the rest, so copying it wholesale would erase every
+        // range an earlier write had put there while `present` went on claiming
+        // them — bytes advertised as held and served back as zeroes.
+        for range in verified.iter() {
+            if let RangeSetRange::Range(range) = range {
+                let start = range.start.to_bytes();
+                let end = range.end.to_bytes().min(file.size);
+                let (Ok(from), Ok(to)) = (usize::try_from(start), usize::try_from(end)) else {
+                    bail!("range does not fit this target");
+                };
+                let to = to.min(target.len()).min(entry.data.len());
+                entry.data[from..to].copy_from_slice(&target[from..to]);
+            }
+        }
+        entry.outboard = Some(outboard);
         entry.present |= verified;
         let held = entry.present.clone();
         drop(entries);

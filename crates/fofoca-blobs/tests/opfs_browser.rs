@@ -127,8 +127,17 @@ async fn verified_bytes_become_servable() {
 
     let onward = store.read_ranges(&dest, &all).await.expect("re-serve");
     let mut target = Vec::new();
-    fofoca_blobs::decode_into(root, bytes.len() as u64, &onward, &all, &mut target)
-        .expect("the mirror's bytes must verify");
+    // A final consumer, so the outboard is discarded.
+    let mut outboard = Vec::new();
+    fofoca_blobs::decode_into(
+        root,
+        bytes.len() as u64,
+        &onward,
+        &all,
+        &mut target,
+        &mut outboard,
+    )
+    .expect("the mirror's bytes must verify");
     assert_eq!(target, bytes, "a re-seeder must serve the same bytes");
 }
 
@@ -180,6 +189,41 @@ async fn reading_a_range_we_do_not_hold_fails_rather_than_truncating() {
         store.read_ranges(&dest, &head).await.is_ok(),
         "the part it does hold is still servable"
     );
+}
+
+/// **A partial mirror must serve proofs against the real root.** A store that
+/// rebuilds the tree from its own file hashes the holes too, so its proofs are
+/// against a root nobody else has and every receiver rejects them. Decoding the
+/// serve is the only way to see it — locally the bytes look fine.
+#[wasm_bindgen_test]
+async fn a_partially_held_file_is_served_against_the_real_root() {
+    let bytes = data(1 << 18);
+    let (root, _) = build_outboard(&bytes);
+    let head = ChunkRanges::from(ChunkNum(0)..ChunkNum(64));
+    let partial = encode_ranges(&bytes, &head).expect("encode head");
+
+    let store = store("partial-serve");
+    let dest = file("partial-serve", "part.bin", bytes.len() as u64);
+    store
+        .write_verified(&dest, root, &partial, &head)
+        .await
+        .expect("write head");
+
+    let onward = store
+        .read_ranges(&dest, &head)
+        .await
+        .expect("the part it holds is servable");
+    let mut target = Vec::new();
+    let mut outboard = Vec::new();
+    fofoca_blobs::decode_into(
+        root,
+        bytes.len() as u64,
+        &onward,
+        &head,
+        &mut target,
+        &mut outboard,
+    )
+    .expect("a partial mirror's proofs must verify against the original root");
 }
 
 /// Sparse writes accumulate, or a mirror forgets every range but its last.

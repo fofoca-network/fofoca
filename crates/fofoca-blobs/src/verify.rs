@@ -149,6 +149,17 @@ pub fn decode_sparse(
 /// is what lets a consumer accept bytes from a peer it has no reason to trust:
 /// the worst a hostile peer can do is waste its own bandwidth.
 ///
+/// `outboard` is grown and filled in place, exactly as in [`decode_sparse`].
+/// **A store that will serve these bytes onward must persist it**: the stream
+/// proves its own hash path, and those nodes exist nowhere else. Rebuilding the
+/// tree from a partly-filled file instead hashes the holes too, yielding a root
+/// no peer shares and proofs every receiver rejects — the bytes look right
+/// locally and fail one hop away. It is an out-parameter rather than a return
+/// value so that throwing it away has to be written down.
+///
+/// A caller that is the final consumer of these bytes has nothing to serve and
+/// can discard it.
+///
 /// # Errors
 /// The stream does not verify against `root`, or is malformed.
 pub fn decode_into(
@@ -157,13 +168,14 @@ pub fn decode_into(
     encoded: &[u8],
     ranges: &ChunkRanges,
     target: &mut Vec<u8>,
+    outboard: &mut Outboard,
 ) -> Result<ChunkRanges> {
     let tree = BaoTree::new(size, BLOCK_SIZE);
-    let mut outboard = PreOrderMemOutboard {
-        root: blake3::Hash::from(root),
-        tree,
-        data: vec![0u8; usize::try_from(tree.outboard_size()).context("outboard too large")?],
-    };
+    let want = usize::try_from(tree.outboard_size()).context("outboard too large")?;
+    if outboard.len() < want {
+        outboard.resize(want, 0);
+    }
+    let mut outboard_mem = outboard_for(root, size, std::mem::take(outboard));
 
     // Size the target to the *whole* file before decoding, even for a window in
     // the middle of it. `decode_ranges` writes at absolute offsets, so a target
@@ -174,13 +186,12 @@ pub fn decode_into(
         usize::try_from(size).context("file too large for this target")?,
         0,
     );
-    decode_ranges(
+    let outcome = decode_ranges(
         std::io::Cursor::new(encoded),
         ranges,
         &mut *target,
-        &mut outboard,
-    )
-    .context("verifying ranges against the root")?;
+        &mut outboard_mem,
+    );
 
     // Scan only where bytes were expected. Scanning everything would ask about
     // chunks this call never touched, whose zeroes are not a verification
@@ -190,11 +201,20 @@ pub fn decode_into(
     // part of what was asked for, and believing the request is how a store comes
     // to advertise bytes it does not hold.
     let scan = ranges.clone() & crate::extent_of(size);
-    let mut held = ChunkRanges::empty();
-    for range in valid_ranges(&outboard, &target[..], &scan) {
-        held |= ChunkRanges::from(range.context("scanning verified ranges")?);
-    }
-    Ok(held)
+    let held = outcome
+        .context("verifying ranges against the root")
+        .and_then(|()| {
+            let mut held = ChunkRanges::empty();
+            for range in valid_ranges(&outboard_mem, &target[..], &scan) {
+                held |= ChunkRanges::from(range.context("scanning verified ranges")?);
+            }
+            Ok(held)
+        });
+
+    // Hand the buffer back either way, so a caller that retries does not start
+    // from an empty outboard and lose the nodes an earlier call proved.
+    *outboard = outboard_mem.data;
+    held
 }
 
 #[cfg(test)]
@@ -218,8 +238,15 @@ mod tests {
         let encoded = encode_ranges(&bytes, &all).expect("encode");
 
         let mut target = Vec::new();
-        let held =
-            decode_into(root, bytes.len() as u64, &encoded, &all, &mut target).expect("decode");
+        let held = decode_into(
+            root,
+            bytes.len() as u64,
+            &encoded,
+            &all,
+            &mut target,
+            &mut Vec::new(),
+        )
+        .expect("decode");
         assert_eq!(target, bytes);
         assert!(!held.is_empty());
     }
@@ -242,8 +269,15 @@ mod tests {
         );
 
         let mut target = Vec::new();
-        let held =
-            decode_into(root, bytes.len() as u64, &encoded, &window, &mut target).expect("decode");
+        let held = decode_into(
+            root,
+            bytes.len() as u64,
+            &encoded,
+            &window,
+            &mut target,
+            &mut Vec::new(),
+        )
+        .expect("decode");
         assert!(!held.is_empty());
         assert_eq!(
             &target[64 * 1024..128 * 1024],
@@ -283,7 +317,7 @@ mod tests {
 
         // And it verifies against the same root as the whole file.
         let mut target = Vec::new();
-        decode_into(root, size, &encoded, &window, &mut target).expect("decode");
+        decode_into(root, size, &encoded, &window, &mut target, &mut Vec::new()).expect("decode");
         assert_eq!(&target[65_536..131_072], &bytes[65_536..131_072]);
     }
 
@@ -365,7 +399,7 @@ mod tests {
             encode_from_outboard(root, size, outboard, rotted, &window).expect("encodes happily");
         let mut target = Vec::new();
         assert!(
-            decode_into(root, size, &encoded, &window, &mut target).is_err(),
+            decode_into(root, size, &encoded, &window, &mut target, &mut Vec::new()).is_err(),
             "the receiver must reject bytes that do not match the root"
         );
     }
@@ -383,7 +417,15 @@ mod tests {
 
         let mut target = Vec::new();
         assert!(
-            decode_into(root, bytes.len() as u64, &encoded, &all, &mut target).is_err(),
+            decode_into(
+                root,
+                bytes.len() as u64,
+                &encoded,
+                &all,
+                &mut target,
+                &mut Vec::new()
+            )
+            .is_err(),
             "a flipped bit must not verify"
         );
     }
@@ -400,7 +442,15 @@ mod tests {
 
         let mut target = Vec::new();
         assert!(
-            decode_into(their_root, mine.len() as u64, &encoded, &all, &mut target).is_err(),
+            decode_into(
+                their_root,
+                mine.len() as u64,
+                &encoded,
+                &all,
+                &mut target,
+                &mut Vec::new()
+            )
+            .is_err(),
             "content must not verify against an unrelated root"
         );
     }
