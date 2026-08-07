@@ -1,3 +1,4 @@
+use anyhow::Context as _;
 use std::io;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
@@ -56,7 +57,14 @@ impl WebRtcTransport {
     pub fn attach(&self, remote: EndpointId, session: NegotiatedSession) -> anyhow::Result<()> {
         let (out_tx, out_rx) = mpsc::channel(OUT_QUEUE);
         let dropped_tx = Arc::new(AtomicU64::new(0));
-        let generation = self.registry.next_generation();
+        // Claim the slot *before* spawning. The driver retires its own
+        // generation when it ends, and a session that fails immediately does
+        // that while this call is still returning — against an empty registry,
+        // that removal is lost and the record below becomes permanent.
+        let generation = self
+            .registry
+            .reserve(remote)
+            .with_context(|| format!("a live WebRTC session for {remote} already exists"))?;
         let task = tokio::spawn(drive_session(
             session,
             remote,
@@ -67,7 +75,7 @@ impl WebRtcTransport {
             dropped_tx.clone(),
         ));
         self.registry
-            .insert(remote, out_tx, dropped_tx, generation, task)?;
+            .fulfil(remote, out_tx, dropped_tx, generation, task)?;
         tracing::debug!(%remote, "webrtc session attached");
         Ok(())
     }
