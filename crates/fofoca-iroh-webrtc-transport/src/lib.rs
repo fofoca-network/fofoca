@@ -115,7 +115,7 @@ mod web;
 #[cfg(feature = "web")]
 pub use web::{
     AttachError, BrowserHubTransport, BrowserRtcTransport, BrowserSession, BrowserSessionGuard,
-    IceServer, IceServers, PendingAnswer as BrowserPendingAnswer,
+    DataChannelCounters, IceServer, IceServers, PendingAnswer as BrowserPendingAnswer,
     PendingOffer as BrowserPendingOffer, SessionCounters, SessionCounts, answer as browser_answer,
     log_signal_sdps, offer as browser_offer,
 };
@@ -268,8 +268,7 @@ impl WebRtcHandle {
         self.inner.selected_remote_candidate(remote).await
     }
 
-    /// Bytes and messages this session's data channel has carried, as
-    /// `(bytes_sent, bytes_received, messages_sent, messages_received)`.
+    /// Bytes and messages this session's data channel has carried.
     ///
     /// The measure to use when the question is "did our traffic move?" — see
     /// [`BrowserHubTransport::data_channel_bytes`] for why the ICE candidate
@@ -277,7 +276,7 @@ impl WebRtcHandle {
     pub async fn data_channel_bytes(
         &self,
         remote: &iroh_base::EndpointId,
-    ) -> Option<(f64, f64, f64, f64)> {
+    ) -> Option<DataChannelCounters> {
         self.inner.data_channel_bytes(remote).await
     }
 

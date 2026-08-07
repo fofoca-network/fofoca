@@ -88,6 +88,18 @@ impl SessionCounts {
     }
 }
 
+/// Cumulative counters from the session's `data-channel` stats row, `f64`
+/// because that is what `getStats` reports. Named fields rather than a
+/// positional tuple: every value shares one type, so a swapped pair would
+/// compile silently.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct DataChannelCounters {
+    pub bytes_sent: f64,
+    pub bytes_received: f64,
+    pub messages_sent: f64,
+    pub messages_received: f64,
+}
+
 #[derive(Debug)]
 struct SessionHandle {
     out_tx: mpsc::Sender<Vec<u8>>,
@@ -434,8 +446,7 @@ impl BrowserHubTransport {
         ))
     }
 
-    /// Bytes and messages this session's **data channel** has carried, as
-    /// `(bytes_sent, bytes_received, messages_sent, messages_received)`.
+    /// Bytes and messages this session's **data channel** has carried.
     ///
     /// The counterpart to [`Self::selected_pair_stats`], and the one to reach
     /// for when the question is "did our traffic move?". That reader answers a
@@ -453,19 +464,11 @@ impl BrowserHubTransport {
     ///
     /// `None` when there is no live session or the browser reports no
     /// `data-channel` row for it yet.
-    pub async fn data_channel_bytes(&self, remote: &EndpointId) -> Option<(f64, f64, f64, f64)> {
+    pub async fn data_channel_bytes(&self, remote: &EndpointId) -> Option<DataChannelCounters> {
         let peer_connection = self
             .sessions
             .with_live(remote, |handle| handle.keepalive.peer_connection.clone())?;
-        let report = JsFuture::from(peer_connection.get_stats()).await.ok()?;
-        let iter = js_sys::try_iter(&report).ok().flatten()?;
-        for entry in iter.flatten() {
-            let Ok(row) = entry.dyn_into::<js_sys::Array>() else {
-                continue;
-            };
-            let Ok(stats) = row.get(1).dyn_into::<js_sys::Object>() else {
-                continue;
-            };
+        for (_, stats) in stats_rows(&peer_connection).await? {
             let text = |key: &str| {
                 Reflect::get(&stats, &JsValue::from_str(key))
                     .ok()
@@ -486,12 +489,12 @@ impl BrowserHubTransport {
                     .and_then(|value| value.as_f64())
                     .unwrap_or(0.0)
             };
-            return Some((
-                number("bytesSent"),
-                number("bytesReceived"),
-                number("messagesSent"),
-                number("messagesReceived"),
-            ));
+            return Some(DataChannelCounters {
+                bytes_sent: number("bytesSent"),
+                bytes_received: number("bytesReceived"),
+                messages_sent: number("messagesSent"),
+                messages_received: number("messagesReceived"),
+            });
         }
         None
     }
@@ -612,10 +615,24 @@ async fn selected_pair_from_stats(
     std::collections::HashMap<String, js_sys::Object>,
     js_sys::Object,
 )> {
+    let by_id: std::collections::HashMap<String, js_sys::Object> =
+        stats_rows(peer_connection).await?.into_iter().collect();
+
+    let pair_id = selected_pair_id(&by_id)?;
+    let pair = by_id.get(&pair_id)?.clone();
+    Some((by_id, pair))
+}
+
+/// One walk of a `getStats` report into `(id, row)` pairs — the iteration
+/// shape every stats reader shares. The report iterates as `[id, object]`
+/// map entries; anything else-shaped is skipped rather than trusted. Shared
+/// so a browser changing the entry shape is fixed once, not once per reader.
+async fn stats_rows(
+    peer_connection: &RtcPeerConnection,
+) -> Option<Vec<(String, js_sys::Object)>> {
     let report = JsFuture::from(peer_connection.get_stats()).await.ok()?;
-    let mut by_id: std::collections::HashMap<String, js_sys::Object> =
-        std::collections::HashMap::new();
     let iter = js_sys::try_iter(&report).ok().flatten()?;
+    let mut rows = Vec::new();
     for entry in iter.flatten() {
         let Ok(pair) = entry.dyn_into::<js_sys::Array>() else {
             continue;
@@ -626,13 +643,9 @@ async fn selected_pair_from_stats(
         let Ok(obj) = pair.get(1).dyn_into::<js_sys::Object>() else {
             continue;
         };
-        let id = pair.get(0).as_string().unwrap_or_default();
-        by_id.insert(id, obj);
+        rows.push((pair.get(0).as_string().unwrap_or_default(), obj));
     }
-
-    let pair_id = selected_pair_id(&by_id)?;
-    let pair = by_id.get(&pair_id)?.clone();
-    Some((by_id, pair))
+    Some(rows)
 }
 
 /// Id of the candidate pair actually carrying traffic, in preference order.

@@ -372,12 +372,12 @@ impl Pair {
     /// An instantaneous sample, which is what a *failure* path wants — see
     /// [`Self::channel_bytes_settled`] for the one a report wants.
     pub(crate) async fn channel_bytes(&self) -> (f64, f64) {
-        let (sent, received, _, _) = self
+        let counters = self
             .client_hub
             .data_channel_bytes(&self.server_id)
             .await
-            .unwrap_or((0.0, 0.0, 0.0, 0.0));
-        (sent, received)
+            .unwrap_or_default();
+        (counters.bytes_sent, counters.bytes_received)
     }
 
     /// [`Self::channel_bytes`], sampled until it stops moving.

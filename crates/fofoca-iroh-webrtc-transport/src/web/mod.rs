@@ -22,6 +22,6 @@ pub use jsep::{
     offer,
 };
 pub use transport::{
-    AttachError, BrowserHubTransport, BrowserRtcTransport, BrowserSessionGuard, SessionCounters,
-    SessionCounts,
+    AttachError, BrowserHubTransport, BrowserRtcTransport, BrowserSessionGuard,
+    DataChannelCounters, SessionCounters, SessionCounts,
 };
