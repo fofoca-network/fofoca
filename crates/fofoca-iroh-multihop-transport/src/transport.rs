@@ -18,7 +18,6 @@ use iroh::endpoint::transports::{
 use iroh_base::CustomAddr;
 use tokio::sync::mpsc;
 
-use crate::MULTIHOP_TRANSPORT_ID;
 use crate::addr::{Route, RouteHop};
 use crate::underlay::{Delivered, Forwarder};
 use crate::wire::Cell;
@@ -139,8 +138,10 @@ struct MultihopSender {
 }
 
 impl CustomSender for MultihopSender {
+    /// Decoding, not just tagging: a route iroh cannot actually be sent along is
+    /// a path it should never select in the first place.
     fn is_valid_send_addr(&self, addr: &CustomAddr) -> bool {
-        addr.id() == MULTIHOP_TRANSPORT_ID
+        Route::decode(addr).is_some()
     }
 
     fn poll_send(
@@ -153,17 +154,19 @@ impl CustomSender for MultihopSender {
         let Some(route) = Route::decode(dst) else {
             return Poll::Ready(Err(io::Error::other("undecodable multihop address")));
         };
-        let hops = route.hops();
-        let Some(first) = hops.first().cloned() else {
+        if revisits_us(&route, &self.shared.self_hop) {
+            // We would be the first node to execute the loop.
+            return Poll::Ready(Err(io::Error::other("multihop route revisits this node")));
+        }
+        let Some(first) = route.hops().first().cloned() else {
             return Poll::Ready(Err(io::Error::other("empty multihop route")));
         };
-        let path = hops.to_vec();
         // A GSO batch is several datagrams concatenated; each is an independent
         // QUIC packet and rides its own cell.
         let segment = transmit.segment_size.unwrap_or(transmit.contents.len());
         for chunk in split_segments(transmit.contents, segment) {
             let cell = Cell {
-                path: path.clone(),
+                path: route.clone(),
                 pos: 0,
                 source: self.shared.self_hop.clone(),
                 packet: chunk.to_vec(),
@@ -172,6 +175,15 @@ impl CustomSender for MultihopSender {
         }
         Poll::Ready(Ok(()))
     }
+}
+
+/// Whether `route` runs back through `me`. A route is loop-free by construction,
+/// but nothing stops a *peer* advertising one that happens to include us.
+fn revisits_us(route: &Route, me: &RouteHop) -> bool {
+    route
+        .hops()
+        .iter()
+        .any(|hop| hop.underlay.id == me.underlay.id || hop.app_id == me.app_id)
 }
 
 /// Split a GSO'd transmit into its constituent datagrams. An empty payload still

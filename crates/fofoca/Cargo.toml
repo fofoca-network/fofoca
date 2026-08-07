@@ -25,7 +25,7 @@ test-fixtures = ["fofoca-protocol/test-fixtures"]
 # Off by default. Exposes the engine internals (crafted-message + state-doc
 # constructors) the app's `harness::adversarial` shim reaches so the adversarial
 # suite can inject malicious wire messages. Never enabled in a normal build.
-adversarial = ["test-fixtures", "fofoca-protocol/adversarial", "fofoca-doc/adversarial", "fofoca-reassembly/adversarial"]
+adversarial = ["test-fixtures", "fofoca-protocol/adversarial", "fofoca-doc/adversarial", "fofoca-reassembly/adversarial", "fofoca-iroh-multihop-transport?/adversarial"]
 # Off by default. Gates out the daemon's `std::process::exit` on the quit path
 # so the daemon returns cleanly and the app's dhat heap profiler (installed in
 # `main`) can flush `dhat-heap.json`. The app's `dhat-heap` feature forwards to

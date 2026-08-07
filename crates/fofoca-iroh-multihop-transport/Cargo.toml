@@ -12,6 +12,12 @@ keywords = ["iroh", "transport", "p2p", "routing", "multihop"]
 categories = ["network-programming"]
 publish = false
 
+[features]
+# Off by default. Exposes the forwarder's drop/queue accounting so the engine's
+# adversarial suite can assert a hostile cell was *refused* rather than merely
+# not observed. Never enabled in a normal build.
+adversarial = []
+
 [lints]
 workspace = true
 
