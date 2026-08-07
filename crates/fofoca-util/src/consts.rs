@@ -104,6 +104,22 @@ pub const REASSEMBLY_TOTAL_BUDGET_BYTES: usize = 6 * MAX_LOGICAL_BODY_BYTES;
 /// with resends — and a slow-but-live transfer is never reaped mid-flight.
 pub const REASSEMBLY_STALE_SECS: u64 = 300;
 
+/// Per-author (pubkey) ceiling on orphan channel changes buffered awaiting
+/// their dependencies. Counted rather than weighed because
+/// [`MAX_MESSAGE_SIZE`] already bounds one frame, so a count *is* a byte
+/// bound and states the limit in the unit the attack is measured in.
+///
+/// Generous against honest backfill: a holder answers one anti-entropy digest
+/// with at most [`ANTIENTROPY_MAX_RESEND`] frames, and those are spread across
+/// whichever authors wrote them.
+pub const DOC_PENDING_AUTHOR_MAX: usize = 128;
+
+/// Global backstop across all authors — pubkeys are free (Sybil), so the
+/// per-author ceiling alone is not a bound. Breaching it refuses the incoming
+/// orphan rather than evicting across authors, which would let one hostile
+/// stream flush a joiner's honest backfill.
+pub const DOC_PENDING_TOTAL_MAX: usize = 512;
+
 /// Hard ceiling on a partial group's lifetime regardless of activity. The
 /// idle TTL alone lets a hostile stream pin its buffered bytes forever by
 /// trickling one shard per window; this bounds any single group's pin to an

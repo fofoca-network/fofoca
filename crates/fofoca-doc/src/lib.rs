@@ -35,6 +35,11 @@ use automerge::{
 use serde_json::{Map, Value};
 
 use fofoca_protocol::{Message, Nickname};
+use fofoca_util::consts::{DOC_PENDING_AUTHOR_MAX, DOC_PENDING_TOTAL_MAX};
+
+/// Matches the receive path these drops happen on, so a reader filtering the
+/// gossip target sees the orphan buffer alongside the frames feeding it.
+const LOG_TARGET: &str = "fofoca::gossip";
 
 /// The outcome of ingesting one frame into a [`MeshDoc`].
 #[derive(Debug)]
@@ -79,6 +84,21 @@ pub struct SelfWriteGate {
     pub field: String,
 }
 
+/// One buffered orphan: the frame that carried it, and the change already
+/// decoded.
+///
+/// The decoded change is kept rather than re-derived because readiness is
+/// checked on every drain pass. Re-deriving means a ChaCha20-Poly1305 open, a
+/// Base58 decode and an automerge decode per buffered frame per pass, so one
+/// arriving change that unblocks a chain of depth *d* over *p* orphans costs
+/// *p×d* of them. Held once, the same check is a hash-set lookup.
+#[derive(Debug)]
+struct Pending {
+    frame: Message,
+    change: Change,
+    seq: u64,
+}
+
 /// One channel's automerge document plus the bookkeeping to apply changes in
 /// causal order and re-serve them.
 #[derive(Debug)]
@@ -95,7 +115,16 @@ pub struct MeshDoc {
     /// original signature intact). Replaces the old `StateLog`.
     frames: HashMap<ChangeHash, Message>,
     /// Orphan frames awaiting their change's deps, keyed by change hash.
-    pending: HashMap<ChangeHash, Message>,
+    ///
+    /// Bounded per author and overall: the frames arriving here have passed
+    /// signature, mesh-id and dedup checks, but nothing about them proves their
+    /// dependencies will ever arrive. An author who gossips a chain while
+    /// withholding its first link parks every later one here for good.
+    pending: HashMap<ChangeHash, Pending>,
+    /// Insertion order for `pending`, so the per-author ceiling can evict that
+    /// author's stalest orphan. A counter rather than a clock: this crate runs
+    /// in a browser too, where `Instant` is not available.
+    pending_seq: u64,
     /// This channel's per-peer write gate, when it has one (`meta` does; `state`
     /// is free-form and carries no per-peer identity, so it does not).
     gate: Option<SelfWriteGate>,
@@ -147,6 +176,7 @@ impl MeshDoc {
             applied,
             frames: HashMap::new(),
             pending: HashMap::new(),
+            pending_seq: 0,
             gate,
             key: None,
         }
@@ -318,8 +348,7 @@ impl MeshDoc {
             return Ingested::Duplicate;
         }
         if !self.deps_satisfied(change.deps()) {
-            self.pending.insert(hash, frame.clone());
-            return Ingested::Buffered;
+            return self.buffer_orphan(hash, change, frame);
         }
         if self.forges_foreign_entry(&change, &frame.author) {
             return Ingested::Rejected;
@@ -346,20 +375,98 @@ impl MeshDoc {
         deps.iter().all(|dep| self.applied.contains(dep))
     }
 
+    /// Buffer an orphan under the per-author and global ceilings.
+    ///
+    /// The author ceiling evicts *that author's* stalest orphan, so a peer
+    /// flooding orphans exhausts only itself. A global breach refuses the
+    /// newcomer instead: evicting across authors would let one hostile stream
+    /// push a joiner's honest backfill out of the buffer, which is the failure
+    /// the ceiling exists to prevent. Both mirror the reassembly store.
+    fn buffer_orphan(&mut self, hash: ChangeHash, change: Change, frame: &Message) -> Ingested {
+        if self.pending.contains_key(&hash) {
+            return Ingested::Buffered;
+        }
+        while self.pending_by(&frame.pubkey) >= DOC_PENDING_AUTHOR_MAX {
+            let Some(victim) = self.stalest_of(&frame.pubkey) else {
+                break;
+            };
+            self.pending.remove(&victim);
+            tracing::warn!(
+                target: LOG_TARGET,
+                author = %frame.author,
+                "channel orphan buffer full for this author; stalest orphan evicted"
+            );
+        }
+        if self.pending.len() >= DOC_PENDING_TOTAL_MAX {
+            tracing::warn!(
+                target: LOG_TARGET,
+                author = %frame.author,
+                "channel orphan buffer full; incoming orphan dropped"
+            );
+            return Ingested::Ignored;
+        }
+        self.pending_seq += 1;
+        self.pending.insert(
+            hash,
+            Pending {
+                frame: frame.clone(),
+                change,
+                seq: self.pending_seq,
+            },
+        );
+        Ingested::Buffered
+    }
+
+    /// How many orphans this pubkey has buffered. Scanned rather than counted
+    /// in a second map: `pending` is bounded, and one source of truth cannot
+    /// drift from itself.
+    fn pending_by(&self, pubkey: &str) -> usize {
+        self.pending
+            .values()
+            .filter(|entry| entry.frame.pubkey == pubkey)
+            .count()
+    }
+
+    /// This pubkey's earliest-buffered orphan. Keyed on the pubkey rather than
+    /// the nickname, which an author picks freely.
+    fn stalest_of(&self, pubkey: &str) -> Option<ChangeHash> {
+        self.pending
+            .iter()
+            .filter(|(_, entry)| entry.frame.pubkey == pubkey)
+            .min_by_key(|(_, entry)| entry.seq)
+            .map(|(hash, _)| *hash)
+    }
+
+    /// Accounting snapshot `(pending, max_author_pending)` for the adversarial
+    /// suite's orphan-buffer tripwires.
+    #[cfg(any(test, feature = "adversarial"))]
+    #[must_use]
+    pub fn pending_stats(&self) -> (usize, usize) {
+        let mut per_author: HashMap<&str, usize> = HashMap::new();
+        for entry in self.pending.values() {
+            *per_author.entry(entry.frame.pubkey.as_str()).or_default() += 1;
+        }
+        (
+            self.pending.len(),
+            per_author.values().copied().max().unwrap_or(0),
+        )
+    }
+
     /// Apply every buffered frame whose change's deps are now met — through the
     /// gate — repeating until a full pass unblocks nothing.
+    ///
+    /// Each pass reads the deps already decoded at buffer time, so a pass costs
+    /// a hash-set lookup per orphan rather than a decrypt and two decodes. That
+    /// matters because this runs to completion on the event-loop thread with no
+    /// await in it: every pass is time the whole daemon is not doing anything
+    /// else.
     fn drain_pending(&mut self) {
         loop {
             let ready: Vec<ChangeHash> = self
                 .pending
                 .iter()
-                .filter_map(|(hash, frame)| {
-                    let bytes = self.change_bytes(frame)?;
-                    Change::from_bytes(bytes)
-                        .ok()
-                        .filter(|change| self.deps_satisfied(change.deps()))
-                        .map(|_| *hash)
-                })
+                .filter(|(_, entry)| self.deps_satisfied(entry.change.deps()))
+                .map(|(hash, _)| *hash)
                 .collect();
             if ready.is_empty() {
                 return;
@@ -371,22 +478,16 @@ impl MeshDoc {
     }
 
     /// Apply one now-ready buffered frame through the gate, dropping it
-    /// silently if it's no longer pending, decodes badly, or forges a card —
-    /// same handling as the equivalent direct-ingest failure modes.
+    /// silently if it's no longer pending or forges a card — same handling as
+    /// the equivalent direct-ingest failure modes.
     fn try_apply_pending(&mut self, hash: ChangeHash) {
-        let Some(frame) = self.pending.remove(&hash) else {
+        let Some(entry) = self.pending.remove(&hash) else {
             return;
         };
-        let Some(bytes) = self.change_bytes(&frame) else {
-            return;
-        };
-        let Ok(change) = Change::from_bytes(bytes) else {
-            return;
-        };
-        if self.forges_foreign_entry(&change, &frame.author) {
+        if self.forges_foreign_entry(&entry.change, &entry.frame.author) {
             return; // dropped, same as a directly-rejected change
         }
-        self.apply(change, hash, frame);
+        self.apply(entry.change, hash, entry.frame);
     }
 }
 
@@ -603,7 +704,7 @@ fn put_number(
 #[cfg(test)]
 mod tests {
     use super::wire::change_body;
-    use super::{Ingested, MeshDoc, SelfWriteGate};
+    use super::{DOC_PENDING_AUTHOR_MAX, DOC_PENDING_TOTAL_MAX, Ingested, MeshDoc, SelfWriteGate};
     use fofoca_protocol::{Channel, MeshId, Message, Nickname};
     use serde_json::{Value, json};
 
@@ -732,6 +833,72 @@ mod tests {
         assert_eq!(
             doc.to_json(),
             json!({"peers": {"alice": {"model": "sonnet"}}})
+        );
+    }
+
+    /// A chain gossiped without its root parks every link forever: the deps are
+    /// never satisfied, so nothing drains and nothing expires.
+    #[test]
+    fn an_orphan_flood_from_one_author_stays_bounded() {
+        let alice = nick("alice");
+        let mut source = MeshDoc::new_ungated();
+        let chain: Vec<Message> = (0..DOC_PENDING_AUTHOR_MAX + 32)
+            .map(|step| author(&mut source, &alice, &json!({ "k": step })))
+            .collect();
+
+        let mut sink = MeshDoc::new_ungated();
+        // Withhold the root, so not one of these can ever apply.
+        for frame in chain.iter().skip(1) {
+            sink.ingest(frame);
+        }
+
+        let (total, per_author) = sink.pending_stats();
+        assert!(
+            per_author <= DOC_PENDING_AUTHOR_MAX,
+            "one author buffered {per_author} orphans, over the {DOC_PENDING_AUTHOR_MAX} ceiling"
+        );
+        assert!(total <= DOC_PENDING_TOTAL_MAX, "{total} orphans buffered");
+    }
+
+    /// The per-author ceiling exists so a flood costs its author and nobody
+    /// else. Evicting across authors would let one hostile stream flush a
+    /// joiner's honest backfill out of the buffer.
+    #[test]
+    fn a_floods_orphans_do_not_evict_another_authors() {
+        let alice = nick("alice");
+        let mallory = nick("mallory");
+
+        let mut alices = MeshDoc::new_ungated();
+        let alice_root = author(&mut alices, &alice, &json!({"a": 1}));
+        let mut alice_orphan = author(&mut alices, &alice, &json!({"b": 2}));
+        alice_orphan.pubkey = "aa".repeat(32);
+
+        let mut sink = MeshDoc::new_ungated();
+        assert!(matches!(sink.ingest(&alice_orphan), Ingested::Buffered));
+
+        let mut mallorys = MeshDoc::new_ungated();
+        let flood: Vec<Message> = (0..DOC_PENDING_AUTHOR_MAX + 32)
+            .map(|step| {
+                let mut frame = author(&mut mallorys, &mallory, &json!({ "m": step }));
+                frame.pubkey = "bb".repeat(32);
+                frame
+            })
+            .collect();
+        for frame in flood.iter().skip(1) {
+            sink.ingest(frame);
+        }
+
+        let (_total, per_author) = sink.pending_stats();
+        assert!(per_author <= DOC_PENDING_AUTHOR_MAX);
+
+        // Deliver the dep Alice's orphan was waiting on. It drains only if the
+        // flood left it alone — re-ingesting the orphan would prove nothing,
+        // since an evicted frame simply buffers again.
+        sink.ingest(&alice_root);
+        assert_eq!(
+            sink.to_json(),
+            json!({"a": 1, "b": 2}),
+            "a flood from one author must not evict another author's orphan"
         );
     }
 
