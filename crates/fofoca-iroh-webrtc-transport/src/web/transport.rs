@@ -627,9 +627,7 @@ async fn selected_pair_from_stats(
 /// shape every stats reader shares. The report iterates as `[id, object]`
 /// map entries; anything else-shaped is skipped rather than trusted. Shared
 /// so a browser changing the entry shape is fixed once, not once per reader.
-async fn stats_rows(
-    peer_connection: &RtcPeerConnection,
-) -> Option<Vec<(String, js_sys::Object)>> {
+async fn stats_rows(peer_connection: &RtcPeerConnection) -> Option<Vec<(String, js_sys::Object)>> {
     let report = JsFuture::from(peer_connection.get_stats()).await.ok()?;
     let iter = js_sys::try_iter(&report).ok().flatten()?;
     let mut rows = Vec::new();

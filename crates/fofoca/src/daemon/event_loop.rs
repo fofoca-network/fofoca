@@ -1930,8 +1930,8 @@ mod tests {
         // backstop: a stable small mesh must stop blipping its beacon every
         // half-minute forever.
         for round in 1..=8u32 {
-            let expected =
-                (RIVAL_RECHECK_SECS << round.saturating_sub(1).min(6)).min(RIVAL_RECHECK_MESHED_SECS);
+            let expected = (RIVAL_RECHECK_SECS << round.saturating_sub(1).min(6))
+                .min(RIVAL_RECHECK_MESHED_SECS);
             let base = Duration::from_secs(expected);
             for _ in 0..4 {
                 let delay = next_recheck_delay(round, 0, id);

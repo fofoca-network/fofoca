@@ -446,14 +446,8 @@ mod tests {
     fn request_is_a_well_formed_binding_request() {
         let request = binding_request(TXID);
         assert_eq!(request.len(), HEADER_LEN);
-        assert_eq!(
-            u16::from_be_bytes([request[0], request[1]]),
-            0x0001
-        );
-        assert_eq!(
-            u16::from_be_bytes([request[2], request[3]]),
-            0
-        );
+        assert_eq!(u16::from_be_bytes([request[0], request[1]]), 0x0001);
+        assert_eq!(u16::from_be_bytes([request[2], request[3]]), 0);
         assert_eq!(&request[4..8], &MAGIC_COOKIE.to_be_bytes());
         assert_eq!(&request[8..], &TXID);
     }
@@ -526,7 +520,9 @@ mod tests {
         // gather residue.
         assert!(!is_plain_stun_response(&[]));
         assert!(!is_plain_stun_response(&success[..HEADER_LEN - 1]));
-        assert!(!is_plain_stun_response(&[0x16, 0xFE, 0xFD, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]));
+        assert!(!is_plain_stun_response(&[
+            0x16, 0xFE, 0xFD, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+        ]));
     }
 
     #[test]
@@ -634,21 +630,17 @@ mod tests {
             stun_timeout: Duration::from_secs(2),
         };
         let start = std::time::Instant::now();
-        let reflexive =
-            super::gather_with_resolver(&client, &config, |name: String| async move {
-                if name.starts_with("hung") {
-                    return std::future::pending().await;
-                }
-                Ok(name.parse::<SocketAddr>().ok())
-            })
-            .await;
+        let reflexive = super::gather_with_resolver(&client, &config, |name: String| async move {
+            if name.starts_with("hung") {
+                return std::future::pending().await;
+            }
+            Ok(name.parse::<SocketAddr>().ok())
+        })
+        .await;
         let elapsed = start.elapsed();
         server.abort();
 
-        assert_eq!(
-            reflexive,
-            Some("203.0.113.7:41234".parse().expect("addr"))
-        );
+        assert_eq!(reflexive, Some("203.0.113.7:41234".parse().expect("addr")));
         assert!(
             elapsed < Duration::from_millis(500),
             "gather took {elapsed:?}: the hung resolver parked the receive loop"
@@ -666,12 +658,11 @@ mod tests {
             stun_servers: vec![live_addr.to_string()],
             stun_timeout: Duration::from_secs(2),
         };
-        let reflexive =
-            super::gather_with_resolver(&client, &config, |name: String| async move {
-                tokio::time::sleep(Duration::from_millis(1200)).await;
-                Ok(name.parse::<SocketAddr>().ok())
-            })
-            .await;
+        let reflexive = super::gather_with_resolver(&client, &config, |name: String| async move {
+            tokio::time::sleep(Duration::from_millis(1200)).await;
+            Ok(name.parse::<SocketAddr>().ok())
+        })
+        .await;
         server.abort();
 
         assert_eq!(
@@ -728,11 +719,10 @@ mod tests {
             stun_servers: vec!["203.0.113.9:3478".to_owned()],
             stun_timeout: Duration::from_secs(2),
         };
-        let reflexive =
-            super::gather_with_resolver(&socket, &config, |name: String| async move {
-                Ok(name.parse::<SocketAddr>().ok())
-            })
-            .await;
+        let reflexive = super::gather_with_resolver(&socket, &config, |name: String| async move {
+            Ok(name.parse::<SocketAddr>().ok())
+        })
+        .await;
         assert_eq!(
             reflexive,
             Some("203.0.113.7:41234".parse().expect("addr")),

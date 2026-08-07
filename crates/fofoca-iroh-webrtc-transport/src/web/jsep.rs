@@ -807,9 +807,20 @@ mod tests {
             backlog.push(index.to_le_bytes().to_vec());
         }
         let (kept, dropped) = backlog.take();
-        assert_eq!(kept.len(), cap, "held datagrams stop at the queue's own capacity");
-        assert_eq!(dropped, 3, "the overflow is counted, not silently forgotten");
-        assert_eq!(kept[0], 0usize.to_le_bytes().to_vec(), "the earliest datagrams win");
+        assert_eq!(
+            kept.len(),
+            cap,
+            "held datagrams stop at the queue's own capacity"
+        );
+        assert_eq!(
+            dropped, 3,
+            "the overflow is counted, not silently forgotten"
+        );
+        assert_eq!(
+            kept[0],
+            0usize.to_le_bytes().to_vec(),
+            "the earliest datagrams win"
+        );
         // Taken means gone: a second take delivers nothing twice.
         assert_eq!(backlog.take().0.len(), 0);
     }

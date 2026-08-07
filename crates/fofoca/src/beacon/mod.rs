@@ -818,7 +818,10 @@ mod tests {
         // widened gate leans on exactly this.
         let params = public_params();
         let mut slot = spawn_rival_probe(&params).await;
-        assert!(slot.is_some(), "the probe reports a verdict, it does not vanish");
+        assert!(
+            slot.is_some(),
+            "the probe reports a verdict, it does not vanish"
+        );
         assert!(
             probe_verdict(&mut slot).await,
             "an unanswerable probe reads as held, never as free"
