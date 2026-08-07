@@ -231,75 +231,63 @@ impl Default for IceConfig {
 /// loop matching transaction ids rather than racing futures that would steal
 /// each other's datagrams.
 pub async fn gather_reflexive(socket: &UdpSocket, config: &IceConfig) -> Option<SocketAddr> {
+    gather_with_resolver(socket, config, |server: String| async move {
+        match tokio::net::lookup_host(&*server).await {
+            Ok(mut addrs) => Ok(addrs.next()),
+            Err(error) => Err(error),
+        }
+    })
+    .await
+}
+
+/// [`gather_reflexive`] with the name resolution injected, so a test can
+/// hang or delay a lookup without real DNS.
+async fn gather_with_resolver<F, Fut>(
+    socket: &UdpSocket,
+    config: &IceConfig,
+    resolve: F,
+) -> Option<SocketAddr>
+where
+    F: Fn(String) -> Fut,
+    Fut: Future<Output = std::io::Result<Option<SocketAddr>>> + Send + 'static,
+{
     if config.stun_servers.is_empty() {
         return None;
     }
     let start = tokio::time::Instant::now();
     let deadline = start + config.stun_timeout;
 
-    // A hung resolver forfeits only its own probe: each resolution is sent
-    // the moment it lands, and the drain stops at half the budget so the
-    // receive loop always keeps the other half.
     let mut lookups = tokio::task::JoinSet::new();
     for server in config.stun_servers.clone() {
-        lookups.spawn(async move {
-            let resolved = match tokio::net::lookup_host(&*server).await {
-                Ok(mut addrs) => Ok(addrs.next()),
-                Err(error) => Err(error),
-            };
-            (server, resolved)
-        });
+        let resolution = resolve(server.clone());
+        lookups.spawn(async move { (server, resolution.await) });
     }
-    let resolve_deadline = start + config.stun_timeout / 2;
 
     // One transaction id per server, so a response identifies its sender even
     // if the source address was rewritten along the way.
     let mut pending: Vec<(String, SocketAddr, [u8; TRANSACTION_ID_LEN])> = Vec::new();
-    while !lookups.is_empty() {
-        let remaining = resolve_deadline.saturating_duration_since(tokio::time::Instant::now());
-        let Ok(joined) = tokio::time::timeout(remaining, lookups.join_next()).await else {
-            tracing::debug!("STUN resolution budget spent; probing what resolved");
-            break;
-        };
-        let Some(Ok((server, resolved))) = joined else {
-            continue;
-        };
-        let addr = match resolved {
-            Ok(addr) => addr,
-            Err(error) => {
-                tracing::debug!(%server, %error, "STUN server did not resolve");
-                continue;
-            }
-        };
-        let Some(addr) = addr else {
-            tracing::debug!(%server, "STUN server resolved to nothing");
-            continue;
-        };
-        let mut transaction_id = [0u8; TRANSACTION_ID_LEN];
-        rand::fill(&mut transaction_id);
-        let request = binding_request(transaction_id);
-        match socket.send_to(&request.message, addr).await {
-            Ok(_) => pending.push((server, addr, transaction_id)),
-            Err(error) => {
-                tracing::debug!(%server, %error, "sending a STUN Binding Request failed");
-            }
-        }
-    }
-    lookups.abort_all();
-    if pending.is_empty() {
-        return None;
-    }
-
     // One retransmit against packet loss: a Binding Request is 20 bytes, and
     // without it a single dropped datagram costs the whole reflexive
-    // candidate.
+    // candidate. A probe sent after the mark goes without one.
     let mut retransmit_at = Some(start + (config.stun_timeout / 4).min(Duration::from_millis(500)));
     let mut buffer = vec![0u8; 1500];
     let mut receive_errors = 0u8;
+
+    // One loop for both jobs: a resolution lands whenever it lands, its probe
+    // goes out that moment, and the socket is read the whole time. The serial
+    // shape this replaces (drain the resolver, then start receiving) parked
+    // an already-arrived answer behind the slowest resolver and forfeited the
+    // gather outright when nothing resolved by its half-budget drain mark. A
+    // hung resolver now costs only its own probe: the JoinSet is dropped on
+    // every return, which aborts whatever never resolved.
     loop {
         let now = tokio::time::Instant::now();
         if now >= deadline {
             tracing::debug!("no STUN server answered within {:?}", config.stun_timeout);
+            return None;
+        }
+        if pending.is_empty() && lookups.is_empty() {
+            // Nothing in flight, and nothing left that could put one there.
             return None;
         }
         if let Some(at) = retransmit_at
@@ -313,43 +301,71 @@ pub async fn gather_reflexive(socket: &UdpSocket, config: &IceConfig) -> Option<
         }
         let wake = retransmit_at.map_or(deadline, |at| at.min(deadline));
         let remaining = wake.saturating_duration_since(now);
-        let received =
-            match tokio::time::timeout(remaining, socket.recv_from(&mut buffer)).await {
-                Ok(Ok((len, _))) => len,
-                Ok(Err(error)) => {
-                    // A shared socket can surface transient errors (an ICMP
-                    // port-unreachable from a dead server, on some platforms);
-                    // give up only if they repeat.
-                    receive_errors += 1;
-                    if receive_errors >= 8 {
-                        tracing::debug!(%error, "giving up on STUN after repeated receive errors");
-                        return None;
-                    }
-                    tracing::debug!(%error, "transient error reading a STUN response");
+        tokio::select! {
+            joined = lookups.join_next(), if !lookups.is_empty() => {
+                let Some(Ok((server, resolved))) = joined else {
                     continue;
+                };
+                let addr = match resolved {
+                    Ok(Some(addr)) => addr,
+                    Ok(None) => {
+                        tracing::debug!(%server, "STUN server resolved to nothing");
+                        continue;
+                    }
+                    Err(error) => {
+                        tracing::debug!(%server, %error, "STUN server did not resolve");
+                        continue;
+                    }
+                };
+                let mut transaction_id = [0u8; TRANSACTION_ID_LEN];
+                rand::fill(&mut transaction_id);
+                let request = binding_request(transaction_id);
+                match socket.send_to(&request.message, addr).await {
+                    Ok(_) => pending.push((server, addr, transaction_id)),
+                    Err(error) => {
+                        tracing::debug!(%server, %error, "sending a STUN Binding Request failed");
+                    }
                 }
-                // The retransmit mark or the deadline; the loop head decides.
-                Err(_elapsed) => continue,
-            };
-        // A reply is identified by the transaction id it echoes, never by its
-        // source address: a multi-homed or anycast server answers from a
-        // different addr:port than the one probed, and the per-server ids in
-        // `pending` exist precisely so the sender is still known then.
-        let echoed = buffer[..received].get(8..HEADER_LEN);
-        let Some((server, _, transaction_id)) = pending
-            .iter()
-            .find(|(_, _, txid)| echoed == Some(txid.as_slice()))
-        else {
-            // Someone else's datagram on the shared socket.
-            continue;
-        };
-        match parse_binding_response(&buffer[..received], transaction_id) {
-            Ok(reflexive) => {
-                tracing::debug!(%server, %reflexive, "learned a reflexive address");
-                return Some(reflexive);
             }
-            Err(error) => {
-                tracing::debug!(%error, "ignoring a datagram that is not our STUN response");
+            received = tokio::time::timeout(remaining, socket.recv_from(&mut buffer)) => {
+                let received = match received {
+                    Ok(Ok((len, _))) => len,
+                    Ok(Err(error)) => {
+                        // A shared socket can surface transient errors (an ICMP
+                        // port-unreachable from a dead server, on some platforms);
+                        // give up only if they repeat.
+                        receive_errors += 1;
+                        if receive_errors >= 8 {
+                            tracing::debug!(%error, "giving up on STUN after repeated receive errors");
+                            return None;
+                        }
+                        tracing::debug!(%error, "transient error reading a STUN response");
+                        continue;
+                    }
+                    // The retransmit mark or the deadline; the loop head decides.
+                    Err(_elapsed) => continue,
+                };
+                // A reply is identified by the transaction id it echoes, never by its
+                // source address: a multi-homed or anycast server answers from a
+                // different addr:port than the one probed, and the per-server ids in
+                // `pending` exist precisely so the sender is still known then.
+                let echoed = buffer[..received].get(8..HEADER_LEN);
+                let Some((server, _, transaction_id)) = pending
+                    .iter()
+                    .find(|(_, _, txid)| echoed == Some(txid.as_slice()))
+                else {
+                    // Someone else's datagram on the shared socket.
+                    continue;
+                };
+                match parse_binding_response(&buffer[..received], transaction_id) {
+                    Ok(reflexive) => {
+                        tracing::debug!(%server, %reflexive, "learned a reflexive address");
+                        return Some(reflexive);
+                    }
+                    Err(error) => {
+                        tracing::debug!(%error, "ignoring a datagram that is not our STUN response");
+                    }
+                }
             }
         }
     }
@@ -596,6 +612,66 @@ mod tests {
         assert!(
             elapsed < Duration::from_secs(1),
             "gather took {elapsed:?}, so the dead server was waited out sequentially"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_hung_resolver_does_not_delay_a_live_answer() {
+        // One name hangs in resolution forever, the other resolves at once
+        // and its server answers within a millisecond. The answer must be
+        // read as it arrives: parking the receive loop behind the resolver
+        // re-taxes the connect path this gather sits on.
+        let (live_addr, server) = mock_server().await;
+        let client = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
+        let config = IceConfig {
+            stun_servers: vec!["hung.invalid:3478".to_owned(), live_addr.to_string()],
+            stun_timeout: Duration::from_secs(2),
+        };
+        let start = std::time::Instant::now();
+        let reflexive =
+            super::gather_with_resolver(&client, &config, |name: String| async move {
+                if name.starts_with("hung") {
+                    return std::future::pending().await;
+                }
+                Ok(name.parse::<SocketAddr>().ok())
+            })
+            .await;
+        let elapsed = start.elapsed();
+        server.abort();
+
+        assert_eq!(
+            reflexive,
+            Some("203.0.113.7:41234".parse().expect("addr"))
+        );
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "gather took {elapsed:?}: the hung resolver parked the receive loop"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_late_resolution_still_gets_probed_within_the_budget() {
+        // The name resolves after half the budget — past the old drain
+        // deadline. The probe must still go out: forfeiting with unused
+        // budget left loses the reflexive candidate for nothing.
+        let (live_addr, server) = mock_server().await;
+        let client = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
+        let config = IceConfig {
+            stun_servers: vec![live_addr.to_string()],
+            stun_timeout: Duration::from_secs(2),
+        };
+        let reflexive =
+            super::gather_with_resolver(&client, &config, |name: String| async move {
+                tokio::time::sleep(Duration::from_millis(1200)).await;
+                Ok(name.parse::<SocketAddr>().ok())
+            })
+            .await;
+        server.abort();
+
+        assert_eq!(
+            reflexive,
+            Some("203.0.113.7:41234".parse().expect("addr")),
+            "a resolution landing after half the budget must still be probed"
         );
     }
 
