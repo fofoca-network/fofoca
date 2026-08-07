@@ -1,4 +1,4 @@
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::protocol::message::sole_addressee;
 use crate::protocol::{Message, Nickname};
@@ -39,10 +39,10 @@ pub(crate) struct MissingQuery<'a> {
 /// A bounded buffer of the recent messages a member retains — the
 /// anti-entropy recovery source and the poll/fetch history. Held in arrival
 /// order (push order ≈ ascending timestamp) for the poll cursor and the
-/// positional digest windows. When full, the message with the smallest
-/// [`eviction_key`] is discarded — *not* the front — so the **retained set**
-/// is a deterministic function of the message set, identical on every node
-/// regardless of gossip delivery order (see [`MessageLog::push`]).
+/// positional digest windows. When full, one message is discarded — *not* the
+/// front — chosen so the **retained set** is a deterministic function of the
+/// message set, identical on every node regardless of gossip delivery order
+/// (see [`MessageLog::eviction_index`]).
 #[derive(Debug)]
 pub struct MessageLog {
     capacity: usize,
@@ -71,14 +71,51 @@ impl MessageLog {
         if self.messages.len() <= self.capacity {
             return None;
         }
-        let victim = self
-            .messages
+        let victim = self.eviction_index();
+        self.messages.remove(victim)
+    }
+
+    /// Which message to drop when over capacity: the smallest eviction key
+    /// *within the author holding the most of the log*, rather than the
+    /// smallest overall.
+    ///
+    /// Every field of the key travels on the wire, so leading with it made
+    /// eviction something a sender chooses. A peer stamping its frames far
+    /// enough ahead never lost one, and each honest message that arrived was
+    /// picked as its own victim the moment it landed — history stopped
+    /// existing, identically everywhere. Charging the fullest author instead
+    /// means a flood exhausts the flooder's own share and leaves everyone
+    /// else's alone. Bounding the timestamp would not do: any future a sender
+    /// is allowed still sorts above every honest message.
+    ///
+    /// Still a pure function of the message set — the counts, the pubkey
+    /// tie-break and the key comparison all read wire fields, never arrival
+    /// order — so peers agree on the retained set, which is what lets
+    /// anti-entropy converge on one set rather than a union of windows.
+    ///
+    /// Not a Sybil defence: pubkeys are free, so N identities hold N shares.
+    /// It removes the case where one identity costs everyone their history.
+    fn eviction_index(&self) -> usize {
+        let mut per_author: HashMap<&str, usize> = HashMap::new();
+        for msg in &self.messages {
+            *per_author.entry(msg.pubkey.as_str()).or_default() += 1;
+        }
+        // Ties go to the lowest pubkey, so the choice is total and identical
+        // on every node.
+        let fullest = per_author
+            .into_iter()
+            .max_by(|(lhs_key, lhs_count), (rhs_key, rhs_count)| {
+                lhs_count.cmp(rhs_count).then_with(|| rhs_key.cmp(lhs_key))
+            })
+            .map(|(pubkey, _)| pubkey)
+            .expect("over-capacity log is non-empty");
+        self.messages
             .iter()
             .enumerate()
+            .filter(|(_, msg)| msg.pubkey.as_str() == fullest)
             .min_by(|(_, lhs), (_, rhs)| eviction_key(lhs).cmp(&eviction_key(rhs)))
             .map(|(index, _)| index)
-            .expect("over-capacity log is non-empty");
-        self.messages.remove(victim)
+            .expect("the fullest author holds at least one message")
     }
 
     pub(crate) fn len(&self) -> usize {
@@ -213,12 +250,16 @@ fn resendable_to(msg: &Message, requester: &Nickname) -> bool {
     sole_addressee(&msg.kind).is_none_or(|to| to == requester)
 }
 
-/// Total order deciding which message is evicted on overflow (smallest is
-/// dropped): oldest `timestamp` first, then author key, the author's `seq`
-/// (so one author's burst evicts in send order — `seq 0` goes first), and
-/// finally the message id as a tie-break. Every field travels on the wire
-/// and is identical on every node, so retention is a pure function of the
-/// message set, not of arrival order.
+/// Total order deciding which of an author's messages goes first (smallest is
+/// dropped): oldest `timestamp`, then author key, the author's `seq` (so one
+/// author's burst evicts in send order — `seq 0` goes first), and finally the
+/// message id as a tie-break. Every field travels on the wire and is identical
+/// on every node, so retention is a pure function of the message set, not of
+/// arrival order.
+///
+/// Ranks *within* one author, not across them: because a sender picks these
+/// fields, ordering the whole log by them let one peer stamp its way to
+/// permanent residency. [`MessageLog::eviction_index`] picks the author first.
 fn eviction_key(msg: &Message) -> (i64, &str, Option<u64>, &str) {
     (msg.timestamp, msg.pubkey.as_str(), msg.seq, msg.id.as_str())
 }
@@ -452,6 +493,81 @@ mod tests {
     }
 
     // ── MessageLog ─────────────────────────────────────────────────
+
+    /// **A far-future stamp must not make a message unevictable.**
+    ///
+    /// The eviction key leads with the wire timestamp and drops the *smallest*,
+    /// so frames stamped at the end of time sort highest and never lose. Fill
+    /// the log with those and every honest message that arrives is chosen as
+    /// its own victim the instant it lands — history stops existing, and it
+    /// stops identically on every node, because the key is wire-derived by
+    /// design.
+    #[test]
+    fn a_far_future_stamp_does_not_make_a_message_unevictable() {
+        let mut log = MessageLog::new(4);
+        for index in 0..4 {
+            let mut flood = msg_at(&format!("flood{index}"), i64::MAX);
+            flood.pubkey = "ff".repeat(32);
+            log.push(flood);
+        }
+        let mut honest = msg_at("honest", 1_700_000_000);
+        honest.pubkey = "aa".repeat(32);
+        let evicted = log.push(honest);
+        assert!(
+            evicted.is_some_and(|msg| msg.body.as_str() != "honest"),
+            "an honest message must not be evicted the moment it arrives"
+        );
+        let bodies: HashSet<&str> = log.messages.iter().map(|msg| msg.body.as_str()).collect();
+        assert!(bodies.contains("honest"), "the honest message must survive");
+    }
+
+    /// **Retention must not depend on arrival order**, across authors too.
+    ///
+    /// This is what lets anti-entropy converge: every node has to keep the same
+    /// set, or peers reconcile toward the union of their own windows instead of
+    /// one agreed set. Eviction reads only wire fields for exactly this reason,
+    /// so any change to how the victim is chosen has to preserve it.
+    #[test]
+    fn retention_is_the_same_whatever_order_messages_arrive_in() {
+        let authors = ["aa", "bb", "cc"];
+        let build = || {
+            let mut batch = Vec::new();
+            for (index, author) in authors.iter().enumerate() {
+                for step in 0..4i64 {
+                    let mut message = msg_at(&format!("{author}-{step}"), 1_700_000_000 + step);
+                    message.pubkey = author.repeat(32);
+                    // One author also stamps far ahead, the shape that used to
+                    // buy immunity.
+                    if index == 0 {
+                        message.timestamp = i64::MAX - step;
+                    }
+                    batch.push(message);
+                }
+            }
+            batch
+        };
+
+        let mut forward = MessageLog::new(6);
+        for message in build() {
+            forward.push(message);
+        }
+        let mut backward = MessageLog::new(6);
+        for message in build().into_iter().rev() {
+            backward.push(message);
+        }
+
+        let kept = |log: &MessageLog| -> HashSet<String> {
+            log.messages
+                .iter()
+                .map(|msg| msg.body.as_str().to_owned())
+                .collect()
+        };
+        assert_eq!(
+            kept(&forward),
+            kept(&backward),
+            "the retained set must be a function of the message set, not arrival order"
+        );
+    }
 
     #[test]
     fn message_log_evicts_lowest_key_when_full() {
