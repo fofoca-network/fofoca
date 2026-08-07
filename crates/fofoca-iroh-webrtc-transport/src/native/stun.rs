@@ -46,23 +46,15 @@ const TRANSACTION_ID_LEN: usize = 12;
 const FAMILY_IPV4: u8 = 0x01;
 const FAMILY_IPV6: u8 = 0x02;
 
-/// A Binding Request plus the transaction id that identifies its reply.
-struct BindingRequest {
-    message: [u8; HEADER_LEN],
-    transaction_id: [u8; TRANSACTION_ID_LEN],
-}
-
-fn binding_request(transaction_id: [u8; TRANSACTION_ID_LEN]) -> BindingRequest {
+/// A Binding Request carrying `transaction_id`; the reply echoes the id.
+fn binding_request(transaction_id: [u8; TRANSACTION_ID_LEN]) -> [u8; HEADER_LEN] {
     let mut message = [0u8; HEADER_LEN];
     message[0..2].copy_from_slice(&BINDING_REQUEST.to_be_bytes());
     // A plain Binding Request carries no attributes, so the body is empty.
     message[2..4].copy_from_slice(&0u16.to_be_bytes());
     message[4..8].copy_from_slice(&MAGIC_COOKIE.to_be_bytes());
     message[8..HEADER_LEN].copy_from_slice(&transaction_id);
-    BindingRequest {
-        message,
-        transaction_id,
-    }
+    message
 }
 
 /// Pull the reflexive address out of a Binding Success Response.
@@ -317,7 +309,7 @@ where
         {
             for (_, addr, transaction_id) in &pending {
                 let request = binding_request(*transaction_id);
-                let _ = socket.send_to(&request.message, *addr).await;
+                let _ = socket.send_to(&request, *addr).await;
             }
             retransmit_at = None;
         }
@@ -342,7 +334,7 @@ where
                 let mut transaction_id = [0u8; TRANSACTION_ID_LEN];
                 rand::fill(&mut transaction_id);
                 let request = binding_request(transaction_id);
-                match socket.send_to(&request.message, addr).await {
+                match socket.send_to(&request, addr).await {
                     Ok(_) => pending.push((server, addr, transaction_id)),
                     Err(error) => {
                         tracing::debug!(%server, %error, "sending a STUN Binding Request failed");
@@ -408,56 +400,6 @@ pub(crate) fn is_plain_stun_response(datagram: &[u8]) -> bool {
     cookie == MAGIC_COOKIE && (kind == BINDING_SUCCESS || kind == BINDING_ERROR)
 }
 
-/// Ask `server` what address it sees `socket` coming from.
-///
-/// `socket` must be the socket the session will actually send media on — see
-/// the module docs. Retries are the caller's business; a single unanswered
-/// request times out rather than blocking the handshake.
-///
-/// # Errors
-/// The send fails, no well-formed reply arrives before `timeout`, or the
-/// server answers something we cannot parse.
-pub async fn reflexive_address(
-    socket: &UdpSocket,
-    server: SocketAddr,
-    timeout: Duration,
-) -> Result<SocketAddr> {
-    let mut transaction_id = [0u8; TRANSACTION_ID_LEN];
-    rand::fill(&mut transaction_id);
-    let request = binding_request(transaction_id);
-
-    socket
-        .send_to(&request.message, server)
-        .await
-        .with_context(|| format!("sending a STUN Binding Request to {server}"))?;
-
-    // A STUN reply is small, but the socket may also be carrying ICE traffic
-    // already; keep reading until one datagram parses as *our* response.
-    let deadline = tokio::time::Instant::now() + timeout;
-    let mut buffer = vec![0u8; 1500];
-    loop {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
-            bail!("no STUN response from {server} within {timeout:?}");
-        }
-        let received = match tokio::time::timeout(remaining, socket.recv_from(&mut buffer)).await {
-            Ok(Ok((len, from))) if from == server => len,
-            // Someone else's datagram on a shared socket: ignore and keep waiting.
-            Ok(Ok(_)) => continue,
-            Ok(Err(error)) => {
-                return Err(error).context("reading a STUN response");
-            }
-            Err(_elapsed) => bail!("no STUN response from {server} within {timeout:?}"),
-        };
-        match parse_binding_response(&buffer[..received], &request.transaction_id) {
-            Ok(addr) => return Ok(addr),
-            Err(error) => {
-                tracing::debug!(%error, "ignoring a datagram that is not our STUN response");
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
@@ -503,17 +445,17 @@ mod tests {
     #[test]
     fn request_is_a_well_formed_binding_request() {
         let request = binding_request(TXID);
-        assert_eq!(request.message.len(), HEADER_LEN);
+        assert_eq!(request.len(), HEADER_LEN);
         assert_eq!(
-            u16::from_be_bytes([request.message[0], request.message[1]]),
+            u16::from_be_bytes([request[0], request[1]]),
             0x0001
         );
         assert_eq!(
-            u16::from_be_bytes([request.message[2], request.message[3]]),
+            u16::from_be_bytes([request[2], request[3]]),
             0
         );
-        assert_eq!(&request.message[4..8], &MAGIC_COOKIE.to_be_bytes());
-        assert_eq!(&request.message[8..], &TXID);
+        assert_eq!(&request[4..8], &MAGIC_COOKIE.to_be_bytes());
+        assert_eq!(&request[8..], &TXID);
     }
 
     #[test]
@@ -575,7 +517,7 @@ mod tests {
 
         // A Binding *Request* is not a response; neither is a wrong cookie.
         let request = binding_request(TXID);
-        assert!(!is_plain_stun_response(&request.message));
+        assert!(!is_plain_stun_response(&request));
         let mut bad_cookie = success.clone();
         bad_cookie[4] ^= 0xFF;
         assert!(!is_plain_stun_response(&bad_cookie));
