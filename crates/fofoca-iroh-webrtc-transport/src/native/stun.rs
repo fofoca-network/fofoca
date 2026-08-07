@@ -313,9 +313,9 @@ pub async fn gather_reflexive(socket: &UdpSocket, config: &IceConfig) -> Option<
         }
         let wake = retransmit_at.map_or(deadline, |at| at.min(deadline));
         let remaining = wake.saturating_duration_since(now);
-        let (received, from) =
+        let received =
             match tokio::time::timeout(remaining, socket.recv_from(&mut buffer)).await {
-                Ok(Ok((len, from))) => (len, from),
+                Ok(Ok((len, _))) => len,
                 Ok(Err(error)) => {
                     // A shared socket can surface transient errors (an ICMP
                     // port-unreachable from a dead server, on some platforms);
@@ -331,7 +331,14 @@ pub async fn gather_reflexive(socket: &UdpSocket, config: &IceConfig) -> Option<
                 // The retransmit mark or the deadline; the loop head decides.
                 Err(_elapsed) => continue,
             };
-        let Some((server, _, transaction_id)) = pending.iter().find(|(_, addr, _)| *addr == from)
+        // A reply is identified by the transaction id it echoes, never by its
+        // source address: a multi-homed or anycast server answers from a
+        // different addr:port than the one probed, and the per-server ids in
+        // `pending` exist precisely so the sender is still known then.
+        let echoed = buffer[..received].get(8..HEADER_LEN);
+        let Some((server, _, transaction_id)) = pending
+            .iter()
+            .find(|(_, _, txid)| echoed == Some(txid.as_slice()))
         else {
             // Someone else's datagram on the shared socket.
             continue;
@@ -589,6 +596,46 @@ mod tests {
         assert!(
             elapsed < Duration::from_secs(1),
             "gather took {elapsed:?}, so the dead server was waited out sequentially"
+        );
+    }
+
+    /// A mock server that listens on one socket but answers from another —
+    /// the multi-homed / anycast / rewritten-return-path case. The reply
+    /// carries the correct transaction id; only the source address differs
+    /// from the one probed.
+    async fn sideways_server() -> (SocketAddr, tokio::task::JoinHandle<()>) {
+        let listen = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listen.local_addr().expect("local addr");
+        let task = tokio::spawn(async move {
+            let reply_from = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
+            let mut buffer = [0u8; 1500];
+            while let Ok((len, from)) = listen.recv_from(&mut buffer).await {
+                if len < HEADER_LEN {
+                    continue;
+                }
+                let transaction_id: [u8; TRANSACTION_ID_LEN] =
+                    buffer[8..HEADER_LEN].try_into().expect("12 bytes");
+                let message = response(ATTR_XOR_MAPPED_ADDRESS, &xor_ipv4_value(), transaction_id);
+                let _ = reply_from.send_to(&message, from).await;
+            }
+        });
+        (addr, task)
+    }
+
+    #[tokio::test]
+    async fn a_reply_from_a_rewritten_source_address_still_counts() {
+        let (addr, server) = sideways_server().await;
+        let client = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
+        let config = IceConfig {
+            stun_servers: vec![addr.to_string()],
+            stun_timeout: Duration::from_millis(500),
+        };
+        let reflexive = gather_reflexive(&client, &config).await;
+        server.abort();
+        assert_eq!(
+            reflexive,
+            Some("203.0.113.7:41234".parse().expect("addr")),
+            "the echoed transaction id identifies the reply; the source address does not"
         );
     }
 
