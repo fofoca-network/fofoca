@@ -26,6 +26,8 @@ use tokio::net::UdpSocket;
 const BINDING_REQUEST: u16 = 0x0001;
 /// STUN message type for a Binding Success Response.
 const BINDING_SUCCESS: u16 = 0x0101;
+/// STUN message type for a Binding Error Response.
+const BINDING_ERROR: u16 = 0x0111;
 /// The fixed cookie every RFC 5389 message carries at bytes `4..8`. Also the
 /// XOR mask for the port and (`IPv4`) address in `XOR-MAPPED-ADDRESS`.
 const MAGIC_COOKIE: u32 = 0x2112_A442;
@@ -391,6 +393,21 @@ where
     }
 }
 
+/// Whether a datagram is a plain RFC 5389 STUN Binding *response* — the
+/// shape of a gather straggler: a losing server answering after the winner
+/// returned, with no ICE message integrity, which is why str0m refuses it.
+/// ICE's own STUN parses in str0m, so it never needs this check; a datagram
+/// that fails str0m's parse *and* shows the cookie and a response type is
+/// gather residue, not peer traffic.
+pub(crate) fn is_plain_stun_response(datagram: &[u8]) -> bool {
+    let Some(header) = datagram.get(..HEADER_LEN) else {
+        return false;
+    };
+    let kind = u16::from_be_bytes([header[0], header[1]]);
+    let cookie = u32::from_be_bytes([header[4], header[5], header[6], header[7]]);
+    cookie == MAGIC_COOKIE && (kind == BINDING_SUCCESS || kind == BINDING_ERROR)
+}
+
 /// Ask `server` what address it sees `socket` coming from.
 ///
 /// `socket` must be the socket the session will actually send media on — see
@@ -541,6 +558,33 @@ mod tests {
         let message = response(ATTR_XOR_MAPPED_ADDRESS, &value, TXID);
         let parsed = parse_binding_response(&message, &TXID).expect("parse");
         assert_eq!(parsed, SocketAddr::new(addr.into(), 5000));
+    }
+
+    #[test]
+    fn plain_stun_responses_are_recognized_and_peer_traffic_is_not() {
+        use super::is_plain_stun_response;
+
+        // A gather straggler: a well-formed Binding Success.
+        let success = response(ATTR_XOR_MAPPED_ADDRESS, &xor_ipv4_value(), TXID);
+        assert!(is_plain_stun_response(&success));
+
+        // A Binding Error Response counts too — a losing server can refuse.
+        let mut error = success.clone();
+        error[0..2].copy_from_slice(&0x0111u16.to_be_bytes());
+        assert!(is_plain_stun_response(&error));
+
+        // A Binding *Request* is not a response; neither is a wrong cookie.
+        let request = binding_request(TXID);
+        assert!(!is_plain_stun_response(&request.message));
+        let mut bad_cookie = success.clone();
+        bad_cookie[4] ^= 0xFF;
+        assert!(!is_plain_stun_response(&bad_cookie));
+
+        // Truncated garbage and DTLS-shaped bytes are peer traffic, not
+        // gather residue.
+        assert!(!is_plain_stun_response(&[]));
+        assert!(!is_plain_stun_response(&success[..HEADER_LEN - 1]));
+        assert!(!is_plain_stun_response(&[0x16, 0xFE, 0xFD, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]));
     }
 
     #[test]

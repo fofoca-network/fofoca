@@ -143,17 +143,24 @@ pub(crate) async fn drive_until_channel_ready(
                 // not the socket's 0.0.0.0 bind — str0m matches it against
                 // its local ICE candidate.
                 //
-                // A datagram that does not parse is noise, not failure — the
-                // same tolerance `drive_session` has. The media socket is
-                // shared with the STUN gather, and the gather probes its
-                // servers concurrently: the losing server's Binding Success
-                // lands here after the winner returned, and str0m rejects it
-                // ("no message integrity") because it is a plain RFC 5389
-                // reply, not an ICE-authenticated one. Failing the whole
-                // handshake for a stray reply killed real connects.
+                // The media socket is shared with the STUN gather, and the
+                // gather probes its servers concurrently: a losing server's
+                // Binding Success lands here after the winner returned, and
+                // str0m rejects it ("no message integrity") because it is a
+                // plain RFC 5389 reply, not an ICE-authenticated one.
+                // Failing the whole handshake for that stray reply killed
+                // real connects — but only that known shape is tolerated.
+                // Anything else str0m cannot parse is the peer sending
+                // something we cannot speak, and timing out silently on it
+                // buries the named failure this loop used to give.
                 let Ok(receive) = Receive::new(Protocol::Udp, src, advertised, &buf[..len]) else {
-                    tracing::trace!(%src, "ignoring a datagram str0m cannot parse during the handshake");
-                    continue;
+                    if super::stun::is_plain_stun_response(&buf[..len]) {
+                        tracing::trace!(%src, "ignoring a late STUN gather reply during the handshake");
+                        continue;
+                    }
+                    anyhow::bail!(
+                        "unparseable datagram from {src} during the JSEP handshake ({len} bytes)"
+                    );
                 };
                 rtc.handle_input(Input::Receive(Instant::now(), receive))
                     .context("str0m receive input")?;
