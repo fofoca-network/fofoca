@@ -227,8 +227,49 @@ pub struct PendingAnswer {
     channel_rx: futures::channel::oneshot::Receiver<RtcDataChannel>,
     /// Datagrams that arrived before the hub's handler was installed, in
     /// arrival order — see the buffering handler in [`answer`].
-    backlog: std::rc::Rc<std::cell::RefCell<Vec<Vec<u8>>>>,
+    backlog: std::rc::Rc<std::cell::RefCell<PreAttachBacklog>>,
     callbacks: Vec<JsValue>,
+}
+
+/// The answerer's pre-attach buffer — see the buffering handler in [`answer`].
+///
+/// Bounded at [`IN_QUEUE`](super::transport::IN_QUEUE), the inbound queue's
+/// own capacity: at handoff the whole buffer is `try_send`-delivered into a
+/// queue of exactly that many slots, so anything held past it could never be
+/// delivered — an unbounded buffer only grew browser memory for as long as
+/// the signal round dawdled, and the excess was dropped at attach anyway.
+/// When full, new datagrams are refused rather than old ones evicted: the
+/// QUIC Initial and handshake flights arrive first, and losing those costs
+/// the connection where losing a later datagram costs a retransmit.
+pub(crate) struct PreAttachBacklog {
+    datagrams: Vec<Vec<u8>>,
+    dropped: usize,
+}
+
+impl PreAttachBacklog {
+    pub(crate) fn new() -> Self {
+        Self {
+            datagrams: Vec::new(),
+            dropped: 0,
+        }
+    }
+
+    pub(crate) fn push(&mut self, bytes: Vec<u8>) {
+        if self.datagrams.len() >= super::transport::IN_QUEUE {
+            self.dropped += 1;
+            return;
+        }
+        self.datagrams.push(bytes);
+    }
+
+    /// Take everything held, plus how many datagrams were refused over the
+    /// cap. The buffer is empty afterwards, so it cannot deliver twice.
+    pub(crate) fn take(&mut self) -> (Vec<Vec<u8>>, usize) {
+        (
+            std::mem::take(&mut self.datagrams),
+            std::mem::take(&mut self.dropped),
+        )
+    }
 }
 
 impl std::fmt::Debug for PendingAnswer {
@@ -377,8 +418,7 @@ pub async fn answer(
     // `maxRetransmits: 0`, so SCTP will not resend, and QUIC's own recovery
     // rides the same lane. So the handler goes on immediately and buffers, and
     // `complete` hands the backlog to the hub in arrival order.
-    let backlog: std::rc::Rc<std::cell::RefCell<Vec<Vec<u8>>>> =
-        std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let backlog = std::rc::Rc::new(std::cell::RefCell::new(PreAttachBacklog::new()));
     let mut callbacks: Vec<JsValue> = Vec::new();
     let early = {
         let backlog = std::rc::Rc::clone(&backlog);
@@ -492,7 +532,12 @@ impl PendingAnswer {
         // unordered, so this is not a sequencing promise, only a refusal to
         // reorder what we already hold. Taken (not cloned) so the buffer cannot
         // be delivered twice if this is ever called again.
-        let early = std::mem::take(&mut *backlog.borrow_mut());
+        let (early, over_cap) = backlog.borrow_mut().take();
+        if over_cap > 0 {
+            web_sys::console::warn_1(&JsValue::from_str(&format!(
+                "[fofoca webrtc] pre-attach backlog refused {over_cap} datagram(s) over its cap for {remote}"
+            )));
+        }
         if !early.is_empty() {
             web_sys::console::log_1(&JsValue::from_str(&format!(
                 "[fofoca webrtc] delivered {} datagram(s) buffered before attach for {remote}",
@@ -744,9 +789,30 @@ async fn sleep_ms(millis: i32) {
 
 #[cfg(test)]
 mod tests {
-    use super::{ICE_QUIET_MS, count_candidates, gathering_settled};
+    use super::{ICE_QUIET_MS, PreAttachBacklog, count_candidates, gathering_settled};
 
     const QUIET: f64 = ICE_QUIET_MS;
+
+    #[test]
+    fn the_pre_attach_backlog_is_bounded_at_the_inbound_queue() {
+        // `inject_inbound` try_sends into a queue of exactly IN_QUEUE slots,
+        // so anything held past that could never be delivered: an unbounded
+        // buffer only grew browser memory until attach, where the excess was
+        // dropped anyway. The earliest datagrams are the ones kept — the QUIC
+        // Initial and handshake flights arrive first, and losing those costs
+        // the connection where losing a later datagram costs a retransmit.
+        let cap = crate::web::transport::IN_QUEUE;
+        let mut backlog = PreAttachBacklog::new();
+        for index in 0..cap + 3 {
+            backlog.push(index.to_le_bytes().to_vec());
+        }
+        let (kept, dropped) = backlog.take();
+        assert_eq!(kept.len(), cap, "held datagrams stop at the queue's own capacity");
+        assert_eq!(dropped, 3, "the overflow is counted, not silently forgotten");
+        assert_eq!(kept[0], 0usize.to_le_bytes().to_vec(), "the earliest datagrams win");
+        // Taken means gone: a second take delivers nothing twice.
+        assert_eq!(backlog.take().0.len(), 0);
+    }
 
     #[test]
     fn a_srflx_with_an_mdns_raddr_counts_as_srflx() {
