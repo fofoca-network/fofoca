@@ -183,14 +183,16 @@ mod tests {
         state.peers.insert(nick("swift-cedar"));
         state.surfaced.insert(nick("swift-cedar"));
         let endpoint = iroh::SecretKey::from_bytes(&[7; 32]).public();
-        state.peer_endpoints.insert(nick("swift-cedar"), endpoint);
+        state
+            .peer_endpoints
+            .insert(nick("swift-cedar"), iroh::EndpointAddr::new(endpoint));
 
         tick_sweep(&mut state, &SilentSink);
 
         assert!(state.quiet.contains("swift-cedar"));
         assert_eq!(
             state.peer_endpoints.get("swift-cedar"),
-            Some(&endpoint),
+            Some(&iroh::EndpointAddr::new(endpoint)),
             "a returnable quiet peer keeps its dial hint — its return never re-broadcasts PeerInfo"
         );
     }
@@ -201,7 +203,9 @@ mod tests {
         let endpoint = iroh::SecretKey::from_bytes(&[8; 32]).public();
         // Not in `peers`, not in `quiet`: fell off the quiet FIFO or
         // departed via `left` churn — the dial hint must not outlive it.
-        state.peer_endpoints.insert(nick("gone-fern"), endpoint);
+        state
+            .peer_endpoints
+            .insert(nick("gone-fern"), iroh::EndpointAddr::new(endpoint));
 
         tick_sweep(&mut state, &SilentSink);
 

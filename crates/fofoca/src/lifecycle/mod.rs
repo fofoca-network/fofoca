@@ -155,7 +155,7 @@ pub(crate) async fn handle_presence(
         // and with it the warm unicast connection and any dial cooldown, so a
         // rejoin re-dials cold.
         if let Some(endpoint_id) = state.peer_endpoints.remove(message.author.as_str()) {
-            state.unicast_pool.forget(endpoint_id).await;
+            state.unicast_pool.forget(endpoint_id.id).await;
         }
         state.quiet.remove(message.author.as_str());
         // Only announce a departure for a peer whose arrival we

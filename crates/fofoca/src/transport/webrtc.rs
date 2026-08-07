@@ -142,6 +142,57 @@ pub(crate) struct IceProfile {
     pub(crate) host_only: bool,
 }
 
+/// The peer refused us at its direct-peer ceiling.
+///
+/// A distinct type rather than a message, because the caller has to tell a
+/// refusal from an ordinary failure and the two want opposite responses: a
+/// refusal quiets this peer for a while, a transient failure is retried. Matching
+/// on text could not do that — `anyhow`'s `Display` shows only the outermost
+/// context, so the reason was hidden behind whichever step happened to fail.
+#[derive(Debug)]
+struct CapRefused(EndpointId);
+
+impl std::fmt::Display for CapRefused {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{} is at its direct-peer cap", self.0)
+    }
+}
+
+impl std::error::Error for CapRefused {}
+
+/// Whether a failed offer round was the peer refusing us at its ceiling.
+fn is_cap_refusal(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<CapRefused>().is_some()
+}
+
+/// Write our envelope and wait for theirs, on an already-open connection.
+///
+/// Split out so the caller can consult the connection's close reason once for
+/// the whole exchange rather than per step.
+async fn exchange_envelopes(
+    conn: &Connection,
+    offer: &[u8],
+    remote: EndpointId,
+    deadlines: SignalDeadlines,
+) -> Result<Vec<u8>> {
+    let (mut send, mut recv) = conn.open_bi().await.context("open signal stream")?;
+    send.write_all(offer).await.context("send signal offer")?;
+    send.finish().context("finish signal stream")?;
+
+    match n0_future::time::timeout(deadlines.exchange, recv.read_to_end(MAX_ENVELOPE_BYTES)).await {
+        Ok(raw) => raw.context("read signal answer"),
+        Err(_elapsed) => {
+            // Close explicitly so the answerer wakes now instead of waiting out
+            // its own deadline on a round nobody is listening to any more.
+            conn.close(SIGNAL_ABORTED.into(), b"signalling timed out");
+            anyhow::bail!(
+                "no signal answer from {remote} within {:?}",
+                deadlines.exchange
+            )
+        }
+    }
+}
+
 /// Whether `error` is a peer telling us it is at its ceiling.
 fn refused_at_cap(conn: &Connection) -> bool {
     matches!(
@@ -409,31 +460,23 @@ async fn dial_signal_round(
         .connect(peer, MESH_WEBRTC_SIGNAL_ALPN)
         .await
         .context("dial the mesh WebRTC signal ALPN")?;
-    let (mut send, mut recv) = conn.open_bi().await.context("open signal stream")?;
 
-    send.write_all(&serde_json::to_vec(offer.envelope())?)
-        .await
-        .context("send signal offer")?;
-    send.finish().context("finish signal stream")?;
-
-    let raw =
-        match n0_future::time::timeout(deadlines.exchange, recv.read_to_end(MAX_ENVELOPE_BYTES))
-            .await
-        {
-            Ok(raw) => raw.context("read signal answer")?,
-            Err(_elapsed) => {
-                // Close explicitly so the answerer wakes now instead of waiting out
-                // its own deadline on a round nobody is listening to any more.
-                conn.close(SIGNAL_ABORTED.into(), b"signalling timed out");
-                if refused_at_cap(&conn) {
-                    anyhow::bail!("{remote} is at its direct-peer cap");
-                }
-                anyhow::bail!(
-                    "no signal answer from {remote} within {:?}",
-                    deadlines.exchange
-                );
-            }
-        };
+    // Any step of the exchange can be the one that trips over a refusal: a peer
+    // at its cap closes as soon as it sees the connection, often before our
+    // offer is even written. Consulting the close reason once, on whichever step
+    // noticed, is what makes the refusal visible — checking it on only the
+    // timeout branch missed every prompt refusal, which is all of them.
+    let offer_bytes = serde_json::to_vec(offer.envelope())?;
+    let raw = match exchange_envelopes(&conn, &offer_bytes, remote, deadlines).await {
+        Ok(raw) => raw,
+        Err(error) => {
+            return Err(if refused_at_cap(&conn) {
+                error.context(CapRefused(remote))
+            } else {
+                error
+            });
+        }
+    };
     let answer: SignalEnvelope = serde_json::from_slice(&raw).context("parse signal answer")?;
 
     offer.with_answer(answer).complete(remote, handle).await?;
@@ -495,13 +538,16 @@ pub const MAX_DIRECT_PEERS: usize = 16;
 /// browser, which has no IP stack under wasm and so publishes relay addresses
 /// only, and of a native peer deliberately run with its IP transports cleared.
 ///
-/// A native peer that has not yet finished discovering its own addresses also
-/// briefly advertises none, so this can still admit one session it did not need.
-/// That is harmless rather than wrong: the path selector's tier order is
-/// `ip > webrtc > relay`, so such a session is never *selected* while an IP path
-/// exists, and the next `retry_sessions` round sees the settled address.
+/// A native peer still discovering its own addresses briefly advertises none.
+/// That reads as "unknown" rather than "browser", so no lane is opened for it,
+/// and the next `retry_sessions` round sees the settled address.
+/// An address carrying *no* transports is not a browser, it is a peer we know
+/// nothing about yet, and the two must not be confused. The retry pass had no
+/// address to hand and built a bare one, so every native peer read as relay-only
+/// and got a data channel it did not need — spending the direct-peer slots the
+/// browsers were waiting for.
 pub(crate) fn needs_webrtc_lane(addr: &EndpointAddr) -> bool {
-    addr.ip_addrs().next().is_none()
+    !addr.is_empty() && addr.ip_addrs().next().is_none()
 }
 
 pub(crate) fn negotiate_session(
@@ -566,7 +612,7 @@ pub(crate) fn negotiate_session(
         // skipped by every later retry.
         let _guard = guard;
         if let Err(error) = Box::pin(dial_signal(&endpoint, addr, &handle, ice)).await {
-            if error.to_string().contains("direct-peer cap") {
+            if is_cap_refusal(&error) {
                 admission.note_refused(peer);
             }
             tracing::debug!(target: LOG_TARGET, %peer, %error, "webrtc offer failed");
@@ -814,18 +860,22 @@ pub(crate) fn retry_sessions(
     }
     // Collected first: `negotiate_session` needs `&mut state`, so the borrow of
     // `peer_endpoints` cannot be held across the calls.
-    let mut peers: Vec<EndpointId> = state
+    // The peer's own advertised address, not one rebuilt from its id: a
+    // rebuilt address carries no transports, so every peer looked like it
+    // needed the browser lane and this pass opened a data channel with all of
+    // them.
+    let mut peers: Vec<EndpointAddr> = state
         .peer_endpoints
         .values()
-        .copied()
-        .filter(|peer| *peer != ctx.rendezvous_id)
+        .filter(|addr| addr.id != ctx.rendezvous_id)
+        .cloned()
         .collect();
     // Sorted because the cap now bites here: in a mesh larger than the ceiling
     // this pass decides *which* peers get direct sessions, and `HashMap`
     // iteration order would make that differ run to run on one machine.
-    peers.sort_unstable();
-    for peer in peers {
-        negotiate_session(state, ctx, peer, EndpointAddr::new(peer));
+    peers.sort_unstable_by_key(|addr| addr.id);
+    for addr in peers {
+        negotiate_session(state, ctx, addr.id, addr);
     }
 }
 
@@ -880,9 +930,14 @@ mod tests {
         assert!(needs_webrtc_lane(&browser_shaped(id)));
         assert!(!needs_webrtc_lane(&native_shaped(id)));
 
-        // Nothing advertised at all is treated as browser-shaped: it is also
-        // what a native peer looks like with its IP transports cleared.
-        assert!(needs_webrtc_lane(&EndpointAddr::new(id)));
+        // Nothing advertised at all used to be treated as browser-shaped, on
+        // the grounds that a native peer with its IP transports cleared looks
+        // the same. It does not: that peer keeps its relay transport, which is
+        // `browser_shaped` above. An address with no transports at all only
+        // ever means "not known yet", and reading it as a browser is what let
+        // the retry pass open a lane with every native peer. See
+        // `an_address_with_no_transports_is_unknown_not_a_browser`.
+        assert!(!needs_webrtc_lane(&EndpointAddr::new(id)));
     }
 
     /// A mixed pair needs the lane **whichever end is looking**.
@@ -892,6 +947,23 @@ mod tests {
     /// that evaluates the gate — and it sees the *native* peer's IP. Testing
     /// only the remote made it skip, while the native peer sat waiting to be
     /// dialled, and the pair silently never got a channel.
+    /// **An address we know nothing about is not a browser.**
+    ///
+    /// The retry pass had no address to hand and built a bare one, which has no
+    /// transports at all. That reads as "advertises no IP", so every native peer
+    /// looked like a browser and the pass opened a data channel with all of
+    /// them, spending the direct-peer slots that browsers actually need.
+    #[test]
+    fn an_address_with_no_transports_is_unknown_not_a_browser() {
+        let id = SecretKey::from_bytes(&[7u8; 32]).public();
+        assert!(
+            !needs_webrtc_lane(&EndpointAddr::new(id)),
+            "an address carrying no transports says nothing about the peer"
+        );
+        // The real relay-only shape still must.
+        assert!(needs_webrtc_lane(&browser_shaped(id)));
+    }
+
     #[test]
     fn a_mixed_pair_needs_the_lane_from_either_side() {
         let browser = browser_shaped(SecretKey::from_bytes(&[6u8; 32]).public());
@@ -1090,6 +1162,40 @@ mod tests {
 
         router.shutdown().await.expect("shutdown");
         client.close().await;
+    }
+
+    /// **The dialer must recognise a prompt refusal, not just a timed-out one.**
+    ///
+    /// The answerer refuses at its cap by closing the connection straight away,
+    /// so the offer round fails on the *read*, not on the exchange deadline.
+    /// Only the timeout branch consulted the close code, so the refusal came
+    /// back as a plain read error and the dialer re-ran a full gathering round
+    /// against the same peer on every retry tick, forever.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_prompt_cap_refusal_is_recognised_by_the_dialer() {
+        let (server, server_hub) = endpoint().await;
+        let admission = SignalAdmission::new(0);
+        let router = serve(&server, &server_hub, &admission);
+
+        let (client, client_hub) = endpoint().await;
+        let error = dial_signal_with(
+            &client,
+            server.addr(),
+            &client_hub,
+            quick(),
+            IceProfile { host_only: true },
+        )
+        .await
+        .expect_err("a server at its cap must refuse the offer");
+
+        assert!(
+            is_cap_refusal(&error),
+            "the dialer must read this as an at-cap refusal, got: {error:#}"
+        );
+
+        router.shutdown().await.expect("shutdown");
+        client.close().await;
+        server.close().await;
     }
 
     /// `Router::shutdown` must reach the spawned answer tasks.

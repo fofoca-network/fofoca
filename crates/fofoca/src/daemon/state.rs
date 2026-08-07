@@ -6,7 +6,7 @@ use std::time::Duration;
 use n0_future::time::Instant as TokioInstant;
 
 use bytes::Bytes;
-use iroh::EndpointId;
+use iroh::{EndpointAddr, EndpointId};
 use serde::Serialize;
 
 use super::bounded_id_set::BoundedIdSet;
@@ -138,7 +138,7 @@ pub struct EventLoopState {
     /// name). Pruned with `peers`, so it stays bounded by the roster.
     /// Feeds only the derived `reach` boolean in `roster_snapshot` — the node
     /// id never leaves this layer.
-    pub(crate) peer_endpoints: HashMap<Nickname, EndpointId>,
+    pub(crate) peer_endpoints: HashMap<Nickname, EndpointAddr>,
     /// The mesh's rendezvous endpoint id, once known. Paired with
     /// `rendezvous_linked` so `reach_of` can count the rendezvous link as a
     /// live link to the beacon: the beacon gossips *as* the rendezvous, so a
@@ -631,8 +631,8 @@ impl EventLoopState {
     /// advertisement lands.
     fn reach_of(&self, nick: &Nickname) -> Reach {
         let linked = self.peer_endpoints.get(nick).is_some_and(|endpoint| {
-            self.linked_endpoints.contains(endpoint)
-                || (self.rendezvous_id == Some(*endpoint) && self.rendezvous_linked)
+            self.linked_endpoints.contains(&endpoint.id)
+                || (self.rendezvous_id == Some(endpoint.id) && self.rendezvous_linked)
         });
         if linked { Reach::Direct } else { Reach::Gossip }
     }
@@ -924,7 +924,9 @@ impl EventLoopState {
     /// A peer's last known endpoint id, if one has been learned.
     #[must_use]
     pub fn peer_endpoint(&self, nickname: &Nickname) -> Option<EndpointId> {
-        self.peer_endpoints.get(nickname.as_str()).copied()
+        self.peer_endpoints
+            .get(nickname.as_str())
+            .map(|addr| addr.id)
     }
 
     /// Whether this member has meshed (has at least one gossip neighbour).
@@ -1007,8 +1009,12 @@ impl EventLoopState {
         &mut self.message_log
     }
 
-    /// Record a peer's endpoint id, learned from its published card.
-    pub fn note_peer_endpoint(&mut self, nickname: Nickname, endpoint: EndpointId) {
+    /// Record a peer's endpoint address, learned from its published card.
+    ///
+    /// The whole address, not just the id: the retry pass has to know whether a
+    /// peer advertises IP, and rebuilding a bare address from the id there made
+    /// every native peer look like a browser.
+    pub fn note_peer_endpoint(&mut self, nickname: Nickname, endpoint: EndpointAddr) {
         self.peer_endpoints.insert(nickname, endpoint);
     }
 
@@ -1204,11 +1210,15 @@ mod tests {
         let stale_ep = endpoint_id(2);
         // A peer whose advertised endpoint is a live link → direct.
         state.peers.insert(nick("linked"));
-        state.peer_endpoints.insert(nick("linked"), linked_ep);
+        state
+            .peer_endpoints
+            .insert(nick("linked"), iroh::EndpointAddr::new(linked_ep));
         state.linked_endpoints.insert(linked_ep);
         // Advertised, but the endpoint is not (any longer) a live link → gossip.
         state.peers.insert(nick("unlinked"));
-        state.peer_endpoints.insert(nick("unlinked"), stale_ep);
+        state
+            .peer_endpoints
+            .insert(nick("unlinked"), iroh::EndpointAddr::new(stale_ep));
         // No PeerInfo seen yet → no binding → gossip.
         state.peers.insert(nick("unknown"));
         // Quiet evictees are never live-linked → gossip.
@@ -1239,7 +1249,9 @@ mod tests {
         let rendezvous_ep = endpoint_id(7);
         state.rendezvous_id = Some(rendezvous_ep);
         state.peers.insert(nick("beacon"));
-        state.peer_endpoints.insert(nick("beacon"), rendezvous_ep);
+        state
+            .peer_endpoints
+            .insert(nick("beacon"), iroh::EndpointAddr::new(rendezvous_ep));
 
         let reach = |current: &EventLoopState| {
             current
@@ -1267,7 +1279,7 @@ mod tests {
         state.peers.insert(nick("dialable"));
         state
             .peer_endpoints
-            .insert(nick("dialable"), endpoint_id(1));
+            .insert(nick("dialable"), iroh::EndpointAddr::new(endpoint_id(1)));
         // No PeerInfo yet → nothing to dial → unreachable for directed frames.
         state.peers.insert(nick("unknown"));
 

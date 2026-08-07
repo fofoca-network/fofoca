@@ -247,11 +247,11 @@ pub fn unicast_farewell(state: &EventLoopState, bytes: &Bytes) {
     for (nick, endpoint_id) in &state.peer_endpoints {
         // The rendezvous pseudo-node is never a directed target, and a
         // quiet/ghost peer's stale hint isn't worth a dial at shutdown.
-        if state.rendezvous_id == Some(*endpoint_id) || !state.peers.contains(nick) {
+        if state.rendezvous_id == Some(endpoint_id.id) || !state.peers.contains(nick) {
             continue;
         }
         let pool = state.unicast_pool.clone();
-        let endpoint_id = *endpoint_id;
+        let endpoint_id = endpoint_id.id;
         let bytes = bytes.clone();
         n0_future::task::spawn(async move {
             if let Err(error) = pool.dial_and_send(endpoint_id, bytes).await {

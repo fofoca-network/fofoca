@@ -1113,7 +1113,9 @@ async fn handle_peer_info(
     // fresh endpoint replaces the old. The beacon gossips *as* the rendezvous,
     // so it advertises `rendezvous_id` here — record that too, so a joiner can
     // tell its rendezvous link belongs to the beacon's nickname.
-    state.peer_endpoints.insert(message.author.clone(), peer_id);
+    state
+        .peer_endpoints
+        .insert(message.author.clone(), peer_addr.clone());
     // The rendezvous is overlay plumbing, not a dialable member peer:
     // the binding above is recorded, but skip the known-endpoints/re-bridge
     // dial path for it.
