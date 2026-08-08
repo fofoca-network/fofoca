@@ -91,13 +91,6 @@ struct HandleInner {
     self_id: EndpointId,
     underlay: Endpoint,
     transport: Arc<MultihopTransport>,
-    /// Held for the adversarial suite's accounting snapshot; the forwarding path
-    /// itself reaches it through `Shared`.
-    #[cfg_attr(
-        not(feature = "adversarial"),
-        expect(dead_code, reason = "only the adversarial stats accessor reads it")
-    )]
-    forwarder: Arc<Forwarder>,
     max_paths: usize,
     // Kept alive so the underlay's `FORWARD_ALPN` accept loop keeps running.
     _router: iroh::protocol::Router,
@@ -143,7 +136,6 @@ impl MultihopHandle {
                 self_id: app_id,
                 underlay,
                 transport,
-                forwarder,
                 max_paths,
                 _router: router,
             }),
@@ -209,19 +201,6 @@ impl MultihopHandle {
             .read()
             .expect("topology lock poisoned")
             .view(self.inner.self_id)
-    }
-
-    /// Accounting snapshot `(dropped, writers, queued_bytes)` for the adversarial
-    /// suite's forwarding tripwires: `dropped` counts cells this node refused to
-    /// relay, so a test can assert a hostile cell was turned away rather than
-    /// merely unobserved.
-    ///
-    /// # Panics
-    /// If the writer lock is poisoned by a panic in another thread.
-    #[cfg(feature = "adversarial")]
-    #[must_use]
-    pub fn forwarding_stats(&self) -> (u64, usize, usize) {
-        self.inner.forwarder.stats()
     }
 
     /// The custom transport factory, for `Builder::add_custom_transport`.

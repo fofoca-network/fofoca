@@ -227,21 +227,12 @@ async fn resend_one(msg: &Message, state: &EventLoopState, ctx: &HandlerCtx<'_>)
     true
 }
 
-/// Broadcast a **state** anti-entropy digest. The state log is unbounded, so —
-/// like the chat digest — it is advertised in **windows** rather than one flat
-/// set that would overflow a gossip message past ~170 ids. A holder re-sends any
-/// state event a peer's advertised window omits, so a cold/late joiner pulls the
-/// full state log over several rounds. Broadcast whenever meshed — even with an
-/// empty log, so a fresh joiner advertises its (empty) set and gets backfilled.
-///
-/// State needs **complete** history convergence (chat is content with recent
-/// context), so the windowing adds two things the chat digest lacks: a member
-/// whose set fits one window advertises it open at **both** ends
-/// ([`bootstrap_window`](crate::daemon::state_log::StateLog::bootstrap_window)),
-/// and on the `start == 0` older sweep the bottom is opened so events *below*
-/// the member's oldest held event are pulled too. Together they guarantee a
-/// joiner reconciles the whole log, not just the tail.
 /// Sweep both shared-state channels' anti-entropy digests (one tick).
+///
+/// Each digest advertises the channel's automerge heads — see
+/// [`HeadsBody`] and [`handle_state_digest`]. Broadcast whenever meshed, even
+/// on an empty document, so a fresh joiner advertises its empty frontier and
+/// gets backfilled.
 pub(crate) async fn broadcast_state_digests(
     state: &mut EventLoopState,
     sender: &MeshSender,
@@ -268,10 +259,7 @@ async fn broadcast_state_digest(
     if !state.meshed {
         return;
     }
-    let heads = match channel {
-        Channel::State => state.state_doc.heads(),
-        Channel::Meta => state.meta_doc.heads(),
-    };
+    let heads = state.doc(channel).heads();
     let Ok(json) = serde_json::to_string(&HeadsBody { heads }) else {
         return;
     };
@@ -304,10 +292,7 @@ pub(crate) async fn handle_state_digest(
         return;
     };
     let budget = antientropy_max_resend();
-    let missing = match channel {
-        Channel::State => state.state_doc.changes_since(&body.heads, budget),
-        Channel::Meta => state.meta_doc.changes_since(&body.heads, budget),
-    };
+    let missing = state.doc(channel).changes_since(&body.heads, budget);
     let mut resent = 0usize;
     for frame in missing {
         if let Ok(bytes) = frame.serialize() {

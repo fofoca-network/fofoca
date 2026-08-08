@@ -45,7 +45,7 @@ impl std::error::Error for IdError {}
 
 impl MessageId {
     /// # Errors
-    /// The value is empty, over-long, or not valid base58.
+    /// The value is not a valid UUID.
     pub fn new(value: impl Into<String>) -> Result<Self, IdError> {
         let value = value.into();
         Uuid::parse_str(&value).map_err(|_| IdError(value.clone()))?;

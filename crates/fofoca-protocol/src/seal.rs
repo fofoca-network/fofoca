@@ -110,8 +110,10 @@ fn unseal(our_secret: &StaticSecret, sealed: &Sealed) -> Result<Vec<u8>> {
 ///
 /// # Errors
 /// The envelope (pure ASCII JSON) somehow fails `MessageBody` validation.
+///
 /// # Panics
-/// Panics if an internal invariant is violated.
+/// If `Envelope` fails to serialize. Its fields are `String`s and a version
+/// tag, so serialization cannot fail short of an allocator failure.
 pub fn seal_to_body(recipient_pub: &[u8; 32], plaintext: &str) -> Result<MessageBody> {
     let sealed = seal(recipient_pub, plaintext.as_bytes());
     let envelope = Envelope {

@@ -771,11 +771,7 @@ fn dispatch_channel(
     let ChannelEvent {
         channel, message, ..
     } = event;
-    let doc = match channel {
-        Channel::State => &mut state.state_doc,
-        Channel::Meta => &mut state.meta_doc,
-    };
-    ingest_channel_event(event, doc, ctx);
+    ingest_channel_event(event, state.doc_mut(channel), ctx);
     if channel == Channel::Meta {
         // Post-apply hook: let the app adopt the author's endpoint hint from the
         // freshly-synced meta doc (the borrow above released `state`).

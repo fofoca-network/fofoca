@@ -48,8 +48,8 @@ pub fn set_build_version(version: &'static str) {
 }
 
 /// The consumer's stamp, or this engine's own [`VERSION`] when nothing
-/// registered one. The fallback keeps a direct engine embedder (e.g.
-/// `examples/mesh-pipe`) truthful rather than blank.
+/// registered one. The fallback keeps a direct engine embedder truthful rather
+/// than blank.
 #[must_use]
 pub fn build_version() -> &'static str {
     BUILD_VERSION.get().copied().unwrap_or(VERSION)

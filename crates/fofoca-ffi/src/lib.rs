@@ -7,9 +7,8 @@
 //! and read/write the shared automerge state document — in-process, with no
 //! daemon and no socket.
 //!
-//! The [`pipe`] module keeps `examples/mesh-pipe`'s `pipe_data` / `pipe_eof`
-//! frame taxonomy, so the C consumer and the Rust `mesh-pipe` binary talk to
-//! each other over the same mesh; [`ffi`] is the thin unsafe shim over it.
+//! The [`pipe`] module owns the `pipe_data` / `pipe_eof` frame taxonomy every
+//! peer on a pipe mesh must agree on; [`ffi`] is the thin unsafe shim over it.
 
 pub mod ffi;
 pub mod pipe;

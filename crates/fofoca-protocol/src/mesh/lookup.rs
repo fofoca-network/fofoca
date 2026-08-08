@@ -87,8 +87,11 @@ impl LookupOpts {
 
     /// Append the canonical wire encoding to `buf`:
     /// `[flags u8][if custom: [count u8] ([len u16 LE] url)*]`.
+    ///
     /// # Panics
-    /// Panics if an internal invariant is violated.
+    /// If a relay ladder longer than `MAX_RELAY_LADDER`, or a relay URL longer
+    /// than `MAX_RELAY_URL_BYTES`, reaches here — both are rejected at
+    /// construction, so this is a broken invariant rather than bad input.
     pub fn encode_into(&self, buf: &mut Vec<u8>) {
         let mut flags: u8 = 0;
         if self.mdns {
@@ -404,9 +407,11 @@ impl DirectorySelection {
 
     /// The directory to advertise into, or `None` when not advertising.
     /// Bare ⇒ the [`DEFAULT_DIRECTORY`]; valued ⇒ the given name.
-    #[must_use]
+    ///
     /// # Panics
-    /// Panics if an internal invariant is violated.
+    /// If [`DEFAULT_DIRECTORY`] is not a valid mesh name. It is a constant, so
+    /// this is a compile-time-checkable fact that only a bad edit can break.
+    #[must_use]
     pub fn directory(&self) -> Option<MeshName> {
         match self {
             DirectorySelection::Unset => None,

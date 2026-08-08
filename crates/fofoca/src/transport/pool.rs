@@ -122,6 +122,13 @@ impl UnicastPool {
         true
     }
 
+    /// How many times the inline-dial path was entered, for tests asserting a
+    /// caller stayed off it.
+    #[cfg(test)]
+    pub(crate) fn dial_attempts(&self) -> u64 {
+        self.inner.dial_attempts.load(Ordering::Relaxed)
+    }
+
     /// Ensure a connection to `eid` (reusing a warm one or dialing inline) and
     /// send `bytes` over it, awaiting the handoff. The cold path for every
     /// directed send — there is no other transport to carry the first message.
@@ -129,13 +136,6 @@ impl UnicastPool {
     /// # Errors
     /// A detached pool, an endpoint on failed-dial cooldown, a dial that
     /// fails/times out, or a stream write error.
-    /// How many times the inline-dial path was entered, for tests asserting a
-    /// caller stayed off it.
-    #[cfg(any(test, feature = "adversarial"))]
-    pub(crate) fn dial_attempts(&self) -> u64 {
-        self.inner.dial_attempts.load(Ordering::Relaxed)
-    }
-
     pub(crate) async fn dial_and_send(&self, eid: EndpointId, bytes: Bytes) -> Result<()> {
         self.inner.dial_attempts.fetch_add(1, Ordering::Relaxed);
         let Some(endpoint) = self.inner.endpoint.clone() else {

@@ -157,10 +157,7 @@ pub async fn broadcast_state_merge(
     // rejoined session under a nickname-derived actor would collide seq
     // numbers with its predecessor's history (see `doc::actor_for`).
     let actor_seed = *state.identity.public().as_bytes();
-    let built = match channel {
-        Channel::State => state.state_doc.build_change(&merge, &actor_seed)?,
-        Channel::Meta => state.meta_doc.build_change(&merge, &actor_seed)?,
-    };
+    let built = state.doc(channel).build_change(&merge, &actor_seed)?;
     let Some(change_bytes) = built else {
         return Ok(None);
     };
@@ -170,14 +167,9 @@ pub async fn broadcast_state_merge(
     //    writes; the internal card publish stays lean (no delta on the wire).
     //    On a passworded mesh the wire body is sealed under the channel key;
     //    `plain_body` keeps the plaintext for our own surfacing below.
-    let (wire_body, plain_body) = match channel {
-        Channel::State => state
-            .state_doc
-            .compose_wire_body(&change_bytes, surface.then_some(&merge))?,
-        Channel::Meta => state
-            .meta_doc
-            .compose_wire_body(&change_bytes, surface.then_some(&merge))?,
-    };
+    let (wire_body, plain_body) = state
+        .doc(channel)
+        .compose_wire_body(&change_bytes, surface.then_some(&merge))?;
     let signed =
         Message::new_channel_event(mesh, author, wire_body, channel).signed(&state.identity);
     let bytes = signed.serialize()?;
@@ -186,10 +178,7 @@ pub async fn broadcast_state_merge(
     // 3. Apply the signed frame to the live doc through the authorization gate.
     //    Ingest retains the frame as the re-serve store (replacing `StateLog`),
     //    so anti-entropy can forward it with its original signature.
-    let ingested = match channel {
-        Channel::State => state.state_doc.ingest(&signed),
-        Channel::Meta => state.meta_doc.ingest(&signed),
-    };
+    let ingested = state.doc_mut(channel).ingest(&signed);
     let after = match ingested {
         Ingested::Applied { doc, .. } => doc,
         Ingested::Duplicate => return Ok(None),

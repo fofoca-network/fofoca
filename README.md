@@ -15,7 +15,8 @@ library and joins a mesh from its own process.
 
 ## The crates
 
-Dependencies point strictly downward.
+See [docs/architecture.md](docs/architecture.md) §3 for the full dependency
+graph and the role of each crate. In outline, dependencies point downward:
 
 ```
 fofoca-util          host helpers, no deps of consequence   (13 crates resolved)
@@ -25,18 +26,23 @@ fofoca-util          host helpers, no deps of consequence   (13 crates resolved)
         ├── fofoca-reassembly   multipart body reassembly
         ├── fofoca-directory    discovery advertisement codec
         └── fofoca         the engine, + iroh, iroh-gossip (436 crates)
-              └── fofoca-ffi     the C ABI
+              ├── fofoca-ffi                    the C ABI
+              ├── fofoca-iroh-webrtc-transport  QUIC over a WebRTC data channel
+              └── fofoca-iroh-multihop-transport  QUIC relayed through peers
 
 fofoca-blobs                      verified byte ranges, + bao-tree, blake3
-fofoca-iroh-webrtc-transport      QUIC over a WebRTC data channel, + iroh
-fofoca-iroh-multihop-transport    QUIC relayed through peers, + iroh
 ```
 
-The bottom three are standalone: they depend on nothing else here.
+`fofoca-blobs` is standalone: nothing here depends on it. The two transports
+depend on nothing else here either, but the engine depends on *them* — on the
+multihop transport under `host`, and on the WebRTC transport per target.
 
-The load-bearing property: **only `fofoca` names `iroh`**. `fofoca-protocol`
-builds on `iroh-base` alone and pulls no tokio, QUIC, TLS or DNS; `-doc`,
-`-logging`, `-reassembly` and `-directory` inherit that.
+The load-bearing property: **the engine's dependents never name `iroh`
+themselves.** Four crates here do name it — `fofoca`, the two transports, and
+`fofoca-protocol` (which takes `iroh-base` alone, so the wire vocabulary pulls no
+tokio, QUIC, TLS or DNS; `-doc`, `-logging`, `-reassembly` and `-directory`
+inherit that). Everything else, in this workspace and downstream, reaches iroh
+through `fofoca::iroh` so the graph can never hold two copies.
 
 [`fofoca-blobs`](crates/fofoca-blobs) is a BLAKE3/bao store of verification
 metadata — outboards, root bindings, which ranges are held — for bytes that live

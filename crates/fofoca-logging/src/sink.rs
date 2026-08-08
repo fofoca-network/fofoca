@@ -144,8 +144,9 @@ impl LogSink {
 /// Process ending without ever attaching — a transient command
 /// (`msg`/`poll`/`mcp`) or startup failing before identity. Flush
 /// buffered diagnostics to stderr so they aren't lost.
+///
 /// # Panics
-/// Panics if an internal invariant is violated.
+/// If the log-sink mutex is poisoned by a panic in another thread.
 pub fn flush_pending_to_stderr() {
     if let Some(sink) = SINK.get() {
         let mut state = sink.0.lock().expect("log sink poisoned");

@@ -87,9 +87,11 @@ impl Ad {
     /// Render this ad as a [`MessageBody`] for broadcast on the directory.
     /// Infallible: the JSON of an `{id, peers}` object contains no
     /// control characters.
-    #[must_use]
+    ///
     /// # Panics
-    /// Panics if an internal invariant is violated.
+    /// If `Ad` fails to serialize, or its JSON somehow carries a control
+    /// character. Neither is reachable for an `{id, peers}` object.
+    #[must_use]
     pub fn to_body(&self) -> MessageBody {
         let json = serde_json::to_string(self).expect("Ad always serializes to JSON");
         MessageBody::new(json).expect("Ad JSON contains no control characters")

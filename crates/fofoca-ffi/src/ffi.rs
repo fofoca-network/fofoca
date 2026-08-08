@@ -1,6 +1,7 @@
 //! The C ABI. `include/mesh.h` is the hand-written declaration of everything
-//! here — change one, change the other; `tests/ffi_smoke.rs` and the C programs
-//! under `examples/mesh-pipe-c` are what catch a mismatch.
+//! here — change one, change the other; `tests/ffi_smoke.rs` is what catches a
+//! mismatch from this side. The out-of-tree consumer is `mallorca`, which links
+//! the `staticlib`, so no check in this workspace sees a break there.
 //!
 //! Conventions, uniform across the surface: a pointer-returning call yields NULL
 //! on failure, an `int` call returns `0`/`-1`, and the reason for any failure is

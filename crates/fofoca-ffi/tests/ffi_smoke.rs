@@ -2,8 +2,7 @@
 //!
 //! Every assertion here is about the *boundary* rather than the mesh: NULL
 //! handling, the error slot, the length-then-fill buffer convention. It needs no
-//! C compiler, so the contract stays covered on a host that cannot build
-//! `examples/mesh-pipe-c` (where the behavioural coverage lives).
+//! C compiler, so the contract stays covered on any host.
 #![expect(
     unsafe_code,
     reason = "the surface under test is `unsafe extern \"C\"`; calling it is the test"

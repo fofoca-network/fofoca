@@ -1,13 +1,10 @@
 //! The safe Rust core behind the C ABI: an engine driver plus a blocking handle
 //! a foreign caller can drive from one thread.
 //!
-//! **Twin file:** `examples/mesh-pipe/src/main.rs`. The frame taxonomy here
-//! (`pipe_data` / `pipe_eof`, base64 body, the [`AppClass`] flags, the chunk
-//! budget) is deliberately identical to that binary's, so the two interoperate
-//! over one mesh. The duplication is the price of keeping `mesh-pipe` dependent
-//! on nothing but the engine; `tests/c_suite.rs` pipes bytes in both directions
-//! between them, so any divergence here fails there rather than silently
-//! splitting the wire format.
+//! The frame taxonomy — `pipe_data` / `pipe_eof`, a base64 body, the
+//! [`AppClass`] flags, the chunk budget — is this crate's own wire contract.
+//! Every peer on a pipe mesh must agree on it bit for bit, so treat a change
+//! here as a wire break.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -36,8 +33,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use tokio::sync::{mpsc, oneshot};
 
-/// The `App`-frame tags, byte-identical to `examples/mesh-pipe`'s — the engine
-/// routes on the tag but never interprets it.
+/// The `App`-frame tags — the engine routes on the tag but never interprets it.
 mod tag {
     pub(crate) const DATA: &str = "pipe_data";
     pub(crate) const EOF: &str = "pipe_eof";
@@ -99,7 +95,7 @@ struct PipeApp {
 #[async_trait]
 impl NodeApp for PipeApp {
     fn classify(&self, _message: &Message) -> AppClass {
-        // Identical to mesh-pipe's: ephemeral stream bytes, never logged, never
+        // Ephemeral stream bytes: never logged, never
         // a task beat, always valid (an opaque base64 body), no per-author hash
         // chain. `sealed: false` is load-bearing — this consumer publishes no
         // a2a card, so it can neither seal to a peer nor be sealed to, and the
@@ -240,11 +236,11 @@ impl NodeDriver for PipeApp {
 }
 
 /// How the caller selects a mesh — an id to join, a shared string to derive one
-/// from, or a create over these lookups. Mirrors `mesh-pipe`'s flag set.
+/// from, or a create over these lookups.
 #[derive(Debug, Default)]
 #[expect(
     clippy::struct_excessive_bools,
-    reason = "four independent discovery choices (public/mdns/dht/relay) mirroring the mesh-pipe CLI; they are flat inputs, not a state machine to model as an enum"
+    reason = "four independent discovery choices (public/mdns/dht/relay); they are flat inputs, not a state machine to model as an enum"
 )]
 pub struct Opts {
     /// A `mesh id` id to join.
@@ -338,9 +334,8 @@ impl Pipe {
             )
             .await
             .context("setting up the mesh")?;
-            // `handle_signals: false` — the one deliberate divergence from
-            // mesh-pipe, which passes `true` because it owns its process. This
-            // is a library inside somebody else's: installing process-wide
+            // `handle_signals: false` — this is a library inside somebody
+            // else's process, unlike a CLI that owns its own: installing process-wide
             // ctrl-c / SIGTERM listeners would hijack the host's own handling.
             // A foreign caller traps signals itself and calls `fofoca_close`.
             Ok::<_, anyhow::Error>(Node::spawn(
@@ -481,8 +476,8 @@ impl Pipe {
         self.await_reply(answer)
     }
 
-    /// Broadcast `Left` and wind the loop down. Holds the same brief grace
-    /// period `mesh-pipe` does first: a gossip broadcast is fire-and-forget, so
+    /// Broadcast `Left` and wind the loop down. Holds a brief grace
+    /// period first: a gossip broadcast is fire-and-forget, so
     /// leaving the instant after a send could race the frames out of existence.
     ///
     /// # Errors
@@ -511,7 +506,7 @@ impl Pipe {
     }
 }
 
-/// Matches `mesh-pipe`'s post-EOF wait before leaving.
+/// Post-EOF wait before leaving, so in-flight frames land first.
 const DEPARTURE_GRACE: Duration = Duration::from_millis(750);
 
 fn parse_to(to: Option<&str>) -> Result<Option<Nickname>> {
@@ -578,11 +573,14 @@ fn resolve_kind(opts: &Opts, nickname: Option<Nickname>) -> Result<(SetupKind, N
     }
 }
 
-/// The default raw-bytes-per-frame budget, identical to `mesh-pipe`'s: a
-/// `pipe_data` frame is unsharded, so the base64-inflated body plus the JSON
-/// envelope must fit [`MAX_MESSAGE_SIZE`]. Invert base64's 4/3 growth after
-/// reserving envelope headroom, then round to a multiple of 3 so base64 emits no
-/// mid-stream padding.
+/// The default raw-bytes-per-frame budget: a `pipe_data` frame is unsharded, so
+/// the base64-inflated body plus the JSON envelope must fit
+/// [`MAX_MESSAGE_SIZE`]. Invert base64's 4/3 growth after reserving envelope
+/// headroom.
+///
+/// The result is a multiple of 3 by construction — `n / 4 * 3` is `3k` for any
+/// `n` — which is what keeps base64 from emitting mid-stream padding. No
+/// separate rounding step is needed for that.
 ///
 /// Public because a foreign caller needs it to size its receive buffer: a frame
 /// larger than the buffer handed to `fofoca_recv` is an error, not a truncation.
@@ -590,6 +588,5 @@ fn resolve_kind(opts: &Opts, nickname: Option<Nickname>) -> Result<(SetupKind, N
 pub fn default_chunk() -> usize {
     const ENVELOPE_RESERVE: usize = 1024;
     let body_budget = MAX_MESSAGE_SIZE.saturating_sub(ENVELOPE_RESERVE);
-    let raw = body_budget / 4 * 3;
-    (raw / 3) * 3
+    body_budget / 4 * 3
 }

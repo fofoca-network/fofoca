@@ -47,7 +47,6 @@ native = [
     "dep:iroh",
     "dep:noq-udp",
     "dep:n0-watcher",
-    "dep:serde_json",
 ]
 # Browser backend: the platform's own RTCPeerConnection via web-sys.
 web = [
@@ -59,7 +58,6 @@ web = [
     "dep:iroh",
     "dep:noq-udp",
     "dep:n0-watcher",
-    "dep:serde_json",
 ]
 
 [dependencies]
@@ -81,7 +79,6 @@ iroh = { workspace = true, optional = true }
 # `RecvMeta` appears in the `CustomEndpoint::poll_recv` signature.
 noq-udp = { workspace = true, optional = true }
 n0-watcher = { workspace = true, optional = true }
-serde_json = { workspace = true, optional = true }
 
 # ── native backend ───────────────────────────────────────────────────────
 str0m = { version = "0.21", optional = true }
@@ -103,7 +100,6 @@ futures = { version = "0.3", optional = true }
 web-sys = { workspace = true, optional = true, features = [
     "RtcPeerConnection",
     "RtcConfiguration",
-    "RtcIceServer",
     "RtcDataChannel",
     "RtcDataChannelEvent",
     "RtcDataChannelInit",
@@ -118,9 +114,6 @@ web-sys = { workspace = true, optional = true, features = [
     "Event",
     "Window",
     "console",
-    "Request",
-    "RequestInit",
-    "Response",
 ] }
 
 [dev-dependencies]

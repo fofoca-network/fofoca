@@ -132,21 +132,6 @@ impl Forwarder {
         }
     }
 
-    /// Accounting snapshot `(dropped, writers, queued_bytes)` for the
-    /// adversarial suite's forwarding tripwires.
-    #[cfg(feature = "adversarial")]
-    pub(crate) fn stats(&self) -> (u64, usize, usize) {
-        (
-            self.dropped.load(Ordering::Relaxed),
-            self.pool
-                .writers
-                .lock()
-                .expect("writers mutex poisoned")
-                .len(),
-            self.pool.queued_bytes.load(Ordering::Relaxed),
-        )
-    }
-
     /// Hand a cell to the writer for `hop`, spawning one if none is live. Never
     /// blocks: a full or dead queue drops the cell (QUIC recovers).
     pub(crate) fn enqueue(&self, hop: &RouteHop, cell: Cell) {
