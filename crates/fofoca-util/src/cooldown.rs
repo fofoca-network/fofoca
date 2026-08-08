@@ -22,7 +22,7 @@ pub struct Cooldown<K> {
     window: Duration,
 }
 
-impl<K: Eq + Hash + Copy> Cooldown<K> {
+impl<K: Eq + Hash + Clone> Cooldown<K> {
     /// A throttle with the given cooldown `window`.
     #[must_use]
     pub fn new(window: Duration) -> Self {
@@ -36,9 +36,9 @@ impl<K: Eq + Hash + Copy> Cooldown<K> {
     /// caller should skip the throttled action.
     ///
     /// [`note`]: Cooldown::note
-    pub fn on_cooldown(&self, key: K, now: Instant) -> bool {
+    pub fn on_cooldown(&self, key: &K, now: Instant) -> bool {
         self.seen
-            .get(&key)
+            .get(key)
             .is_some_and(|at| now.duration_since(*at) < self.window)
     }
 
@@ -86,13 +86,13 @@ mod tests {
         let mut cooldown: Cooldown<u8> = Cooldown::new(WINDOW);
         let start = Instant::now();
         assert!(
-            !cooldown.on_cooldown(1, start),
+            !cooldown.on_cooldown(&1, start),
             "unseen key is never on cooldown"
         );
         cooldown.note(1, start);
-        assert!(cooldown.on_cooldown(1, start));
+        assert!(cooldown.on_cooldown(&1, start));
         // Past the window the key is free again (no permanent lockout).
-        assert!(!cooldown.on_cooldown(1, start + WINDOW + Duration::from_secs(1)));
+        assert!(!cooldown.on_cooldown(&1, start + WINDOW + Duration::from_secs(1)));
     }
 
     #[test]
@@ -101,11 +101,11 @@ mod tests {
         let start = Instant::now();
         cooldown.note(1, start);
         cooldown.note(2, start);
-        assert!(cooldown.on_cooldown(1, start));
+        assert!(cooldown.on_cooldown(&1, start));
         cooldown.clear();
         // A starvation recovery must be able to re-announce immediately.
-        assert!(!cooldown.on_cooldown(1, start));
-        assert!(!cooldown.on_cooldown(2, start));
+        assert!(!cooldown.on_cooldown(&1, start));
+        assert!(!cooldown.on_cooldown(&2, start));
     }
 
     #[test]
@@ -113,9 +113,9 @@ mod tests {
         let mut cooldown: Cooldown<u8> = Cooldown::new(WINDOW);
         let start = Instant::now();
         cooldown.note(1, start);
-        assert!(cooldown.on_cooldown(1, start));
+        assert!(cooldown.on_cooldown(&1, start));
         assert!(
-            !cooldown.on_cooldown(2, start),
+            !cooldown.on_cooldown(&2, start),
             "one key's cooldown never gates another"
         );
     }

@@ -155,10 +155,26 @@ pub(crate) async fn broadcast_digest(
 /// so a per-window `have` would re-send a message the sender holds but listed
 /// under the *other* window — wasting the shared resend budget on messages the
 /// peer already has and starving the genuinely-missing tail.
-pub(crate) async fn handle_digest(message: &Message, state: &EventLoopState, ctx: &HandlerCtx<'_>) {
+pub(crate) async fn handle_digest(
+    message: &Message,
+    state: &mut EventLoopState,
+    ctx: &HandlerCtx<'_>,
+) {
     let Ok(body) = serde_json::from_str::<DigestBody>(message.body.as_str()) else {
         return;
     };
+    // One serve per author per window. Answering costs up to
+    // `ANTIENTROPY_MAX_RESEND` mesh-wide broadcasts, so ungated this turns one
+    // small frame into that much flooding from every member that hears it —
+    // the cost scaling with the mesh rather than with the sender.
+    if !state.admit_digest(&message.pubkey, crate::util::clock::Instant::now()) {
+        tracing::debug!(
+            target: "fofoca::gossip",
+            author = %message.author,
+            "digest ignored: this peer was served within the window"
+        );
+        return;
+    }
     let mut have: HashSet<[u8; 16]> = HashSet::new();
     for window in &body.windows {
         if let Some(ids) = window.decode_ids() {

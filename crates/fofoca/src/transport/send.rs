@@ -134,6 +134,22 @@ async fn send_unicast(eid: EndpointId, bytes: Bytes, state: &EventLoopState) -> 
         .with_context(|| format!("unicast dial to {eid} failed"))
 }
 
+/// Send a courtesy reply from the receive path, where a stall is not this
+/// message's problem but every other arm's: the daemon runs one `select!`, so
+/// whatever the receive path waits on, nothing else is being served meanwhile.
+///
+/// Returns whether it went out. A reply nobody gets is the right outcome here —
+/// the peer's next round simply misses us.
+pub(crate) async fn send_best_effort(
+    eid: EndpointId,
+    bytes: Bytes,
+    state: &EventLoopState,
+) -> bool {
+    // Warm connections only. Dialing here would let anyone who can be pinged
+    // back choose how long this daemon stops answering, once per identity.
+    state.unicast_pool.send_if_warm(eid, bytes).await
+}
+
 async fn broadcast(sender: &MeshSender, bytes: Bytes) -> Result<()> {
     sender
         .broadcast(bytes)
@@ -145,6 +161,8 @@ async fn broadcast(sender: &MeshSender, bytes: Bytes) -> Result<()> {
 mod tests {
     use crate::util::clock::Instant;
     use std::sync::Arc;
+
+    use bytes::Bytes;
 
     use iroh::{EndpointId, SecretKey};
 
@@ -212,6 +230,27 @@ mod tests {
     }
 
     // ── the p2p path ──────────────────────────────────────────────────
+
+    /// **The receive path must not dial.**
+    ///
+    /// The daemon is one `select!`, so an inline dial from a receive arm stalls
+    /// every other arm with it — timers, IPC, and every other peer's traffic.
+    /// The auto-pong replies to whoever pinged us, so a peer that advertises an
+    /// address nothing answers on buys a full dial timeout of daemon silence,
+    /// once per identity it cares to mint.
+    #[tokio::test]
+    async fn a_courtesy_reply_to_a_cold_peer_does_not_dial() {
+        let (state, bob) = state_knowing_bob();
+        let sent = super::send_best_effort(bob, Bytes::from_static(b"pong"), &state).await;
+
+        assert!(!sent, "there is no warm path to this peer");
+        assert_eq!(
+            state.unicast_pool.dial_attempts(),
+            0,
+            "the receive path entered the inline-dial path; on a live peer that \
+             is a full dial timeout with the whole event loop waiting on it"
+        );
+    }
 
     #[test]
     fn directed_message_with_known_endpoint_takes_unicast() {

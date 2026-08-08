@@ -341,6 +341,14 @@ pub const ANTIENTROPY_INTERVAL_SECS: u64 = 10;
 /// `--antientropy-max-resend`.
 pub const ANTIENTROPY_MAX_RESEND: usize = 64;
 
+/// How often one peer's digest may be *served*.
+///
+/// Answering a digest costs up to [`ANTIENTROPY_MAX_RESEND`] mesh-wide
+/// broadcasts, and the budget was per digest with nothing per peer, so one
+/// small crafted frame bought that from every member at once. Comfortably under
+/// [`ANTIENTROPY_INTERVAL_SECS`], so the honest cadence is never refused.
+pub const ANTIENTROPY_SERVE_COOLDOWN_SECS: u64 = 5;
+
 /// How often the CLI daemon checks whether its spawning agent is still alive
 /// by re-reading its parent pid. When the parent dies (hard-kill / reinstall),
 /// the daemon is orphaned and reparents away; on the next check it self-quits

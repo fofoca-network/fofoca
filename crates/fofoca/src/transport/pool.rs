@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Result, bail};
@@ -52,6 +53,12 @@ struct PoolInner {
     /// [`DIAL_FAILURE_COOLDOWN`] gate. An entry clears on the first retry past
     /// the window or on a successful dial.
     dial_failures: Mutex<HashMap<EndpointId, Instant>>,
+    /// Times the inline-dial path was entered. Counted on entry rather than at
+    /// the dial itself, because the question a caller on the event loop needs
+    /// answered is whether it *could* have waited here — a detached pool bails
+    /// before dialing, and a warm hit inside never dials, but both mean the
+    /// caller was willing to.
+    dial_attempts: AtomicU64,
 }
 
 impl UnicastPool {
@@ -62,6 +69,7 @@ impl UnicastPool {
                 endpoint: Some(endpoint),
                 conns: Mutex::new(HashMap::new()),
                 dial_failures: Mutex::new(HashMap::new()),
+                dial_attempts: AtomicU64::new(0),
             }),
         }
     }
@@ -76,6 +84,7 @@ impl UnicastPool {
                 endpoint: None,
                 conns: Mutex::new(HashMap::new()),
                 dial_failures: Mutex::new(HashMap::new()),
+                dial_attempts: AtomicU64::new(0),
             }),
         }
     }
@@ -120,7 +129,15 @@ impl UnicastPool {
     /// # Errors
     /// A detached pool, an endpoint on failed-dial cooldown, a dial that
     /// fails/times out, or a stream write error.
+    /// How many times the inline-dial path was entered, for tests asserting a
+    /// caller stayed off it.
+    #[cfg(any(test, feature = "adversarial"))]
+    pub(crate) fn dial_attempts(&self) -> u64 {
+        self.inner.dial_attempts.load(Ordering::Relaxed)
+    }
+
     pub(crate) async fn dial_and_send(&self, eid: EndpointId, bytes: Bytes) -> Result<()> {
+        self.inner.dial_attempts.fetch_add(1, Ordering::Relaxed);
         let Some(endpoint) = self.inner.endpoint.clone() else {
             bail!("unicast pool has no endpoint");
         };

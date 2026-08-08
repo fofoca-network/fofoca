@@ -47,6 +47,7 @@ pub(crate) use pool::UnicastPool;
 pub use send::Lane;
 pub use send::deliver;
 pub(crate) use send::lane_for;
+pub(crate) use send::send_best_effort;
 pub use sender::MeshSender;
 pub use webrtc::MAX_DIRECT_PEERS;
 pub(crate) use webrtc::{IceProfile, MESH_WEBRTC_SIGNAL_ALPN, WebRtcSignalAcceptor};

@@ -394,18 +394,31 @@ pub(crate) async fn ingest(
         }
         MessageKind::Ping => {
             // Auto-respond to every probe with a pong addressed to the pinger.
-            // The daemon owns this — no agent involvement. The pong is directed,
-            // so `deliver` sends it unicast to the pinger; if the pinger's
-            // `PeerInfo` hasn't arrived yet the pong is dropped (debug-logged)
-            // and the pinger's round simply misses us this time.
+            // The daemon owns this — no agent involvement.
+            //
+            // Over a warm connection only. Anyone who reaches this mesh can
+            // ping, and a pinger advertising an address nothing answers on used
+            // to buy a full dial timeout here — on the sole event loop, so every
+            // timer, IPC call and other peer's traffic waited with it, once per
+            // identity the pinger cared to mint. A pong nobody receives is the
+            // right outcome: the pinger's round misses us and tries again.
             let pong = Message::new_pong(ctx.mesh, ctx.author, message.author.clone())
                 .signed(ctx.identity);
             crate::logging::messages::log_out(&pong);
-            if let Ok(bytes) = pong.serialize()
-                && let Err(error) =
-                    crate::transport::deliver(&pong, Bytes::from(bytes), state, ctx.sender).await
-            {
-                tracing::debug!(target: "fofoca::gossip", %error, pinger = %message.author, "auto-pong not delivered");
+            let warm_endpoint = state
+                .peer_endpoints
+                .get(message.author.as_str())
+                .map(|addr| addr.id)
+                .filter(|eid| Some(*eid) != state.rendezvous_id);
+            match (warm_endpoint, pong.serialize()) {
+                (Some(eid), Ok(bytes)) => {
+                    if !crate::transport::send_best_effort(eid, Bytes::from(bytes), state).await {
+                        tracing::debug!(target: "fofoca::gossip", pinger = %message.author, "auto-pong skipped: no warm path");
+                    }
+                }
+                _ => {
+                    tracing::debug!(target: "fofoca::gossip", pinger = %message.author, "auto-pong skipped: no known endpoint");
+                }
             }
             return;
         }

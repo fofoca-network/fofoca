@@ -117,6 +117,9 @@ pub struct EventLoopState {
     /// stay independently reasoned (and a new neighbor still gets exactly one
     /// re-flood).
     pub(crate) peerinfo: Cooldown<EndpointId>,
+    /// When each author's digest was last served. Keyed on the pubkey rather
+    /// than the nickname, which an author picks freely.
+    digest_serves: Cooldown<String>,
     /// Membership layer: the peer roster. Nickname-keyed set of
     /// other peers, feeding the state file's `peer_count`
     /// (`peers.len() + 1`). Excludes self. Driven by
@@ -504,6 +507,9 @@ impl EventLoopState {
             known_endpoints: BoundedFifoSet::new(KNOWN_ENDPOINTS_CAP),
             relink: Cooldown::new(RELINK_COOLDOWN),
             peerinfo: Cooldown::new(RELINK_COOLDOWN),
+            digest_serves: Cooldown::new(Duration::from_secs(
+                fofoca_util::consts::ANTIENTROPY_SERVE_COOLDOWN_SECS,
+            )),
             peers: HashSet::new(),
             last_seen: HashMap::new(),
             peer_endpoints: HashMap::new(),
@@ -642,7 +648,7 @@ impl EventLoopState {
     /// it again. Breaks the flap → re-dial → re-flood loop that otherwise
     /// turns one unstable peer into a mesh-wide CPU storm.
     pub(crate) fn relink_on_cooldown(&self, peer: EndpointId, now: Instant) -> bool {
-        self.relink.on_cooldown(peer, now)
+        self.relink.on_cooldown(&peer, now)
     }
 
     /// Record a re-link of `peer` at `now`.
@@ -657,7 +663,7 @@ impl EventLoopState {
     /// (see `peerinfo`); a genuinely new neighbor, having no entry, still gets
     /// exactly one re-flood.
     pub(crate) fn peerinfo_on_cooldown(&self, peer: EndpointId, now: Instant) -> bool {
-        self.peerinfo.on_cooldown(peer, now)
+        self.peerinfo.on_cooldown(&peer, now)
     }
 
     /// Record a `PeerInfo` re-flood triggered by `peer` at `now`.
@@ -1009,6 +1015,20 @@ impl EventLoopState {
         &mut self.message_log
     }
 
+    /// Whether this author's digest may be served now.
+    ///
+    /// Answering one costs up to `ANTIENTROPY_MAX_RESEND` mesh-wide broadcasts,
+    /// so without a per-peer gate a single crafted digest buys that from every
+    /// member — an amplifier that grows with the mesh. Serving at most one per
+    /// window per author bounds it to the honest cadence.
+    pub fn admit_digest(&mut self, pubkey: &str, now: Instant) -> bool {
+        if self.digest_serves.on_cooldown(&pubkey.to_owned(), now) {
+            return false;
+        }
+        self.digest_serves.note(pubkey.to_owned(), now);
+        true
+    }
+
     /// Record a peer's endpoint address, learned from its published card.
     ///
     /// The whole address, not just the id: the retry pass has to know whether a
@@ -1328,6 +1348,33 @@ mod tests {
             "first sighting is not a duplicate"
         );
         assert!(state.mark_seen(&message), "second sighting is a duplicate");
+    }
+
+    /// **One digest per peer per window.**
+    ///
+    /// Serving a digest costs up to `ANTIENTROPY_MAX_RESEND` mesh-wide
+    /// broadcasts. With the budget counted per digest and nothing per peer, one
+    /// small crafted frame bought 64 floods from every member that received it,
+    /// so the cost grew with the mesh rather than with the attacker.
+    #[test]
+    fn a_peer_is_served_one_digest_per_window() {
+        let mut state = fresh_state();
+        let now = Instant::now();
+        let window = Duration::from_secs(fofoca_util::consts::ANTIENTROPY_SERVE_COOLDOWN_SECS);
+
+        assert!(state.admit_digest("aa", now), "the first is served");
+        assert!(
+            !state.admit_digest("aa", now),
+            "a second digest inside the window must not buy another round of resends"
+        );
+        assert!(
+            state.admit_digest("bb", now),
+            "one peer's flood must not deny another peer service"
+        );
+        assert!(
+            state.admit_digest("aa", now + window + Duration::from_millis(1)),
+            "the honest cadence resumes after the window"
+        );
     }
 
     #[test]
