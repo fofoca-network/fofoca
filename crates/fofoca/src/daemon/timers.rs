@@ -229,25 +229,11 @@ pub(crate) fn note_tick_gap(
 
 #[cfg(test)]
 mod tests {
-    use crate::util::clock::Instant;
-    use std::sync::Arc;
+    use crate::testing::fresh_state;
 
-    use super::{EventLoopState, warn_on_high_resident_memory};
-    use crate::daemon::state::MeshSecrets;
+    use super::warn_on_high_resident_memory;
+
     use crate::gossip::event::CountingSink;
-    use crate::protocol::identity::Identity;
-
-    fn fresh_state() -> EventLoopState {
-        EventLoopState::new(
-            crate::daemon::state::StateInit {
-                state_file: None,
-                identity: Arc::new(Identity::generate()),
-                secrets: MeshSecrets::default(),
-                per_peer_gate: None,
-            },
-            Instant::now(),
-        )
-    }
 
     // The warn-only resident-memory leak signal: a threshold the live process
     // already exceeds (1 MiB) must fire exactly once and latch, never exit or

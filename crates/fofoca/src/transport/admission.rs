@@ -42,6 +42,7 @@ use iroh::EndpointId;
 use n0_future::task::AbortHandle;
 
 use crate::util::clock::Instant;
+use crate::util::cooldown::Cooldown;
 
 /// How long to leave a peer alone after it answered "at my cap".
 ///
@@ -71,7 +72,7 @@ struct Inner {
     /// Peer → the abort handle of the task holding the slot, once spawned.
     inflight: HashMap<EndpointId, Option<AbortHandle>>,
     /// Peers that refused us at their cap; do not re-offer before this instant.
-    refused_until: HashMap<EndpointId, Instant>,
+    refused_until: Cooldown<EndpointId>,
     closed: bool,
 }
 
@@ -87,7 +88,7 @@ impl SignalAdmission {
         Self {
             inner: Arc::new(Mutex::new(Inner {
                 inflight: HashMap::new(),
-                refused_until: HashMap::new(),
+                refused_until: Cooldown::new(CAP_REFUSAL_COOLDOWN),
                 closed: false,
             })),
             cap,
@@ -120,11 +121,8 @@ impl SignalAdmission {
         if handle.has_session(&peer) {
             return Err(Refusal::HaveSession);
         }
-        if let Some(until) = inner.refused_until.get(&peer) {
-            if Instant::now() < *until {
-                return Err(Refusal::Cooling);
-            }
-            inner.refused_until.remove(&peer);
+        if inner.refused_until.on_cooldown(&peer, Instant::now()) {
+            return Err(Refusal::Cooling);
         }
         // Reservations count. A peer can briefly appear in both this and
         // `session_count` — between attach and the guard's drop — which biases
@@ -153,13 +151,9 @@ impl SignalAdmission {
 
     /// Note that `peer` refused us at its cap; stop offering for a while.
     pub(crate) fn note_refused(&self, peer: EndpointId) {
-        let until = Instant::now() + CAP_REFUSAL_COOLDOWN;
-        let mut inner = self.lock();
-        // Self-pruning, so a long-lived node does not accumulate entries for
-        // peers it met once.
-        let now = Instant::now();
-        inner.refused_until.retain(|_, at| *at > now);
-        inner.refused_until.insert(peer, until);
+        // `note` prunes expired entries first, so a long-lived node does not
+        // accumulate entries for peers it met once.
+        self.lock().refused_until.note(peer, Instant::now());
     }
 
     /// Cancel every round in flight and refuse all later admissions.

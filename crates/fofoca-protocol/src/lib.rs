@@ -8,6 +8,7 @@
 //! into the engine's file layout, which then could not be rearranged without
 //! churning every one of them.
 
+pub mod base58check;
 pub mod crypto;
 mod ident;
 mod topic;

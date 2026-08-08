@@ -12,8 +12,8 @@
 
 use anyhow::{Context, Result, bail};
 use iroh::EndpointAddr;
-use sha2::{Digest, Sha256};
 
+use crate::protocol::base58check::{self, take_array};
 use crate::protocol::mesh::LookupOpts;
 use crate::protocol::peer_addr::{endpoint_addr_from_json, endpoint_addr_to_json};
 
@@ -63,7 +63,7 @@ impl BlobTicket {
         framed.push(VERSION);
         framed.push(KIND);
         framed.extend_from_slice(&payload);
-        base58check_encode(&framed)
+        base58check::encode(&framed)
     }
 
     /// The blob's content hash as lowercase hex — the content-addressed name to
@@ -85,7 +85,7 @@ impl BlobTicket {
     /// Bad Base58/checksum, the wrong ticket kind, a bad version, or a
     /// malformed payload.
     pub fn decode(ticket: &str) -> Result<Self> {
-        let framed = base58check_decode(ticket.trim())?;
+        let framed = base58check::decode(ticket.trim(), "blob ticket")?;
         let version = *framed.first().context("ticket too short")?;
         if version != VERSION {
             bail!("unsupported blob ticket version: {version}");
@@ -122,42 +122,6 @@ impl BlobTicket {
 
 /// Read `N` bytes at `*pos` into a fixed array, advancing `*pos`. `None` if the
 /// slice is too short.
-fn take_array<const N: usize>(bytes: &[u8], pos: &mut usize) -> Option<[u8; N]> {
-    let slice = bytes.get(*pos..*pos + N)?;
-    let mut out = [0u8; N];
-    out.copy_from_slice(slice);
-    *pos += N;
-    Some(out)
-}
-
-fn checksum(bytes: &[u8]) -> [u8; 4] {
-    let first = Sha256::digest(bytes);
-    let second = Sha256::digest(first);
-    let mut out = [0u8; 4];
-    out.copy_from_slice(&second[..4]);
-    out
-}
-
-fn base58check_encode(payload: &[u8]) -> String {
-    let mut with_checksum = payload.to_vec();
-    with_checksum.extend_from_slice(&checksum(payload));
-    bs58::encode(with_checksum).into_string()
-}
-
-fn base58check_decode(encoded: &str) -> Result<Vec<u8>> {
-    let decoded = bs58::decode(encoded)
-        .into_vec()
-        .context("invalid Base58 in blob ticket")?;
-    if decoded.len() < 4 {
-        bail!("blob ticket too short");
-    }
-    let (payload, received) = decoded.split_at(decoded.len() - 4);
-    if received != checksum(payload) {
-        bail!("invalid blob ticket checksum");
-    }
-    Ok(payload.to_vec())
-}
-
 #[cfg(test)]
 mod tests {
     use super::BlobTicket;

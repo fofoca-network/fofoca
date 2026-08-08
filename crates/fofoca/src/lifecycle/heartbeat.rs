@@ -102,27 +102,12 @@ pub(crate) fn tick_sweep(state: &mut EventLoopState, sink: &dyn NodeSink) {
 
 #[cfg(test)]
 mod tests {
+    use crate::testing::{fresh_state, nick};
     use std::collections::HashSet;
 
-    use super::{Duration, EventLoopState, Instant, Nickname, tick_sweep};
+    use super::{Duration, Instant, Nickname, tick_sweep};
     use crate::gossip::event::SilentSink;
     use crate::util::tuning::alive_timeout_secs;
-
-    fn fresh_state() -> EventLoopState {
-        EventLoopState::new(
-            crate::daemon::state::StateInit {
-                state_file: None,
-                identity: std::sync::Arc::new(crate::protocol::identity::Identity::generate()),
-                secrets: crate::daemon::state::MeshSecrets::default(),
-                per_peer_gate: None,
-            },
-            Instant::now(),
-        )
-    }
-
-    fn nick(name: &str) -> Nickname {
-        Nickname::from(name)
-    }
 
     #[test]
     fn sweep_evicts_surfaced_peer_into_quiet() {

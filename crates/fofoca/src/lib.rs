@@ -61,6 +61,12 @@ pub(crate) use fofoca_reassembly as reassembly;
 
 pub(crate) mod transport;
 
+/// Shared unit-test fixtures. `#[cfg(test)]` so it costs a normal build
+/// nothing; the modules that used to each carry their own copies reach it as
+/// `crate::testing::…`.
+#[cfg(test)]
+pub(crate) mod testing;
+
 /// Host helpers. The bulk lives in the leaf crate `fofoca-util`, which
 /// has no engine or iroh dependency; it is re-exported here so both consumers
 /// and engine code keep reaching it as `util::…`. The `logging` facade stays

@@ -13,8 +13,8 @@ use std::fmt;
 
 use anyhow::{Context, Result, anyhow, bail};
 use iroh_base::{PublicKey, SecretKey, Signature};
-use sha2::{Digest, Sha256};
 
+use crate::base58check::{self, take_array};
 use crate::crypto::{self, Password};
 use crate::identity;
 use crate::mesh::Mesh;
@@ -134,7 +134,7 @@ impl InviteTicket {
         framed.push(VERSION);
         framed.push(KIND);
         framed.extend_from_slice(&payload);
-        base58check_encode(&framed)
+        base58check::encode(&framed)
     }
 
     /// Decode a bare base58 invite ticket — structural parse only.
@@ -143,7 +143,7 @@ impl InviteTicket {
     /// Bad Base58/checksum, the wrong kind, a bad version, or a malformed
     /// payload.
     pub fn decode(token: &str) -> Result<Self> {
-        let framed = base58check_decode(token.trim())?;
+        let framed = base58check::decode(token.trim(), "invite ticket")?;
         let version = *framed.first().context("ticket too short")?;
         if version != VERSION {
             bail!("unsupported invite ticket version: {version}");
@@ -229,42 +229,6 @@ impl InviteTicket {
 
 /// Read `N` bytes at `*pos` into a fixed array, advancing `*pos`. `None` if the
 /// slice is too short.
-fn take_array<const N: usize>(bytes: &[u8], pos: &mut usize) -> Option<[u8; N]> {
-    let slice = bytes.get(*pos..*pos + N)?;
-    let mut out = [0u8; N];
-    out.copy_from_slice(slice);
-    *pos += N;
-    Some(out)
-}
-
-fn checksum(bytes: &[u8]) -> [u8; 4] {
-    let first = Sha256::digest(bytes);
-    let second = Sha256::digest(first);
-    let mut out = [0u8; 4];
-    out.copy_from_slice(&second[..4]);
-    out
-}
-
-fn base58check_encode(payload: &[u8]) -> String {
-    let mut with_checksum = payload.to_vec();
-    with_checksum.extend_from_slice(&checksum(payload));
-    bs58::encode(with_checksum).into_string()
-}
-
-fn base58check_decode(encoded: &str) -> Result<Vec<u8>> {
-    let decoded = bs58::decode(encoded)
-        .into_vec()
-        .context("invalid Base58 in invite ticket")?;
-    if decoded.len() < 4 {
-        bail!("invite ticket too short");
-    }
-    let (payload, received) = decoded.split_at(decoded.len() - 4);
-    if received != checksum(payload) {
-        bail!("invalid invite ticket checksum");
-    }
-    Ok(payload.to_vec())
-}
-
 #[cfg(test)]
 mod tests {
     use super::{InviteTicket, mint, signing_bytes};

@@ -4,10 +4,10 @@
 //!
 //! Pairs a `HashSet` (membership / O(1) lookup) with a `VecDeque` (insertion
 //! order / eviction). Re-inserting an existing entry is a no-op (no recency
-//! bump — recency isn't load-bearing for either caller, only "have we seen
-//! this"). `MessageId` dedup keeps its own
-//! [`BoundedIdSet`](crate::daemon::bounded_id_set::BoundedIdSet) (a
-//! `was-duplicate`-returning variant).
+//! bump — recency isn't load-bearing for any caller, only "have we seen
+//! this"). A caller that wants the opposite answer — "was this a duplicate" —
+//! negates [`insert`](BoundedFifoSet::insert); the engine's message dedup does
+//! exactly that.
 
 use std::borrow::Borrow;
 use std::collections::{HashSet, VecDeque};

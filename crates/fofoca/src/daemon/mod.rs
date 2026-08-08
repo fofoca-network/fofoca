@@ -21,7 +21,6 @@
 // file, the multihop handle — rather than by gating the modules wholesale. A
 // browser runs the same event loop as the CLI; it just has fewer inputs to it.
 pub(crate) mod app;
-mod bounded_id_set;
 pub(crate) mod config;
 pub(crate) mod ctx;
 pub(crate) mod node;

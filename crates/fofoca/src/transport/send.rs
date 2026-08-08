@@ -159,26 +159,19 @@ async fn broadcast(sender: &MeshSender, bytes: Bytes) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use crate::testing::{endpoint_id, nick};
     use crate::util::clock::Instant;
     use std::sync::Arc;
 
     use bytes::Bytes;
 
-    use iroh::{EndpointId, SecretKey};
+    use iroh::EndpointId;
 
     use super::{Lane, Route, lane_for, route};
     use crate::daemon::state::{EventLoopState, MeshSecrets, StateInit};
     use crate::protocol::identity::Identity;
     use crate::protocol::message::AppFrameParams;
-    use crate::protocol::{AppTag, CorrId, MeshId, Message, MessageBody, Nickname};
-
-    fn nick(name: &str) -> Nickname {
-        Nickname::from(name)
-    }
-
-    fn endpoint_id(seed: u8) -> EndpointId {
-        SecretKey::from_bytes(&[seed; 32]).public()
-    }
+    use crate::protocol::{AppTag, CorrId, MeshId, Message, MessageBody};
 
     fn mesh() -> MeshId {
         MeshId::from("test")

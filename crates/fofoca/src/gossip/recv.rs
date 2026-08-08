@@ -1307,25 +1307,13 @@ mod is_loggable_tests {
 /// the author retains its own presence.
 #[cfg(test)]
 mod retain_own_broadcast_tests {
+    use crate::testing::fresh_state;
     use std::collections::HashSet;
-    use std::time::Instant;
 
     use super::retain_own_broadcast;
     use crate::daemon::message_log::{MissingQuery, WindowRange};
-    use crate::daemon::state::{EventLoopState, MeshSecrets, StateInit};
+    use crate::daemon::state::EventLoopState;
     use crate::protocol::{MeshId, Message, Nickname};
-
-    fn fresh_state() -> EventLoopState {
-        EventLoopState::new(
-            StateInit {
-                state_file: None,
-                identity: std::sync::Arc::new(crate::protocol::identity::Identity::generate()),
-                secrets: MeshSecrets::default(),
-                per_peer_gate: None,
-            },
-            Instant::now(),
-        )
-    }
 
     fn joined(state: &EventLoopState, author: &str) -> Message {
         Message::new_joined(&MeshId::from("💬test"), &Nickname::from(author))

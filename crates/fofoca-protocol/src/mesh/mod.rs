@@ -18,9 +18,9 @@ use std::str::FromStr;
 use anyhow::{Context, Result, bail};
 use iroh_base::{EndpointId, SecretKey};
 use rand::RngCore;
-use sha2::{Digest, Sha256};
 
 use super::crypto;
+use crate::base58check;
 
 mod id;
 mod lookup;
@@ -385,44 +385,15 @@ impl Mesh {
 impl fmt::Display for Mesh {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let bytes = self.encode_bytes();
-        write!(f, "{}", base58check_encode(&bytes))
+        write!(f, "{}", base58check::encode(&bytes))
     }
-}
-
-fn checksum(bytes: &[u8]) -> [u8; 4] {
-    let first = Sha256::digest(bytes);
-    let second = Sha256::digest(first);
-    let mut out = [0u8; 4];
-    out.copy_from_slice(&second[..4]);
-    out
-}
-
-fn base58check_encode(payload: &[u8]) -> String {
-    let mut with_checksum = payload.to_vec();
-    with_checksum.extend_from_slice(&checksum(payload));
-    bs58::encode(with_checksum).into_string()
-}
-
-fn base58check_decode(encoded: &str) -> Result<Vec<u8>> {
-    let decoded = bs58::decode(encoded)
-        .into_vec()
-        .context("Invalid Base58 mesh encoding")?;
-    if decoded.len() < 4 {
-        bail!("Mesh identifier too short");
-    }
-    let (payload, received_checksum) = decoded.split_at(decoded.len() - 4);
-    let expected_checksum = checksum(payload);
-    if received_checksum != expected_checksum {
-        bail!("Invalid mesh checksum");
-    }
-    Ok(payload.to_vec())
 }
 
 impl FromStr for Mesh {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self> {
-        let bytes = base58check_decode(s)?;
+        let bytes = base58check::decode(s, "mesh identifier")?;
         Self::decode_bytes(&bytes)
     }
 }

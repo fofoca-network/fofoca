@@ -88,27 +88,9 @@ pub(crate) fn apply(update: &MembershipUpdate, author: &Nickname, state: &mut Ev
 
 #[cfg(test)]
 mod tests {
-    use crate::util::clock::Instant;
+    use crate::testing::{fresh_state, nick};
 
-    use super::{
-        EventLoopState, MembershipUpdate, MessageKind, Nickname, PresenceSubtype, apply, compute,
-    };
-
-    fn fresh_state() -> EventLoopState {
-        EventLoopState::new(
-            crate::daemon::state::StateInit {
-                state_file: None,
-                identity: std::sync::Arc::new(crate::protocol::identity::Identity::generate()),
-                secrets: crate::daemon::state::MeshSecrets::default(),
-                per_peer_gate: None,
-            },
-            Instant::now(),
-        )
-    }
-
-    fn nick(name: &str) -> Nickname {
-        Nickname::from(name)
-    }
+    use super::{MembershipUpdate, MessageKind, PresenceSubtype, apply, compute};
 
     #[test]
     fn first_time_seeing_author_is_joined_new() {

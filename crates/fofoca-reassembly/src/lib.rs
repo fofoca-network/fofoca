@@ -299,7 +299,9 @@ impl ReassemblyStore {
 /// entry — the shards are). `None` only when the concatenated body fails
 /// validation — fail closed rather than surface a malformed body.
 fn synthesize_logical(group: PartialGroup, group_id: &ShardGroup) -> Option<Message> {
-    let mut body = String::new();
+    // Sized up front: this runs on every completed multipart body, and the
+    // total is already known from the slots.
+    let mut body = String::with_capacity(group.slots.values().map(String::len).sum());
     for slot in group.slots.values() {
         body.push_str(slot);
     }

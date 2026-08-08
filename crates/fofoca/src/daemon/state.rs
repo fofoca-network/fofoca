@@ -9,7 +9,6 @@ use bytes::Bytes;
 use iroh::{EndpointAddr, EndpointId};
 use serde::Serialize;
 
-use super::bounded_id_set::BoundedIdSet;
 use super::message_log::MessageLog;
 #[cfg(feature = "host")]
 use crate::daemon::state_file::StateFile;
@@ -269,7 +268,7 @@ pub struct EventLoopState {
     /// twice; `mark_seen` drops the repeat before it reaches the log /
     /// inbound push channel / agent. Bounded (`seen_ids_cap`, 2× the message log)
     /// so it always covers the retention window.
-    pub(crate) seen: BoundedIdSet,
+    pub(crate) seen: BoundedFifoSet<[u8; 16]>,
     /// User messages sent before we had a real-peer link (no gossip
     /// path yet — a bare `broadcast` would be a lost one-shot). Drained in
     /// FIFO order once `meshed` flips, each routed through the send decision;
@@ -538,7 +537,7 @@ impl EventLoopState {
             reclaim_until: None,
             next_rival_recheck: None,
             rival_recheck_rounds: 0,
-            seen: BoundedIdSet::new(seen_ids_cap()),
+            seen: BoundedFifoSet::new(seen_ids_cap()),
             pending_outbound: BoundedQueue::new(PENDING_OUTBOUND_CAP),
             #[cfg(feature = "host")]
             state_file,
@@ -675,9 +674,10 @@ impl EventLoopState {
     /// `true` => this is a duplicate delivery the caller must drop. Keys on
     /// the author-bound [`Message::dedup_key`], so a forgery reusing a
     /// victim's id hashes to a different key and cannot suppress the genuine
-    /// message. Delegates to the bounded [`BoundedIdSet`].
+    /// message. Delegates to the bounded [`BoundedFifoSet`], inverting its
+    /// "was newly inserted" answer into "was a duplicate".
     pub(crate) fn mark_seen(&mut self, message: &Message) -> bool {
-        self.seen.mark(message.dedup_key())
+        !self.seen.insert(message.dedup_key())
     }
 
     /// Try to reassemble the sharded body the `trigger` shard belongs to:
@@ -1055,14 +1055,11 @@ impl EventLoopState {
 #[cfg(test)]
 mod tests {
     use super::{
-        Duration, EndpointId, EventLoopState, Instant, KNOWN_ENDPOINTS_CAP, MeshSecrets, Message,
-        Nickname, QUIET_CAP, RELINK_COOLDOWN_SECS, Reach,
+        Duration, EndpointId, EventLoopState, Instant, KNOWN_ENDPOINTS_CAP, Message, QUIET_CAP,
+        RELINK_COOLDOWN_SECS, Reach,
     };
     use crate::protocol::{AppFrameParams, MeshId, MessageBody, MessageId};
-
-    fn nick(name: &str) -> Nickname {
-        Nickname::new(name.to_owned()).expect("valid test nickname")
-    }
+    use crate::testing::{endpoint_id, fresh_state, nick};
 
     /// An unsigned chat message carrying `id` — enough to exercise
     /// `mark_seen`, which keys on `dedup_key()` (`SHA-256(pubkey ‖ id)`).
@@ -1079,18 +1076,6 @@ mod tests {
         );
         message.id = id.clone();
         message
-    }
-
-    fn fresh_state() -> EventLoopState {
-        EventLoopState::new(
-            crate::daemon::state::StateInit {
-                state_file: None,
-                identity: std::sync::Arc::new(crate::protocol::identity::Identity::generate()),
-                secrets: MeshSecrets::default(),
-                per_peer_gate: None,
-            },
-            Instant::now(),
-        )
     }
 
     #[test]
@@ -1199,10 +1184,6 @@ mod tests {
 
     /// A valid (curve-point) `EndpointId` derived deterministically from
     /// a seed — `EndpointId::from_bytes` rejects arbitrary bytes.
-    fn endpoint_id(seed: u8) -> EndpointId {
-        iroh::SecretKey::from_bytes(&[seed; 32]).public()
-    }
-
     // The `known_endpoints` / `quiet` fields are `BoundedFifoSet`s wired with
     // their caps — the generic FIFO/dedup/remove behavior is covered in
     // `bounded_fifo_set`; these only assert the state wires the right cap.
@@ -1339,8 +1320,8 @@ mod tests {
 
     #[test]
     fn mark_seen_delegates_dedup() {
-        // Smoke test the `EventLoopState` → `BoundedIdSet` delegation; the
-        // bounded-FIFO/eviction logic itself is covered in `bounded_id_set`.
+        // Smoke test the `EventLoopState` -> `BoundedFifoSet` delegation; the
+        // bounded-FIFO/eviction logic itself is covered in `fofoca-util`.
         let mut state = fresh_state();
         let message = msg_with_id(&MessageId::random());
         assert!(

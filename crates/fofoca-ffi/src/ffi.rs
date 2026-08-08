@@ -96,6 +96,60 @@ fn guard<T>(fallback: T, body: impl FnOnce() -> T) -> T {
     }
 }
 
+/// Read a borrowed field off the handle, or NULL when the handle is NULL.
+///
+/// The three string getters differ only in which `CString` they return, so the
+/// panic guard and the null check live here once.
+///
+/// # Safety
+/// `handle` must be a live handle from [`fofoca_open`], or NULL.
+unsafe fn borrowed_field(
+    handle: *const FofocaPipe,
+    field: impl FnOnce(&FofocaPipe) -> *const c_char,
+) -> *const c_char {
+    guard(std::ptr::null(), || {
+        // SAFETY: live handle or NULL, forwarded from this function's contract.
+        match unsafe { handle.as_ref() } {
+            Some(handle) => field(handle),
+            None => std::ptr::null(),
+        }
+    })
+}
+
+/// Render a JSON document from the pipe into the caller's buffer, following the
+/// length-then-fill convention [`copy_out`] implements.
+///
+/// `name` is the entry point's own name, so a NULL handle still reports which
+/// call failed.
+///
+/// # Safety
+/// `handle` must be a live handle from [`fofoca_open`], or NULL; `buf` NULL or
+/// writable for `cap` bytes.
+unsafe fn json_out(
+    name: &str,
+    handle: *mut FofocaPipe,
+    buf: *mut c_char,
+    cap: usize,
+    render: impl FnOnce(&Pipe) -> anyhow::Result<String>,
+) -> c_long {
+    guard(-1, || {
+        clear_error();
+        // SAFETY: live handle or NULL, forwarded from this function's contract.
+        let Some(handle) = (unsafe { handle.as_ref() }) else {
+            set_error(&format!("{name}: handle is NULL"));
+            return -1;
+        };
+        match render(&handle.pipe) {
+            // SAFETY: `buf`/`cap` are the caller's buffer, forwarded likewise.
+            Ok(json) => unsafe { copy_out(&json, buf, cap) },
+            Err(error) => {
+                set_error(&format!("{error:#}"));
+                -1
+            }
+        }
+    })
+}
+
 /// Borrow a caller-provided C string. `Ok(None)` for NULL (every optional field
 /// spells "unset" that way); an error for non-UTF-8 bytes.
 ///
@@ -218,13 +272,8 @@ pub unsafe extern "C" fn fofoca_open(opts: *const FofocaOpts) -> *mut FofocaPipe
 /// `handle` must be a live handle from [`fofoca_open`], or NULL.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fofoca_id(handle: *const FofocaPipe) -> *const c_char {
-    guard(std::ptr::null(), || {
-        // SAFETY: live handle or NULL, per the contract above.
-        match unsafe { handle.as_ref() } {
-            Some(handle) => handle.id.as_ptr(),
-            None => std::ptr::null(),
-        }
-    })
+    // SAFETY: live handle or NULL, per the contract above.
+    unsafe { borrowed_field(handle, |handle| handle.id.as_ptr()) }
 }
 
 /// This mesh's name, borrowed for the handle's lifetime.
@@ -233,13 +282,8 @@ pub unsafe extern "C" fn fofoca_id(handle: *const FofocaPipe) -> *const c_char {
 /// `handle` must be a live handle from [`fofoca_open`], or NULL.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fofoca_name(handle: *const FofocaPipe) -> *const c_char {
-    guard(std::ptr::null(), || {
-        // SAFETY: live handle or NULL, per the contract above.
-        match unsafe { handle.as_ref() } {
-            Some(handle) => handle.name.as_ptr(),
-            None => std::ptr::null(),
-        }
-    })
+    // SAFETY: live handle or NULL, per the contract above.
+    unsafe { borrowed_field(handle, |handle| handle.name.as_ptr()) }
 }
 
 /// Our nickname in this mesh, borrowed for the handle's lifetime.
@@ -248,13 +292,8 @@ pub unsafe extern "C" fn fofoca_name(handle: *const FofocaPipe) -> *const c_char
 /// `handle` must be a live handle from [`fofoca_open`], or NULL.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fofoca_nickname(handle: *const FofocaPipe) -> *const c_char {
-    guard(std::ptr::null(), || {
-        // SAFETY: live handle or NULL, per the contract above.
-        match unsafe { handle.as_ref() } {
-            Some(handle) => handle.nick.as_ptr(),
-            None => std::ptr::null(),
-        }
-    })
+    // SAFETY: live handle or NULL, per the contract above.
+    unsafe { borrowed_field(handle, |handle| handle.nick.as_ptr()) }
 }
 
 /// Send `len` bytes as `pipe_data` frames — broadcast when `to` is NULL,
@@ -426,22 +465,13 @@ pub unsafe extern "C" fn fofoca_state_json(
     buf: *mut c_char,
     cap: usize,
 ) -> c_long {
-    guard(-1, || {
-        clear_error();
-        // SAFETY: live handle or NULL, per the contract above.
-        let Some(handle) = (unsafe { handle.as_ref() }) else {
-            set_error("fofoca_state_json: handle is NULL");
-            return -1;
-        };
-        match handle.pipe.state_json() {
-            // SAFETY: `buf`/`cap` are the caller's buffer per the contract above.
-            Ok(json) => unsafe { copy_out(&json, buf, cap) },
-            Err(error) => {
-                set_error(&format!("{error:#}"));
-                -1
-            }
-        }
-    })
+    // SAFETY: live handle or NULL, and `buf`/`cap` the caller's buffer, per
+    // the contract above.
+    unsafe {
+        json_out("fofoca_state_json", handle, buf, cap, |pipe| {
+            pipe.state_json()
+        })
+    }
 }
 
 /// Write the live peer roster as JSON into `buf`. Same length/`cap` convention
@@ -455,22 +485,13 @@ pub unsafe extern "C" fn fofoca_peers_json(
     buf: *mut c_char,
     cap: usize,
 ) -> c_long {
-    guard(-1, || {
-        clear_error();
-        // SAFETY: live handle or NULL, per the contract above.
-        let Some(handle) = (unsafe { handle.as_ref() }) else {
-            set_error("fofoca_peers_json: handle is NULL");
-            return -1;
-        };
-        match handle.pipe.peers_json() {
-            // SAFETY: `buf`/`cap` are the caller's buffer per the contract above.
-            Ok(json) => unsafe { copy_out(&json, buf, cap) },
-            Err(error) => {
-                set_error(&format!("{error:#}"));
-                -1
-            }
-        }
-    })
+    // SAFETY: live handle or NULL, and `buf`/`cap` the caller's buffer, per
+    // the contract above.
+    unsafe {
+        json_out("fofoca_peers_json", handle, buf, cap, |pipe| {
+            pipe.peers_json()
+        })
+    }
 }
 
 /// The number of peers **other than you** in the mesh right now; `0` means you

@@ -57,6 +57,16 @@ impl<K: Eq + Hash + Clone> Cooldown<K> {
         self.seen.clear();
     }
 
+    /// Drop `key`'s entry, so the next check is not throttled. `true` if one
+    /// was live.
+    ///
+    /// For the case where the throttled thing has since *succeeded*, and
+    /// holding the peer off for the rest of the window would be wrong: a dial
+    /// that finally connected, a peer that left gracefully and may rejoin.
+    pub fn forget(&mut self, key: &K) -> bool {
+        self.seen.remove(key).is_some()
+    }
+
     /// Live entry count — for the state's bounded-ness assertions.
     #[cfg(any(test, feature = "test-fixtures"))]
     #[must_use]

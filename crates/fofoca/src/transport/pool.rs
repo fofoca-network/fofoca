@@ -18,6 +18,7 @@ use tokio::sync::Mutex;
 use super::{LOG_TARGET, UNICAST_ALPN};
 
 use crate::util::clock::Instant;
+use crate::util::cooldown::Cooldown;
 
 /// How long an inline dial keeps trying before giving up. Deliberately short —
 /// far under the application's 90s discovery deadline — because the dial blocks the send,
@@ -50,9 +51,9 @@ struct PoolInner {
     endpoint: Option<Endpoint>,
     conns: Mutex<HashMap<EndpointId, Connection>>,
     /// When each endpoint's last dial failed, for the
-    /// [`DIAL_FAILURE_COOLDOWN`] gate. An entry clears on the first retry past
-    /// the window or on a successful dial.
-    dial_failures: Mutex<HashMap<EndpointId, Instant>>,
+    /// [`DIAL_FAILURE_COOLDOWN`] gate. An entry clears on a successful dial or
+    /// a graceful `Left`; expired ones are pruned on the next `note`.
+    dial_failures: Mutex<Cooldown<EndpointId>>,
     /// Times the inline-dial path was entered. Counted on entry rather than at
     /// the dial itself, because the question a caller on the event loop needs
     /// answered is whether it *could* have waited here — a detached pool bails
@@ -68,7 +69,7 @@ impl UnicastPool {
             inner: Arc::new(PoolInner {
                 endpoint: Some(endpoint),
                 conns: Mutex::new(HashMap::new()),
-                dial_failures: Mutex::new(HashMap::new()),
+                dial_failures: Mutex::new(Cooldown::new(DIAL_FAILURE_COOLDOWN)),
                 dial_attempts: AtomicU64::new(0),
             }),
         }
@@ -83,7 +84,7 @@ impl UnicastPool {
             inner: Arc::new(PoolInner {
                 endpoint: None,
                 conns: Mutex::new(HashMap::new()),
-                dial_failures: Mutex::new(HashMap::new()),
+                dial_failures: Mutex::new(Cooldown::new(DIAL_FAILURE_COOLDOWN)),
                 dial_attempts: AtomicU64::new(0),
             }),
         }
@@ -151,16 +152,18 @@ impl UnicastPool {
         let conn = if let Some(conn) = warm {
             conn
         } else {
-            if on_cooldown(
-                &mut *self.inner.dial_failures.lock().await,
-                eid,
-                Instant::now(),
-            ) {
+            if self
+                .inner
+                .dial_failures
+                .lock()
+                .await
+                .on_cooldown(&eid, Instant::now())
+            {
                 bail!("unicast dial on cooldown after a recent failure");
             }
             match dial(&endpoint, eid).await {
                 Ok(conn) => {
-                    self.inner.dial_failures.lock().await.remove(&eid);
+                    self.inner.dial_failures.lock().await.forget(&eid);
                     self.inner.conns.lock().await.insert(eid, conn.clone());
                     conn
                 }
@@ -169,7 +172,7 @@ impl UnicastPool {
                         .dial_failures
                         .lock()
                         .await
-                        .insert(eid, Instant::now());
+                        .note(eid, Instant::now());
                     return Err(error);
                 }
             }
@@ -191,20 +194,7 @@ impl UnicastPool {
         if let Some(conn) = self.inner.conns.lock().await.remove(&eid) {
             conn.close(0u32.into(), b"peer left");
         }
-        self.inner.dial_failures.lock().await.remove(&eid);
-    }
-}
-
-/// Whether `eid`'s last dial failed inside the [`DIAL_FAILURE_COOLDOWN`]
-/// window. A stale entry (past the window) is cleared so the next dial runs.
-fn on_cooldown(failures: &mut HashMap<EndpointId, Instant>, eid: EndpointId, now: Instant) -> bool {
-    match failures.get(&eid) {
-        Some(failed_at) if now.duration_since(*failed_at) < DIAL_FAILURE_COOLDOWN => true,
-        Some(_) => {
-            failures.remove(&eid);
-            false
-        }
-        None => false,
+        self.inner.dial_failures.lock().await.forget(&eid);
     }
 }
 
@@ -239,40 +229,38 @@ async fn send_one(conn: &Connection, bytes: &[u8]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use crate::testing::endpoint_id;
     use crate::util::clock::Instant;
-    use std::collections::HashMap;
     use std::time::Duration;
 
-    use iroh::{EndpointId, SecretKey};
-
-    use super::{DIAL_FAILURE_COOLDOWN, on_cooldown};
-
-    fn endpoint_id(seed: u8) -> EndpointId {
-        SecretKey::from_bytes(&[seed; 32]).public()
-    }
+    use super::{Cooldown, DIAL_FAILURE_COOLDOWN};
 
     #[test]
     fn a_fresh_failure_puts_the_endpoint_on_cooldown() {
-        let mut failures = HashMap::new();
+        let mut failures = Cooldown::new(DIAL_FAILURE_COOLDOWN);
         let bob = endpoint_id(1);
         let now = Instant::now();
-        failures.insert(bob, now);
-        assert!(on_cooldown(&mut failures, bob, now));
+        failures.note(bob, now);
+        assert!(failures.on_cooldown(&bob, now));
         // Another endpoint is unaffected.
-        assert!(!on_cooldown(&mut failures, endpoint_id(2), now));
+        assert!(!failures.on_cooldown(&endpoint_id(2), now));
     }
 
     #[test]
-    fn an_expired_failure_clears_and_allows_the_dial() {
-        let mut failures = HashMap::new();
+    fn an_expired_failure_allows_the_dial_and_is_pruned() {
+        let mut failures = Cooldown::new(DIAL_FAILURE_COOLDOWN);
         let bob = endpoint_id(1);
         let failed_at = Instant::now();
-        failures.insert(bob, failed_at);
+        failures.note(bob, failed_at);
         let later = failed_at + DIAL_FAILURE_COOLDOWN + Duration::from_millis(1);
-        assert!(!on_cooldown(&mut failures, bob, later));
-        assert!(
-            !failures.contains_key(&bob),
-            "the stale entry is cleared, not retained"
+        assert!(!failures.on_cooldown(&bob, later));
+        // Pruning happens on the next write rather than on the read, so the
+        // table still cannot grow without bound.
+        failures.note(endpoint_id(2), later);
+        assert_eq!(
+            failures.len(),
+            1,
+            "the stale entry is dropped, not retained"
         );
     }
 
@@ -288,7 +276,7 @@ mod tests {
             .dial_failures
             .lock()
             .await
-            .insert(bob, Instant::now());
+            .note(bob, Instant::now());
 
         pool.forget(bob).await;
 
