@@ -26,10 +26,10 @@
 //! browser later reclaims looks to everyone else like a peer that lies. See the
 //! note on `present`.
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 use bao_tree::ChunkRanges;
 use range_collections::range_set::RangeSetRange;
-use wasm_bindgen::{JsCast, JsValue};
+use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{
     DedicatedWorkerGlobalScope, FileSystemDirectoryHandle, FileSystemFileHandle,
@@ -37,14 +37,8 @@ use web_sys::{
     FileSystemSyncAccessHandle,
 };
 
+use crate::js::js_err;
 use crate::{BlobStore, FileId, Outboard, Root, decode_into, encode_from_outboard, extent_of};
-
-/// JS errors are not `std::error::Error`, so they cannot ride `?` into
-/// `anyhow`. Rendering them at the boundary keeps every signature in the crate
-/// identical across backends.
-fn js_err(context: &str, error: &JsValue) -> anyhow::Error {
-    anyhow!("{context}: {error:?}")
-}
 
 /// A store on the origin-private filesystem. Worker-only; not `Send`.
 #[derive(Debug)]

@@ -26,11 +26,8 @@ use web_sys::{MessageEvent, RtcDataChannel, RtcPeerConnection};
 
 use crate::custom_addr;
 use crate::registry::Registry;
+use crate::{IN_QUEUE, OUT_QUEUE};
 
-/// Bound on queued outbound datagrams per session.
-const OUT_QUEUE: usize = 256;
-/// Bound on inbound datagrams from every session toward QUIC.
-pub(crate) const IN_QUEUE: usize = 512;
 /// Stop queueing into the channel above this much buffered data.
 const BUFFER_CAP: u32 = 1 << 20;
 /// The suffix an mDNS candidate address carries, which the browser hands out
@@ -322,7 +319,7 @@ impl BrowserHubTransport {
                     if data_channel.buffered_amount() >= BUFFER_CAP {
                         congested += 1;
                         counters.dropped_congested.fetch_add(1, Ordering::Relaxed);
-                        if congested == 1 || congested.is_multiple_of(256) {
+                        if crate::should_log_drop(congested) {
                             web_sys::console::warn_1(&JsValue::from_str(&format!(
                                 "[fofoca webrtc] dropping outbound datagrams \
                                  (bufferedAmount over cap); total {congested} for {remote}"
@@ -340,7 +337,7 @@ impl BrowserHubTransport {
                     if let Err(error) = data_channel.send_with_u8_array(&datagram) {
                         refused += 1;
                         counters.dropped_refused.fetch_add(1, Ordering::Relaxed);
-                        if refused == 1 || refused.is_multiple_of(256) {
+                        if crate::should_log_drop(refused) {
                             web_sys::console::warn_1(&JsValue::from_str(&format!(
                                 "[fofoca webrtc] data channel refused a send for \
                                  {remote} (ready_state={:?}, bufferedAmount={}); \

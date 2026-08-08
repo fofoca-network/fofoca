@@ -13,7 +13,7 @@ use super::driver::{
     bind_ephemeral_udp, build_rtc, drive_until_channel_ready,
 };
 use super::stun::IceConfig;
-use crate::{SIGNAL_VERSION, SignalEnvelope};
+use crate::SignalEnvelope;
 
 // The channel label is crate-root protocol, shared with the browser backend.
 use crate::DATA_CHANNEL_LABEL;
@@ -108,11 +108,7 @@ pub async fn offer_with(
     let (sdp_offer, pending) = change
         .apply()
         .context("str0m produced no offer for the pending change")?;
-    let envelope = SignalEnvelope::Offer {
-        version: SIGNAL_VERSION,
-        endpoint_id: local.to_string(),
-        sdp: sdp_offer.to_sdp_string(),
-    };
+    let envelope = SignalEnvelope::offer(local, sdp_offer.to_sdp_string());
     Ok((
         PendingOffer {
             inner,
@@ -203,11 +199,7 @@ pub async fn answer_with(
         .sdp_api()
         .accept_offer(sdp_offer)
         .context("accept SDP offer")?;
-    let envelope = SignalEnvelope::Answer {
-        version: SIGNAL_VERSION,
-        endpoint_id: local.to_string(),
-        sdp: sdp_answer.to_sdp_string(),
-    };
+    let envelope = SignalEnvelope::answer(local, sdp_answer.to_sdp_string());
     Ok((PendingAnswer { inner }, envelope))
 }
 

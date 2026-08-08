@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use crate::daemon::ctx::HandlerCtx;
 use crate::daemon::message_log::{DigestWindow, MissingQuery, WindowRange};
 use crate::daemon::state::EventLoopState;
-use crate::protocol::{Channel, MeshId, Message, MessageBody, Nickname};
+use crate::protocol::{Channel, MeshId, Message, Nickname};
 use crate::util::tuning::{ANTIENTROPY_DIGEST_WINDOW_IDS, antientropy_max_resend};
 
 use super::broadcast_msg;
@@ -120,10 +120,7 @@ pub(crate) async fn broadcast_digest(
     }
 
     let total_ids: usize = windows.iter().map(|window| window.ids.len()).sum();
-    let Ok(json) = serde_json::to_string(&DigestBody { windows }) else {
-        return;
-    };
-    let Ok(body) = MessageBody::new(json) else {
+    let Some(body) = super::json_body(&DigestBody { windows }) else {
         return;
     };
     tracing::trace!(ids = total_ids, "anti-entropy digest broadcast");
@@ -260,10 +257,7 @@ async fn broadcast_state_digest(
         return;
     }
     let heads = state.doc(channel).heads();
-    let Ok(json) = serde_json::to_string(&HeadsBody { heads }) else {
-        return;
-    };
-    let Ok(body) = MessageBody::new(json) else {
+    let Some(body) = super::json_body(&HeadsBody { heads }) else {
         return;
     };
     state.idle.broadcasts += 1;

@@ -9,7 +9,7 @@ use iroh::Endpoint;
 
 use super::state::EventLoopState;
 use crate::gossip::event::{NodeEvent, NodeSink};
-use crate::util::clock::Instant;
+use crate::util::clock::{Instant, millis_saturating};
 use crate::util::resident_memory;
 use crate::util::tuning;
 
@@ -199,9 +199,9 @@ pub(crate) fn note_tick_gap(
         Duration::from_secs(u64::try_from(now_wall.saturating_sub(*last_wall)).unwrap_or(0));
     *last_wall = now_wall;
 
-    let mono_gap_ms = u64::try_from(mono_gap.as_millis()).unwrap_or(u64::MAX);
-    let wall_gap_ms = u64::try_from(wall_gap.as_millis()).unwrap_or(u64::MAX);
-    let expected_ms = u64::try_from(expected.as_millis()).unwrap_or(u64::MAX);
+    let mono_gap_ms = millis_saturating(mono_gap);
+    let wall_gap_ms = millis_saturating(wall_gap);
+    let expected_ms = millis_saturating(expected);
     let throttled = mono_gap > expected.saturating_mul(2);
     let suspended = wall_gap.saturating_sub(mono_gap) > expected.saturating_mul(2);
     if throttled || suspended {

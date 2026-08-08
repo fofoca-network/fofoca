@@ -40,7 +40,7 @@
 
 use std::collections::BTreeMap;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 use bao_tree::ChunkRanges;
 use js_sys::Uint8Array;
 use wasm_bindgen::closure::Closure;
@@ -48,6 +48,7 @@ use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{IdbDatabase, IdbFactory, IdbRequest, IdbTransaction, IdbTransactionMode};
 
+use crate::js::js_err;
 use crate::sparse::SparseBlocks;
 use crate::{
     BlobStore, CHUNK_GROUP_BYTES, FileId, Outboard, Root, decode_sparse, encode_from_outboard,
@@ -58,13 +59,6 @@ use crate::{
 const META: &str = "meta";
 /// Object store holding file data, one record per block.
 const BLOCKS: &str = "blocks";
-
-/// JS errors are not `std::error::Error`, so they cannot ride `?` into
-/// `anyhow`. Rendering them at the boundary keeps every signature in the crate
-/// identical across backends.
-fn js_err(context: &str, error: &JsValue) -> anyhow::Error {
-    anyhow!("{context}: {error:?}")
-}
 
 /// The block key for `index` of the content named by `root`.
 ///

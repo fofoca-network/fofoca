@@ -13,8 +13,9 @@ use tokio::sync::mpsc;
 
 use super::driver::{NegotiatedSession, drive_session};
 use super::endpoint::WebRtcEndpoint;
-use super::session::{IN_QUEUE, InboundPacket, OUT_QUEUE, SessionRegistry};
+use super::session::{InboundPacket, SessionRegistry};
 use crate::custom_addr;
+use crate::{IN_QUEUE, OUT_QUEUE};
 
 /// Factory for the `WebRTC` datagram lane of one iroh endpoint.
 ///

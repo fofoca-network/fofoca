@@ -7,24 +7,15 @@ use iroh::EndpointId;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-/// Bound on queued outbound datagrams per session. Overflow drops the
-/// datagram (QUIC above retransmits); blocking would stall iroh's shared
-/// send loop across all transports.
-pub(crate) const OUT_QUEUE: usize = 256;
-
-/// Bound on inbound datagrams fanned in from all sessions to `poll_recv`.
-pub(crate) const IN_QUEUE: usize = 512;
-
 pub(crate) struct InboundPacket {
     pub(crate) from: EndpointId,
     pub(crate) payload: Bytes,
 }
 
-/// Rate-limited visibility for the lossy queues: without it a congested
-/// channel is indistinguishable from a broken one. `total` is the counter
-/// value *after* the increment; logs on the first drop and every 256th.
+/// Rate-limited visibility for the lossy queues. `total` is the counter value
+/// *after* the increment.
 pub(crate) fn note_dropped(remote: &EndpointId, total: u64, context: &str) {
-    if total == 1 || total.is_multiple_of(256) {
+    if crate::should_log_drop(total) {
         tracing::warn!(%remote, total, "webrtc lane dropping datagrams ({context})");
     }
 }

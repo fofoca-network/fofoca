@@ -23,7 +23,7 @@ use crate::protocol::mesh::MeshName;
 use crate::protocol::{MeshId, Message, Nickname};
 use crate::transport::IpcMessage;
 use crate::transport::MeshSender;
-use crate::util::clock::Instant;
+use crate::util::clock::{Instant, millis_saturating};
 // The timer-driver clock, distinct from `clock::Instant` off wasm32 (there it is
 // `tokio::time::Instant`). Aliased rather than path-qualified, matching
 // `daemon::state` / `daemon::app`.
@@ -406,10 +406,7 @@ async fn linkstate_arm(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
     // broadcast back, and without our outbound edges the local graph can't
     // source a route (`route_to(self, …)` would always be empty).
     handle.feed_topology(vector.clone());
-    let Ok(json) = serde_json::to_string(&vector) else {
-        return;
-    };
-    let Ok(body) = crate::protocol::MessageBody::new(json) else {
+    let Some(body) = gossip::json_body(&vector) else {
         return;
     };
     state.idle.broadcasts += 1;
@@ -1078,8 +1075,7 @@ fn finalize_ping_round(state: &mut EventLoopState, sink: &dyn NodeSink) {
         .pongs
         .iter()
         .map(|(nickname, arrival)| {
-            let rtt_ms =
-                u64::try_from(arrival.duration_since(round.t1).as_millis()).unwrap_or(u64::MAX);
+            let rtt_ms = millis_saturating(arrival.duration_since(round.t1));
             (nickname.clone(), rtt_ms)
         })
         .collect();
@@ -1178,8 +1174,8 @@ async fn run_heal(
     if hard_edge {
         tracing::warn!(
             target: "fofoca::gossip",
-            mono_gap_ms = u64::try_from(gap.mono.as_millis()).unwrap_or(u64::MAX),
-            wall_gap_ms = u64::try_from(gap.wall.as_millis()).unwrap_or(u64::MAX),
+            mono_gap_ms = millis_saturating(gap.mono),
+            wall_gap_ms = millis_saturating(gap.wall),
             "heal: hard re-bootstrap edge"
         );
         state.note_degraded();

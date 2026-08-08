@@ -56,6 +56,9 @@ pub mod fs;
 /// The browser backend that needs no Worker. See the module docs.
 #[cfg(target_arch = "wasm32")]
 pub mod idb;
+/// The JS-error adapter both browser backends share.
+#[cfg(target_arch = "wasm32")]
+mod js;
 pub mod mem;
 /// The browser backend. Worker-only; see the module docs.
 #[cfg(target_arch = "wasm32")]

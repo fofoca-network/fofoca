@@ -195,15 +195,12 @@ impl IceConfig {
 impl Default for IceConfig {
     fn default() -> Self {
         Self {
-            // Two operators, so one being down is not an outage. These only
-            // ever learn our public ip:port — no traffic flows through them.
-            stun_servers: vec![
-                // `stun1`, not the bare `stun.l.google.com` — see the note in
-                // `web/jsep.rs`. Blocklists null-route the bare name to 0.0.0.0,
-                // which costs a timeout per gather rather than failing fast.
-                "stun1.l.google.com:19302".to_owned(),
-                "stun.cloudflare.com:3478".to_owned(),
-            ],
+            // See [`DEFAULT_STUN_HOSTS`](crate::DEFAULT_STUN_HOSTS) for why
+            // these two and no others.
+            stun_servers: crate::DEFAULT_STUN_HOSTS
+                .iter()
+                .map(|host| (*host).to_owned())
+                .collect(),
             stun_timeout: Duration::from_secs(2),
         }
     }

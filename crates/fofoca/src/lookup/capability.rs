@@ -6,6 +6,7 @@ use iroh::Watcher;
 use serde::Serialize;
 
 use crate::protocol::mesh::LookupOpts;
+use crate::util::clock::millis_saturating;
 
 use super::build_peer_endpoint;
 
@@ -64,7 +65,7 @@ pub async fn probe(timeout: Duration) -> Result<NetworkCapability> {
                     .filter(|(_, relay, _)| *relay == url)
                     .map(|(_, _, latency)| latency)
                     .min()
-                    .map(|latency| u64::try_from(latency.as_millis()).unwrap_or(u64::MAX))
+                    .map(millis_saturating)
             });
             NetworkCapability {
                 node_id,

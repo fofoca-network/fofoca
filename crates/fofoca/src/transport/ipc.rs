@@ -11,6 +11,7 @@ use tokio::sync::mpsc;
 
 use crate::protocol::{MeshId, MessageId, Nickname};
 use crate::util::bounded_read::{LineRead, read_bounded_line};
+use crate::util::clock::millis_saturating;
 use crate::util::consts::{MAX_IPC_COMMAND_BYTES, MAX_IPC_RESPONSE_BYTES};
 use crate::util::tuning::{
     IPC_ACCEPT_BACKOFF_MAX_SECS, IPC_ACCEPT_BACKOFF_MIN_MS, IPC_IO_TIMEOUT_SECS,
@@ -156,7 +157,7 @@ pub(crate) async fn serve<C>(
                 }
                 tracing::warn!(
                     %error,
-                    backoff_ms = u64::try_from(backoff.as_millis()).unwrap_or(u64::MAX),
+                    backoff_ms = millis_saturating(backoff),
                     "IPC: accept error; retrying"
                 );
                 tokio::time::sleep(backoff).await;

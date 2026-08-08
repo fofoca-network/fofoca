@@ -19,7 +19,7 @@ use web_sys::{
     RtcIceGatheringState, RtcPeerConnection, RtcSdpType, RtcSessionDescriptionInit,
 };
 
-use crate::{DATA_CHANNEL_LABEL, SIGNAL_VERSION, SignalEnvelope, accept_ice_uri};
+use crate::{DATA_CHANNEL_LABEL, SignalEnvelope, accept_ice_uri};
 
 use super::transport::BrowserHubTransport;
 use iroh_base::EndpointId;
@@ -60,23 +60,13 @@ pub struct IceServers(pub Vec<IceServer>);
 
 impl Default for IceServers {
     fn default() -> Self {
+        // See [`DEFAULT_STUN_HOSTS`](crate::DEFAULT_STUN_HOSTS) for why these
+        // two and no others; the browser wants each as a `stun:` URI.
         Self(vec![IceServer {
-            urls: vec![
-                // `stun1`, not the bare `stun.l.google.com`: blocklists name the
-                // latter explicitly and null-route it to 0.0.0.0, which is worse
-                // than NXDOMAIN — the agent waits out a timeout on an
-                // unroutable address instead of failing fast, spending part of
-                // `ICE_GATHERING_DEADLINE_MS` on a server that cannot answer.
-                // Measured behind an AdGuard resolver: `stun.l.google.com` →
-                // 0.0.0.0, `stun1..4.l.google.com` → 74.125.250.129.
-                //
-                // Two servers, deliberately, and from two *operators* — that is
-                // the redundancy that counts. `stun2/3/4` share one address with
-                // `stun1`, so they would be redundancy in name only, and every
-                // extra server costs a srflx candidate per local interface.
-                "stun:stun1.l.google.com:19302".to_owned(),
-                "stun:stun.cloudflare.com:3478".to_owned(),
-            ],
+            urls: crate::DEFAULT_STUN_HOSTS
+                .iter()
+                .map(|host| format!("stun:{host}"))
+                .collect(),
         }])
     }
 }
@@ -233,7 +223,7 @@ pub struct PendingAnswer {
 
 /// The answerer's pre-attach buffer — see the buffering handler in [`answer`].
 ///
-/// Bounded at [`IN_QUEUE`](super::transport::IN_QUEUE), the inbound queue's
+/// Bounded at [`IN_QUEUE`](crate::IN_QUEUE), the inbound queue's
 /// own capacity: at handoff the whole buffer is `try_send`-delivered into a
 /// queue of exactly that many slots, so anything held past it could never be
 /// delivered — an unbounded buffer only grew browser memory for as long as
@@ -255,7 +245,7 @@ impl PreAttachBacklog {
     }
 
     pub(crate) fn push(&mut self, bytes: Vec<u8>) {
-        if self.datagrams.len() >= super::transport::IN_QUEUE {
+        if self.datagrams.len() >= crate::IN_QUEUE {
             self.dropped += 1;
             return;
         }
@@ -319,11 +309,7 @@ pub async fn offer(
         .sdp();
     require_candidates("offer", &local_sdp)?;
 
-    let envelope = SignalEnvelope::Offer {
-        version: SIGNAL_VERSION,
-        endpoint_id: local.to_string(),
-        sdp: local_sdp,
-    };
+    let envelope = SignalEnvelope::offer(local, local_sdp);
     Ok((
         PendingOffer {
             peer_connection,
@@ -465,11 +451,7 @@ pub async fn answer(
         .sdp();
     require_candidates("answer", &local_sdp)?;
 
-    let envelope = SignalEnvelope::Answer {
-        version: SIGNAL_VERSION,
-        endpoint_id: local.to_string(),
-        sdp: local_sdp,
-    };
+    let envelope = SignalEnvelope::answer(local, local_sdp);
     callbacks.push(ondatachannel.into_js_value());
     Ok((
         PendingAnswer {
@@ -801,7 +783,7 @@ mod tests {
         // dropped anyway. The earliest datagrams are the ones kept — the QUIC
         // Initial and handshake flights arrive first, and losing those costs
         // the connection where losing a later datagram costs a retransmit.
-        let cap = crate::web::transport::IN_QUEUE;
+        let cap = crate::IN_QUEUE;
         let mut backlog = PreAttachBacklog::new();
         for index in 0..cap + 3 {
             backlog.push(index.to_le_bytes().to_vec());

@@ -22,6 +22,8 @@
 
 pub use web_time::{Instant, SystemTime};
 
+use std::time::Duration;
+
 use web_time::UNIX_EPOCH;
 
 /// Seconds since the Unix epoch, or 0 if the system clock is set
@@ -48,4 +50,16 @@ pub fn unix_nanos() -> i64 {
         .ok()
         .and_then(|since_epoch| i64::try_from(since_epoch.as_nanos()).ok())
         .unwrap_or(0)
+}
+
+/// A `Duration` in whole milliseconds, saturating instead of wrapping.
+///
+/// Every tracing field that reports an elapsed time wants this, and each site
+/// was spelling out the same `u64::try_from(d.as_millis()).unwrap_or(u64::MAX)`.
+/// The saturation is unreachable in practice — `u128` milliseconds only exceed
+/// `u64` past ~584 million years — but a silent wrap in a log field is worse
+/// than a clamp.
+#[must_use]
+pub fn millis_saturating(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }

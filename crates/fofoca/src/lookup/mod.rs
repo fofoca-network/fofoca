@@ -26,6 +26,7 @@ use iroh_gossip::net::{GOSSIP_ALPN, Gossip};
 use iroh_gossip::proto::HyparviewConfig;
 
 use crate::protocol::mesh::{LookupOpts, RelayChoice};
+use crate::util::clock::millis_saturating;
 
 #[cfg(feature = "host")]
 pub use capability::{NetworkCapability, probe as capability_probe};
@@ -551,7 +552,7 @@ pub async fn probe_connect(
     // re-bootstrap can't re-home the rendezvous, so it lands at `info`
     // (always-on file); a steady success every heal tick would be a
     // firehose, so it stays `debug`.
-    let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let elapsed_ms = millis_saturating(started.elapsed());
     if connected {
         tracing::debug!(target: "fofoca::lookup", connected, elapsed_ms, addr = ?addr, "rendezvous connect-probe finished");
     } else {
