@@ -134,6 +134,7 @@ mod tests {
     use rand::RngCore;
     use std::fs;
     use std::path::PathBuf;
+    use std::time::Duration;
 
     /// A throwaway file under the OS temp dir holding `bytes`; the caller drops it.
     fn temp_file(bytes: &[u8]) -> PathBuf {
@@ -162,6 +163,59 @@ mod tests {
         fs::remove_file(&src).ok();
         server.shutdown().await;
         out
+    }
+
+    /// **A peer that connects and goes quiet must not accumulate serve tasks.**
+    ///
+    /// Everything before the bearer-secret check runs on the requester's
+    /// schedule: the handshake, opening a stream, and sending the 64-byte
+    /// request. Authentication cannot come earlier, because the secret is
+    /// inside the request being awaited. So a connection that never sends parks
+    /// a task, and nothing bounded how many could park at once or freed the
+    /// ones that had.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_peer_that_never_sends_does_not_pin_serve_tasks() {
+        use super::produce::ServeLimits;
+
+        let limits = ServeLimits {
+            pre_auth: Duration::from_millis(300),
+            max_inflight: 4,
+        };
+        let server =
+            BlobServer::start_with_limits(LookupOpts::loopback(), temp_spool(), None, limits)
+                .await
+                .expect("start producer");
+
+        // Connect and then do nothing at all — never open a stream, never send.
+        let mut idle = Vec::new();
+        for _ in 0..12u8 {
+            let client = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+                .relay_mode(iroh::RelayMode::Disabled)
+                .bind()
+                .await
+                .expect("bind client");
+            if let Ok(conn) = client.connect(server.addr(), super::BLOB_ALPN).await {
+                idle.push((client, conn));
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            server.inflight() <= limits.max_inflight,
+            "{} serves in flight, over the {} ceiling",
+            server.inflight(),
+            limits.max_inflight
+        );
+
+        // Past the deadline they must be gone, or the ceiling above is just a
+        // slower way to run out.
+        tokio::time::sleep(limits.pre_auth + Duration::from_millis(400)).await;
+        assert_eq!(
+            server.inflight(),
+            0,
+            "a silent peer still holds serve tasks after the pre-auth deadline"
+        );
+
+        server.shutdown().await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

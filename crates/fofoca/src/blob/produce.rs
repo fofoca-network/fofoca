@@ -8,6 +8,7 @@
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -27,6 +28,30 @@ use super::store::BlobStore;
 use super::ticket::BlobTicket;
 use super::{BAD_SECRET, ContentId, DONE, HASH_LEN, SECRET_LEN, UNKNOWN_BLOB, wait_online};
 
+/// What one fetch may cost before the requester has proved anything.
+///
+/// Everything up to the bearer-secret check runs on a peer's schedule: the
+/// handshake, opening a stream, and sending the 64-byte request. A peer that
+/// connects and then stops parks a task for good, and nothing bounded how many
+/// such tasks there could be. Injectable so tests need not wait real seconds.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ServeLimits {
+    /// Deadline covering the whole pre-authentication phase.
+    pub(crate) pre_auth: Duration,
+    /// Serves in flight at once. A backstop under the deadline: the deadline
+    /// is what frees a parked task, this caps how many can park meanwhile.
+    pub(crate) max_inflight: usize,
+}
+
+impl ServeLimits {
+    pub(crate) const DEFAULT: Self = Self {
+        // Generous against a slow link, and a legitimate fetcher sends its
+        // request immediately after connecting.
+        pre_auth: Duration::from_secs(10),
+        max_inflight: 64,
+    };
+}
+
 /// Chunk size for hashing and streaming — bounded, so memory is constant
 /// regardless of blob size.
 const CHUNK: usize = 64 * 1024;
@@ -41,6 +66,14 @@ pub struct BlobServer {
     /// ticket inherits it, so a scraped ticket can't be redeemed without the
     /// password. `None` ⇒ bare bearer-secret tickets (status quo).
     password: Option<Password>,
+    /// Serves currently in flight. The accept loop holds the counter it
+    /// actually reads; this handle exists so a test can observe that a peer
+    /// which connects and then goes quiet cannot accumulate them.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "observed only by the serve-ceiling test")
+    )]
+    inflight: Arc<AtomicUsize>,
 }
 
 impl std::fmt::Debug for BlobServer {
@@ -61,6 +94,17 @@ impl BlobServer {
         spool_dir: PathBuf,
         password: Option<Password>,
     ) -> Result<Self> {
+        Self::start_with_limits(lookups, spool_dir, password, ServeLimits::DEFAULT).await
+    }
+
+    /// [`Self::start`] with the serving bounds spelled out, so tests need not
+    /// wait the real pre-authentication deadline.
+    pub(crate) async fn start_with_limits(
+        lookups: LookupOpts,
+        spool_dir: PathBuf,
+        password: Option<Password>,
+        limits: ServeLimits,
+    ) -> Result<Self> {
         let endpoint =
             // `TransportHandles::default()` — IP and relay only. The blob
             // server is a side-channel endpoint of its own; the mesh's custom
@@ -77,13 +121,33 @@ impl BlobServer {
             wait_online(&endpoint).await;
         }
         let store = Arc::new(Mutex::new(BlobStore::new(spool_dir)?));
-        spawn_accept_loop(endpoint.clone(), Arc::clone(&store));
+        let inflight = Arc::new(AtomicUsize::new(0));
+        spawn_accept_loop(
+            endpoint.clone(),
+            Arc::clone(&store),
+            limits,
+            Arc::clone(&inflight),
+        );
         Ok(Self {
             endpoint,
             store,
             lookups,
             password,
+            inflight,
         })
+    }
+
+    /// The serving endpoint's dialable address, for tests that connect to it
+    /// directly rather than through a ticket.
+    #[cfg(test)]
+    pub(crate) fn addr(&self) -> iroh::EndpointAddr {
+        self.endpoint.addr()
+    }
+
+    /// Serves in flight right now.
+    #[cfg(test)]
+    pub(crate) fn inflight(&self) -> usize {
+        self.inflight.load(Ordering::Relaxed)
     }
 
     /// Offload `path` under `content_id`: stream-hash it off the event loop,
@@ -157,11 +221,29 @@ impl BlobServer {
 
 /// Spawn the accept loop: each inbound connection is one fetch, served on its own
 /// task so a slow transfer never blocks the next.
-fn spawn_accept_loop(endpoint: Endpoint, store: Arc<Mutex<BlobStore>>) {
+fn spawn_accept_loop(
+    endpoint: Endpoint,
+    store: Arc<Mutex<BlobStore>>,
+    limits: ServeLimits,
+    inflight: Arc<AtomicUsize>,
+) {
     tokio::spawn(async move {
         while let Some(incoming) = endpoint.accept().await {
+            if inflight.load(Ordering::Relaxed) >= limits.max_inflight {
+                // Dropping `incoming` refuses the connection. Shedding beats
+                // queueing: a serve that has not authenticated yet is worth
+                // less than staying able to answer the next one.
+                tracing::debug!("blob serve ceiling reached; connection refused");
+                continue;
+            }
             let store = Arc::clone(&store);
-            tokio::spawn(handle_incoming(incoming, store));
+            inflight.fetch_add(1, Ordering::Relaxed);
+            tokio::spawn(handle_incoming(
+                incoming,
+                store,
+                limits,
+                Arc::clone(&inflight),
+            ));
         }
     });
 }
@@ -169,17 +251,36 @@ fn spawn_accept_loop(endpoint: Endpoint, store: Arc<Mutex<BlobStore>>) {
 /// Serve one accepted connection and log a failed fetch. Split out of
 /// [`spawn_accept_loop`] so the error branch isn't nested inside its
 /// spawned-within-spawned `while let`.
-async fn handle_incoming(incoming: Incoming, store: Arc<Mutex<BlobStore>>) {
-    if let Err(error) = serve_connection(incoming, &store).await {
+async fn handle_incoming(
+    incoming: Incoming,
+    store: Arc<Mutex<BlobStore>>,
+    limits: ServeLimits,
+    inflight: Arc<AtomicUsize>,
+) {
+    if let Err(error) = serve_connection(incoming, &store, limits).await {
         tracing::debug!(%error, "blob serve connection ended");
     }
+    inflight.fetch_sub(1, Ordering::Relaxed);
 }
 
 /// Serve one fetch connection: accept its single bi-stream and answer it.
-async fn serve_connection(incoming: Incoming, store: &Mutex<BlobStore>) -> Result<()> {
-    let conn = incoming.await?;
-    let (send, recv) = conn.accept_bi().await?;
-    serve_stream(&conn, send, recv, store).await
+async fn serve_connection(
+    incoming: Incoming,
+    store: &Mutex<BlobStore>,
+    limits: ServeLimits,
+) -> Result<()> {
+    // One deadline across everything the requester controls. The secret that
+    // authorizes this fetch is inside the request we are waiting for, so none
+    // of it can be gated on the peer having proved anything.
+    let deadline = tokio::time::Instant::now() + limits.pre_auth;
+    let (conn, send, recv) = tokio::time::timeout_at(deadline, async {
+        let conn = incoming.await?;
+        let (send, recv) = conn.accept_bi().await?;
+        anyhow::Ok((conn, send, recv))
+    })
+    .await
+    .context("no fetch request within the pre-authentication deadline")??;
+    serve_stream(&conn, send, recv, store, deadline).await
 }
 
 /// The fetch protocol, producer side. Reads the fixed 64-byte request
@@ -191,10 +292,14 @@ async fn serve_stream(
     mut send: SendStream,
     mut recv: RecvStream,
     store: &Mutex<BlobStore>,
+    deadline: tokio::time::Instant,
 ) -> Result<()> {
     let mut request = [0u8; HASH_LEN + SECRET_LEN];
-    if recv.read_exact(&mut request).await.is_err() {
-        return Ok(());
+    // Still inside the pre-auth deadline: a peer that opens a stream and then
+    // sends 63 bytes is the same parked task as one that sends none.
+    match tokio::time::timeout_at(deadline, recv.read_exact(&mut request)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(_)) | Err(_) => return Ok(()),
     }
     let mut hash = [0u8; HASH_LEN];
     hash.copy_from_slice(&request[..HASH_LEN]);
