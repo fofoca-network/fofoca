@@ -38,6 +38,7 @@ use web_sys::{
 };
 
 use crate::js::js_err;
+use crate::sidecar;
 use crate::{BlobStore, FileId, Outboard, Root, decode_into, encode_from_outboard, extent_of};
 
 /// A store on the origin-private filesystem. Worker-only; not `Send`.
@@ -153,37 +154,28 @@ impl OpfsStore {
     }
 
     fn obao_path(&self, root: Root) -> String {
-        format!("{}/{}.obao", self.meta, crate::sidecar::hex(root))
+        format!("{}/{}", self.meta, sidecar::obao_name(root))
     }
 
     fn ranges_path(&self, root: Root) -> String {
-        format!("{}/{}.ranges", self.meta, crate::sidecar::hex(root))
+        format!("{}/{}", self.meta, sidecar::ranges_name(root))
     }
 
     fn binds_path(&self) -> String {
-        format!("{}/binds.tsv", self.meta)
+        format!("{}/{}", self.meta, sidecar::BINDS)
     }
 
-    async fn load_binds(&self) -> Vec<(String, u64, i64, Root)> {
+    async fn load_binds(&self) -> Vec<sidecar::Bind> {
         let Ok(Some(bytes)) = Self::read_all(&self.binds_path()).await else {
             return Vec::new();
         };
-        crate::sidecar::parse_binds(&String::from_utf8_lossy(&bytes))
-    }
-
-    async fn bind_entry(&self, key: &str) -> Option<(u64, i64, Root)> {
-        self.load_binds()
-            .await
-            .into_iter()
-            .find(|(candidate, ..)| candidate == key)
-            .map(|(_, size, mtime, root)| (size, mtime, root))
+        sidecar::parse_binds(&String::from_utf8_lossy(&bytes))
     }
 
     async fn put_bind(&self, file: &FileId, root: Root) -> Result<()> {
         let mut binds = self.load_binds().await;
-        binds.retain(|(key, ..)| key != &file.key);
-        binds.push((file.key.clone(), file.size, file.mtime, root));
-        let text = crate::sidecar::format_binds(&binds)?;
+        sidecar::upsert(&mut binds, file, root);
+        let text = sidecar::format_binds(&binds)?;
         Self::write_all(&self.binds_path(), text.as_bytes()).await
     }
 }
@@ -196,7 +188,7 @@ impl BlobStore for OpfsStore {
         Self::write_all(&self.obao_path(root), &outboard).await?;
         Self::write_all(
             &self.ranges_path(root),
-            crate::sidecar::format_ranges(&extent_of(file.size)).as_bytes(),
+            sidecar::format_ranges(&extent_of(file.size)).as_bytes(),
         )
         .await?;
         self.put_bind(file, root).await?;
@@ -204,13 +196,7 @@ impl BlobStore for OpfsStore {
     }
 
     async fn bind(&self, file: &FileId) -> Result<Option<Root>> {
-        let Some((size, mtime, root)) = self.bind_entry(&file.key).await else {
-            return Ok(None);
-        };
-        if size != file.size || mtime != file.mtime {
-            return Ok(None);
-        }
-        Ok(Some(root))
+        Ok(sidecar::bound_root(&self.load_binds().await, file))
     }
 
     async fn set_bind(&self, file: &FileId, root: Root) -> Result<()> {
@@ -226,9 +212,7 @@ impl BlobStore for OpfsStore {
         let Some(bytes) = Self::read_all(&self.ranges_path(root)).await? else {
             return Ok(ChunkRanges::empty());
         };
-        Ok(crate::sidecar::parse_ranges(&String::from_utf8_lossy(
-            &bytes,
-        )))
+        Ok(sidecar::parse_ranges(&String::from_utf8_lossy(&bytes)))
     }
 
     async fn outboard(&self, root: Root) -> Result<Option<Outboard>> {
@@ -244,31 +228,13 @@ impl BlobStore for OpfsStore {
         Self::write_all(&self.obao_path(root), &outboard).await?;
         Self::write_all(
             &self.ranges_path(root),
-            crate::sidecar::format_ranges(&present).as_bytes(),
+            sidecar::format_ranges(&present).as_bytes(),
         )
         .await
     }
 
     async fn read_ranges(&self, file: &FileId, ranges: &ChunkRanges) -> Result<Vec<u8>> {
-        let root = self
-            .bind(file)
-            .await?
-            .context("this file is unbound: it was never hashed, or it changed since it was")?;
-
-        let held = self.present(root).await?;
-        let wanted = ranges.clone() & extent_of(file.size);
-        if !wanted.is_subset(&held) {
-            bail!("requested ranges are not all held");
-        }
-
-        // From the stored outboard, not one rebuilt from the file. A file held
-        // only in part is still full-length on disk, its gaps left as the zeroes
-        // `truncate` wrote; rebuilding hashes those zeroes as content and yields
-        // a root no peer shares, so every proof is rejected by whoever asked.
-        let outboard = self
-            .outboard(root)
-            .await?
-            .context("bound to a root whose outboard is gone")?;
+        let (root, outboard, wanted) = crate::resolve_read(self, file, ranges).await?;
 
         let bytes = Self::read_all(&file.key)
             .await?
@@ -348,7 +314,7 @@ impl BlobStore for OpfsStore {
         let held = self.present(root).await? | verified;
         Self::write_all(
             &self.ranges_path(root),
-            crate::sidecar::format_ranges(&held).as_bytes(),
+            sidecar::format_ranges(&held).as_bytes(),
         )
         .await?;
         self.put_bind(file, root).await?;

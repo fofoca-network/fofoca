@@ -159,17 +159,14 @@ async fn broadcast(sender: &MeshSender, bytes: Bytes) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use crate::testing::{endpoint_id, nick};
-    use crate::util::clock::Instant;
-    use std::sync::Arc;
+    use crate::testing::{endpoint_id, fresh_state, nick};
 
     use bytes::Bytes;
 
     use iroh::EndpointId;
 
     use super::{Lane, Route, lane_for, route};
-    use crate::daemon::state::{EventLoopState, MeshSecrets, StateInit};
-    use crate::protocol::identity::Identity;
+    use crate::daemon::state::EventLoopState;
     use crate::protocol::message::AppFrameParams;
     use crate::protocol::{AppTag, CorrId, MeshId, Message, MessageBody};
 
@@ -181,21 +178,9 @@ mod tests {
         MessageBody::from("hi")
     }
 
-    fn empty_state() -> EventLoopState {
-        EventLoopState::new(
-            StateInit {
-                state_file: None,
-                identity: Arc::new(Identity::generate()),
-                secrets: MeshSecrets::default(),
-                per_peer_gate: None,
-            },
-            Instant::now(),
-        )
-    }
-
     /// A meshed state that knows `bob`'s endpoint — the happy path for unicast.
     fn state_knowing_bob() -> (EventLoopState, EndpointId) {
-        let mut state = empty_state();
+        let mut state = fresh_state();
         state.meshed = true;
         let bob = endpoint_id(1);
         state
@@ -292,14 +277,14 @@ mod tests {
 
     #[test]
     fn directed_message_with_unknown_endpoint_is_undeliverable() {
-        let mut state = empty_state();
+        let mut state = fresh_state();
         state.meshed = true; // meshed, but we hold no endpoint for bob
         assert_eq!(route(&directed_msg(), &state), Route::Undeliverable);
     }
 
     #[test]
     fn rendezvous_addressee_is_never_a_directed_target() {
-        let mut state = empty_state();
+        let mut state = fresh_state();
         state.meshed = true;
         let rendezvous = endpoint_id(9);
         state.rendezvous_id = Some(rendezvous);

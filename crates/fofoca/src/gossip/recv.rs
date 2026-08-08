@@ -393,33 +393,7 @@ pub(crate) async fn ingest(
             return;
         }
         MessageKind::Ping => {
-            // Auto-respond to every probe with a pong addressed to the pinger.
-            // The daemon owns this — no agent involvement.
-            //
-            // Over a warm connection only. Anyone who reaches this mesh can
-            // ping, and a pinger advertising an address nothing answers on used
-            // to buy a full dial timeout here — on the sole event loop, so every
-            // timer, IPC call and other peer's traffic waited with it, once per
-            // identity the pinger cared to mint. A pong nobody receives is the
-            // right outcome: the pinger's round misses us and tries again.
-            let pong = Message::new_pong(ctx.mesh, ctx.author, message.author.clone())
-                .signed(ctx.identity);
-            crate::logging::messages::log_out(&pong);
-            let warm_endpoint = state
-                .peer_endpoints
-                .get(message.author.as_str())
-                .map(|addr| addr.id)
-                .filter(|eid| Some(*eid) != state.rendezvous_id);
-            match (warm_endpoint, pong.serialize()) {
-                (Some(eid), Ok(bytes)) => {
-                    if !crate::transport::send_best_effort(eid, Bytes::from(bytes), state).await {
-                        tracing::debug!(target: "fofoca::gossip", pinger = %message.author, "auto-pong skipped: no warm path");
-                    }
-                }
-                _ => {
-                    tracing::debug!(target: "fofoca::gossip", pinger = %message.author, "auto-pong skipped: no known endpoint");
-                }
-            }
+            auto_pong(&message, state, ctx).await;
             return;
         }
         MessageKind::Pong { to } => {
@@ -563,6 +537,35 @@ fn handle_link_state(message: &Message, state: &mut EventLoopState) {
     }
 }
 
+/// Auto-respond to a probe with a pong addressed to the pinger. The daemon
+/// owns this — no agent involvement.
+///
+/// Over a warm connection only. Anyone who reaches this mesh can ping, and a
+/// pinger advertising an address nothing answers on used to buy a full dial
+/// timeout here — on the sole event loop, so every timer, IPC call and other
+/// peer's traffic waited with it, once per identity the pinger cared to mint.
+/// A pong nobody receives is the right outcome: the pinger's round misses us
+/// and tries again.
+async fn auto_pong(message: &Message, state: &EventLoopState, ctx: &HandlerCtx<'_>) {
+    let pong = Message::new_pong(ctx.mesh, ctx.author, message.author.clone()).signed(ctx.identity);
+    crate::logging::messages::log_out(&pong);
+    let warm_endpoint = state
+        .peer_endpoints
+        .get(message.author.as_str())
+        .map(|addr| addr.id)
+        .filter(|eid| Some(*eid) != state.rendezvous_id);
+    match (warm_endpoint, pong.serialize()) {
+        (Some(eid), Ok(bytes)) => {
+            if !crate::transport::send_best_effort(eid, Bytes::from(bytes), state).await {
+                tracing::debug!(target: "fofoca::gossip", pinger = %message.author, "auto-pong skipped: no warm path");
+            }
+        }
+        _ => {
+            tracing::debug!(target: "fofoca::gossip", pinger = %message.author, "auto-pong skipped: no known endpoint");
+        }
+    }
+}
+
 struct InboundFrame<'a> {
     message: &'a Message,
     canonical: &'a [u8],
@@ -613,32 +616,16 @@ async fn handle_shard(
         );
     }
     if let Some(mut logical) = state.reassemble(message) {
-        // Only the addressee reaches here (non-addressed directed shards returned
-        // above), so decrypt the reassembled directed body before validating it —
-        // but only when the app marks this tag sealed (its own convention). A
-        // plaintext-directed consumer's body is already final.
-        if app.classify(&logical).sealed && !decrypt_directed(&mut logical, state, ctx) {
+        // The same gate the single-frame path runs, now on the reassembled body:
+        // unseal a directed frame sealed to us or a mesh-key-sealed broadcast,
+        // then validate the payload. Shared rather than restated, so a change to
+        // the gate cannot reach one path and silently miss the other. The
+        // ciphertext it hands back is for `ingest`'s retention step — the shards
+        // here were already retained above, as ciphertext.
+        let Gated::Pass { class, .. } = gate_and_decrypt(&mut logical, state, ctx, app) else {
             return;
-        }
-        // A broadcast frame reassembles to a body that, on a passworded mesh, is
-        // mesh-key sealed; decrypt it (the retained shards above stay ciphertext)
-        // before validating + surfacing, rejecting an unsealed/unopenable body.
-        if matches!(&logical.kind, MessageKind::App { to: None, .. })
-            && state.broadcast_key.is_some()
-            && decrypt_broadcast(&mut logical, state).is_none()
-        {
-            return;
-        }
-        // Classify the reassembled body once; thread it to the push step.
-        let logical_class = logical.kind.app_tag().map(|_| app.classify(&logical));
-        if logical_class.as_ref().is_some_and(|cls| !cls.valid) {
-            tracing::warn!(target: "fofoca::gossip",
-                author = %logical.author,
-                "dropping reassembled app frame with an invalid payload"
-            );
-            return;
-        }
-        maybe_push_inbound(ctx, &logical, surfaceable, logical_class.as_ref());
+        };
+        maybe_push_inbound(ctx, &logical, surfaceable, class.as_ref());
         // Dispatch the reassembled logical frame exactly like a single-frame one:
         // a directed RPC request/response (both shard now) reaches its handler,
         // and content surfaces. The shards were already retained above, so the

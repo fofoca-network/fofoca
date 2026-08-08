@@ -42,7 +42,8 @@ use anyhow::{Context, Result, bail};
 use bao_tree::ChunkRanges;
 use range_collections::range_set::RangeSetRange;
 
-use crate::sidecar::{format_binds, format_ranges, hex, parse_binds, parse_ranges};
+use crate::sidecar;
+use crate::sidecar::{format_binds, format_ranges, parse_binds, parse_ranges};
 use crate::{BlobStore, FileId, Outboard, Root, decode_into, encode_from_outboard, extent_of};
 
 /// A store whose metadata lives under one directory and whose data does not.
@@ -80,15 +81,15 @@ impl FsStore {
     }
 
     fn obao_path(&self, root: Root) -> PathBuf {
-        self.root.join(format!("{}.obao", hex(root)))
+        self.root.join(sidecar::obao_name(root))
     }
 
     fn ranges_path(&self, root: Root) -> PathBuf {
-        self.root.join(format!("{}.ranges", hex(root)))
+        self.root.join(sidecar::ranges_name(root))
     }
 
     fn binds_path(&self) -> PathBuf {
-        self.root.join("binds.tsv")
+        self.root.join(sidecar::BINDS)
     }
 
     fn load_binds(&self) {
@@ -181,13 +182,7 @@ impl BlobStore for FsStore {
             .binds
             .lock()
             .expect("the bind table lock is never held across an await");
-        let Some(&(size, mtime, root)) = binds.get(&file.key) else {
-            return Ok(None);
-        };
-        if size != file.size || mtime != file.mtime {
-            return Ok(None);
-        }
-        Ok(Some(root))
+        Ok(sidecar::gate(binds.get(&file.key), file))
     }
 
     async fn set_bind(&self, file: &FileId, root: Root) -> Result<()> {
@@ -217,31 +212,7 @@ impl BlobStore for FsStore {
     }
 
     async fn read_ranges(&self, file: &FileId, ranges: &ChunkRanges) -> Result<Vec<u8>> {
-        // **The version gate, on the read path.** The file on disk may have
-        // moved since it was bound; an outboard describing content that is gone
-        // would happily encode the new bytes and produce proofs nobody can
-        // verify. Refuse instead.
-        let root = self
-            .bind(file)
-            .await?
-            .context("this file is unbound: it was never hashed, or it changed since it was")?;
-
-        let held = self.load_ranges(root);
-        let wanted = ranges.clone() & extent_of(file.size);
-        if !wanted.is_subset(&held) {
-            bail!("requested ranges are not all held");
-        }
-
-        // Encode from the *stored* outboard rather than rebuilding one from the
-        // file. A file this store holds only part of still occupies its full
-        // length on disk, with the gaps left as the zeroes `set_len` wrote, so
-        // rebuilding hashes those zeroes as though they were content: the tree
-        // comes out under a root no peer shares, and every proof is rejected by
-        // whoever asked. The stored outboard carries the nodes the sender proved.
-        let outboard = self
-            .outboard(root)
-            .await?
-            .context("bound to a root whose outboard is gone")?;
+        let (root, outboard, wanted) = crate::resolve_read(self, file, ranges).await?;
 
         let bytes = Self::read_data(file)?;
         // Re-check after reading, not just before: a file can change *during*

@@ -22,6 +22,10 @@ pub(crate) fn fresh_state() -> EventLoopState {
             identity: Arc::new(Identity::generate()),
             secrets: MeshSecrets::default(),
             per_peer_gate: None,
+            webrtc_admission: crate::transport::SignalAdmission::new(
+                crate::transport::MAX_DIRECT_PEERS,
+            ),
+            webrtc_ice: crate::transport::IceProfile::default(),
         },
         Instant::now(),
     )

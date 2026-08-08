@@ -560,6 +560,42 @@ pub async fn setup_mesh(kind: SetupKind, params: SetupParams) -> Result<EventLoo
     })
 }
 
+/// Stand up the gossip overlay, and with it the one admission table and ICE
+/// profile this node uses.
+///
+/// Shared by both attach arms because the coupling is what matters: the signal
+/// acceptor built inside [`build_mesh`] gets a clone of the *same* table
+/// `EventLoopState` gets. Two tables would be two ceilings, each enforcing half
+/// of one — the failure `SignalAdmission` exists to make impossible.
+///
+/// A loopback mesh gathers host candidates only. Anything else would put STUN
+/// packets on the wire from a mesh whose whole point is that it makes no
+/// external network call.
+fn build_overlay(
+    build: &SetupBuild<'_>,
+    mesh: &Mesh,
+    endpoint: &Endpoint,
+    webrtc: &fofoca_iroh_webrtc_transport::WebRtcHandle,
+) -> (
+    iroh_gossip::net::Gossip,
+    iroh::protocol::Router,
+    crate::transport::SignalAdmission,
+    crate::transport::IceProfile,
+) {
+    let admission = crate::transport::SignalAdmission::new(crate::transport::MAX_DIRECT_PEERS);
+    let ice = crate::transport::IceProfile {
+        host_only: mesh.is_loopback(),
+    };
+    let (gossip, router) = build_mesh(
+        endpoint.clone(),
+        build.max_peers,
+        Some(build.unicast_acceptor.clone()),
+        Some((webrtc.clone(), admission.clone(), ice)),
+        build.take_protocols(),
+    );
+    (gossip, router, admission, ice)
+}
+
 /// The value cluster [`setup_create`] needs beyond the shared [`SetupBuild`]
 /// handles — mirrors [`SetupKind::Create`]'s fields one-for-one.
 struct CreateSetup {
@@ -666,24 +702,8 @@ async fn setup_create(build: &SetupBuild<'_>, create: CreateSetup) -> Result<Ass
         mesh.network_label(),
     );
 
-    // One table for both roles on this node: the acceptor built inside
-    // `build_mesh` gets this clone, and so does `EventLoopState`. Two separate
-    // ones would mean two separate ceilings, each enforcing half of one.
-    let webrtc_admission =
-        crate::transport::SignalAdmission::new(crate::transport::MAX_DIRECT_PEERS);
-    // A loopback mesh gathers host candidates only. Anything else would put
-    // STUN packets on the wire from a mesh whose whole point is that it makes
-    // no external network call.
-    let webrtc_ice = crate::transport::IceProfile {
-        host_only: mesh.is_loopback(),
-    };
-    let (gossip, router) = build_mesh(
-        endpoint.clone(),
-        build.max_peers,
-        Some(build.unicast_acceptor.clone()),
-        Some((webrtc.clone(), webrtc_admission.clone(), webrtc_ice)),
-        build.take_protocols(),
-    );
+    let (gossip, router, webrtc_admission, webrtc_ice) =
+        build_overlay(build, &mesh, &endpoint, &webrtc);
     // Creator has no peers yet — bootstrap is empty.
     let topic = gossip.subscribe(topic_id, vec![]).await?;
 
@@ -754,24 +774,8 @@ async fn setup_join(build: &SetupBuild<'_>, kind: SetupKind) -> Result<Assembled
     // the chosen relay rung (reachable across machines).
     register_rendezvous(&endpoint, &rdv);
 
-    // One table for both roles on this node: the acceptor built inside
-    // `build_mesh` gets this clone, and so does `EventLoopState`. Two separate
-    // ones would mean two separate ceilings, each enforcing half of one.
-    let webrtc_admission =
-        crate::transport::SignalAdmission::new(crate::transport::MAX_DIRECT_PEERS);
-    // A loopback mesh gathers host candidates only. Anything else would put
-    // STUN packets on the wire from a mesh whose whole point is that it makes
-    // no external network call.
-    let webrtc_ice = crate::transport::IceProfile {
-        host_only: mesh.is_loopback(),
-    };
-    let (gossip, router) = build_mesh(
-        endpoint.clone(),
-        build.max_peers,
-        Some(build.unicast_acceptor.clone()),
-        Some((webrtc.clone(), webrtc_admission.clone(), webrtc_ice)),
-        build.take_protocols(),
-    );
+    let (gossip, router, webrtc_admission, webrtc_ice) =
+        build_overlay(build, &mesh, &endpoint, &webrtc);
     // We subscribe, background-connect to the rendezvous, and — for a plain
     // join — `daemon::run` defers co-hosting our own (same seed-id) rendezvous
     // until we are meshed, so we never register a duplicate `rendezvous_id` on

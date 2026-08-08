@@ -42,7 +42,7 @@
 
 use std::future::Future;
 
-use anyhow::Result;
+use anyhow::{Context as _, Result, bail};
 use bao_tree::BlockSize;
 
 /// The filesystem backend.
@@ -220,4 +220,40 @@ pub trait BlobStore {
         encoded: &[u8],
         ranges: &ChunkRanges,
     ) -> impl Future<Output = Result<ChunkRanges>>;
+}
+
+/// Everything [`BlobStore::read_ranges`] must establish before it can encode:
+/// the root this version is bound to, the outboard that proves it, and the
+/// clamped ranges the caller may actually be answered for.
+///
+/// Shared rather than repeated per backend because two of the three steps are
+/// refusals, and a backend that forgets one serves wrongly instead of failing.
+/// The outboard comes from storage and is never rebuilt from the file: a file
+/// held only in part is still full length, its gaps left as the zeroes the
+/// backend's own sizing call wrote, so rehashing yields a root no peer shares
+/// and every proof is rejected by whoever asked.
+pub(crate) async fn resolve_read<S: BlobStore>(
+    store: &S,
+    file: &FileId,
+    ranges: &ChunkRanges,
+) -> Result<(Root, Outboard, ChunkRanges)> {
+    let root = store
+        .bind(file)
+        .await?
+        .context("this file is unbound: it was never hashed, or it changed since it was")?;
+
+    // Clamp before comparing: `ChunkRanges::all()` is `0..∞`, so an unclamped
+    // subset check calls every store incomplete, including a complete one.
+    let wanted = ranges.clone() & extent_of(file.size);
+    if !wanted.is_subset(&store.present(root).await?) {
+        // Refuse rather than answer short. A caller cannot tell a truncated
+        // answer from a small file, which is how a mirror silently loses tails.
+        bail!("requested ranges are not all held");
+    }
+
+    let outboard = store
+        .outboard(root)
+        .await?
+        .context("bound to a root whose outboard is gone")?;
+    Ok((root, outboard, wanted))
 }

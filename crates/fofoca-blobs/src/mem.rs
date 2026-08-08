@@ -66,17 +66,10 @@ impl BlobStore for MemStore {
     }
 
     async fn bind(&self, file: &FileId) -> Result<Option<Root>> {
-        let binds = self.binds.borrow();
-        let Some(&(size, mtime, root)) = binds.get(&file.key) else {
-            return Ok(None);
-        };
-        // The version gate. A key that still exists but whose bytes moved is
-        // *unbound*, not stale-but-usable — serving it would answer with one
-        // file's content under another's name.
-        if size != file.size || mtime != file.mtime {
-            return Ok(None);
-        }
-        Ok(Some(root))
+        Ok(crate::sidecar::gate(
+            self.binds.borrow().get(&file.key),
+            file,
+        ))
     }
 
     async fn set_bind(&self, file: &FileId, root: Root) -> Result<()> {

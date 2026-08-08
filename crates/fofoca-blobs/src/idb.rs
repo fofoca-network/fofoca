@@ -49,6 +49,7 @@ use wasm_bindgen_futures::JsFuture;
 use web_sys::{IdbDatabase, IdbFactory, IdbRequest, IdbTransaction, IdbTransactionMode};
 
 use crate::js::js_err;
+use crate::sidecar;
 use crate::sparse::SparseBlocks;
 use crate::{
     BlobStore, CHUNK_GROUP_BYTES, FileId, Outboard, Root, decode_sparse, encode_from_outboard,
@@ -74,7 +75,7 @@ const BLOCKS: &str = "blocks";
 /// deduplicate as a side effect. NUL separates because it cannot appear in the
 /// hex of a root.
 fn block_key(root: Root, index: u64) -> String {
-    format!("{}\u{0}{index:016x}", crate::sidecar::hex(root))
+    format!("{}\u{0}{index:016x}", sidecar::hex(root))
 }
 
 /// The success/error closure pair kept alive for the duration of one await.
@@ -234,27 +235,18 @@ impl IdbStore {
         committed(&tx).await
     }
 
-    fn obao_key(root: Root) -> String {
-        format!("{}.obao", crate::sidecar::hex(root))
-    }
-
-    fn ranges_key(root: Root) -> String {
-        format!("{}.ranges", crate::sidecar::hex(root))
-    }
-
-    async fn load_binds(&self) -> Vec<(String, u64, i64, Root)> {
-        let Ok(Some(bytes)) = self.get(META, "binds.tsv").await else {
+    async fn load_binds(&self) -> Vec<sidecar::Bind> {
+        let Ok(Some(bytes)) = self.get(META, sidecar::BINDS).await else {
             return Vec::new();
         };
-        crate::sidecar::parse_binds(&String::from_utf8_lossy(&bytes))
+        sidecar::parse_binds(&String::from_utf8_lossy(&bytes))
     }
 
     async fn put_bind(&self, file: &FileId, root: Root) -> Result<()> {
         let mut binds = self.load_binds().await;
-        binds.retain(|(key, ..)| key != &file.key);
-        binds.push((file.key.clone(), file.size, file.mtime, root));
-        let text = crate::sidecar::format_binds(&binds)?;
-        self.put_many(META, &[("binds.tsv".to_owned(), text.into_bytes())])
+        sidecar::upsert(&mut binds, file, root);
+        let text = sidecar::format_binds(&binds)?;
+        self.put_many(META, &[(sidecar::BINDS.to_owned(), text.into_bytes())])
             .await
     }
 
@@ -303,10 +295,10 @@ impl BlobStore for IdbStore {
         self.put_many(
             META,
             &[
-                (Self::obao_key(root), outboard),
+                (sidecar::obao_name(root), outboard),
                 (
-                    Self::ranges_key(root),
-                    crate::sidecar::format_ranges(&extent_of(file.size)).into_bytes(),
+                    sidecar::ranges_name(root),
+                    sidecar::format_ranges(&extent_of(file.size)).into_bytes(),
                 ),
             ],
         )
@@ -316,18 +308,7 @@ impl BlobStore for IdbStore {
     }
 
     async fn bind(&self, file: &FileId) -> Result<Option<Root>> {
-        let Some((_, size, mtime, root)) = self
-            .load_binds()
-            .await
-            .into_iter()
-            .find(|(key, ..)| key == &file.key)
-        else {
-            return Ok(None);
-        };
-        if size != file.size || mtime != file.mtime {
-            return Ok(None);
-        }
-        Ok(Some(root))
+        Ok(sidecar::bound_root(&self.load_binds().await, file))
     }
 
     async fn set_bind(&self, file: &FileId, root: Root) -> Result<()> {
@@ -337,16 +318,14 @@ impl BlobStore for IdbStore {
     /// Read back from storage rather than cached: `IndexedDB` is evictable, and
     /// a range set held only in RAM would keep advertising reclaimed bytes.
     async fn present(&self, root: Root) -> Result<ChunkRanges> {
-        let Some(bytes) = self.get(META, &Self::ranges_key(root)).await? else {
+        let Some(bytes) = self.get(META, &sidecar::ranges_name(root)).await? else {
             return Ok(ChunkRanges::empty());
         };
-        Ok(crate::sidecar::parse_ranges(&String::from_utf8_lossy(
-            &bytes,
-        )))
+        Ok(sidecar::parse_ranges(&String::from_utf8_lossy(&bytes)))
     }
 
     async fn outboard(&self, root: Root) -> Result<Option<Outboard>> {
-        self.get(META, &Self::obao_key(root)).await
+        self.get(META, &sidecar::obao_name(root)).await
     }
 
     async fn put_outboard(
@@ -358,10 +337,10 @@ impl BlobStore for IdbStore {
         self.put_many(
             META,
             &[
-                (Self::obao_key(root), outboard),
+                (sidecar::obao_name(root), outboard),
                 (
-                    Self::ranges_key(root),
-                    crate::sidecar::format_ranges(&present).into_bytes(),
+                    sidecar::ranges_name(root),
+                    sidecar::format_ranges(&present).into_bytes(),
                 ),
             ],
         )
@@ -373,20 +352,7 @@ impl BlobStore for IdbStore {
     /// The linear path: [`encode_from_outboard`] reads through the sparse view,
     /// so answering for one 64 `KiB` range of a gigabyte touches one record.
     async fn read_ranges(&self, file: &FileId, ranges: &ChunkRanges) -> Result<Vec<u8>> {
-        let root = self
-            .bind(file)
-            .await?
-            .context("this file is unbound: it was never hashed, or it changed since it was")?;
-
-        let held = self.present(root).await?;
-        let wanted = ranges.clone() & extent_of(file.size);
-        if !wanted.is_subset(&held) {
-            bail!("requested ranges are not all held");
-        }
-        let outboard = self
-            .outboard(root)
-            .await?
-            .context("bound to a root whose outboard is gone")?;
+        let (root, outboard, wanted) = crate::resolve_read(self, file, ranges).await?;
 
         let indices = SparseBlocks::blocks_covering(&wanted, file.size, CHUNK_GROUP_BYTES);
         let data = self.load_blocks(root, file.size, &indices).await?;
@@ -425,10 +391,10 @@ impl BlobStore for IdbStore {
         self.put_many(
             META,
             &[
-                (Self::obao_key(root), outboard),
+                (sidecar::obao_name(root), outboard),
                 (
-                    Self::ranges_key(root),
-                    crate::sidecar::format_ranges(&held).into_bytes(),
+                    sidecar::ranges_name(root),
+                    sidecar::format_ranges(&held).into_bytes(),
                 ),
             ],
         )

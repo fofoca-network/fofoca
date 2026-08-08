@@ -97,6 +97,18 @@ pub struct DataChannelCounters {
     pub messages_received: f64,
 }
 
+/// What crossed the selected ICE candidate pair, for the same reason
+/// [`DataChannelCounters`] is named: the byte counters share one type, so a
+/// swapped pair would compile silently.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct SelectedPairStats {
+    pub bytes_sent: f64,
+    pub bytes_received: f64,
+    /// `None` when the browser reports no round-trip time yet — distinct from a
+    /// real 0 ms, which should not render alike.
+    pub round_trip: Option<f64>,
+}
+
 #[derive(Debug)]
 struct SessionHandle {
     out_tx: mpsc::Sender<Vec<u8>>,
@@ -421,12 +433,7 @@ impl BrowserHubTransport {
     /// (`availableOutgoingBitrate` is media-bandwidth-estimation driven and is
     /// absent here), so differencing is the only route.
     ///
-    /// `rtt` is `None` when the pair has not been measured yet, rather than
-    /// zero — a real 0 ms and "not known" should not render alike.
-    pub async fn selected_pair_stats(
-        &self,
-        remote: &EndpointId,
-    ) -> Option<(f64, f64, Option<f64>)> {
+    pub async fn selected_pair_stats(&self, remote: &EndpointId) -> Option<SelectedPairStats> {
         let peer_connection = self
             .sessions
             .with_live(remote, |handle| handle.keepalive.peer_connection.clone())?;
@@ -436,11 +443,11 @@ impl BrowserHubTransport {
                 .ok()
                 .and_then(|value| value.as_f64())
         };
-        Some((
-            read("bytesSent").unwrap_or(0.0),
-            read("bytesReceived").unwrap_or(0.0),
-            read("currentRoundTripTime"),
-        ))
+        Some(SelectedPairStats {
+            bytes_sent: read("bytesSent").unwrap_or(0.0),
+            bytes_received: read("bytesReceived").unwrap_or(0.0),
+            round_trip: read("currentRoundTripTime"),
+        })
     }
 
     /// Bytes and messages this session's **data channel** has carried.

@@ -470,6 +470,16 @@ pub(crate) struct StateInit {
     pub secrets: MeshSecrets,
     /// The `meta` channel's per-peer write gate; `None` leaves it free-form.
     pub per_peer_gate: Option<crate::doc::SelfWriteGate>,
+    /// The negotiation-slot table the Router's signal acceptor was built with.
+    ///
+    /// Taken at construction rather than assigned afterwards, because the cap
+    /// only means anything if the dialing and answering sides count against the
+    /// *same* table. Defaulting it here and overwriting it later left a second
+    /// ceiling briefly existing and enforcing nothing.
+    pub(crate) webrtc_admission: crate::transport::SignalAdmission,
+    /// How far ICE may reach, derived from the mesh's own lookups so it cannot
+    /// disagree with them.
+    pub(crate) webrtc_ice: crate::transport::IceProfile,
 }
 
 impl EventLoopState {
@@ -484,6 +494,8 @@ impl EventLoopState {
             identity,
             secrets,
             per_peer_gate,
+            webrtc_admission,
+            webrtc_ice,
         } = init;
         let MeshSecrets {
             password: mesh_password,
@@ -526,12 +538,8 @@ impl EventLoopState {
             #[cfg(feature = "host")]
             multihop: None,
             webrtc: None,
-            // Replaced by the one the Router's acceptor shares, in `run`.
-            // Defaulted here so `fresh_state` and friends need no argument.
-            webrtc_admission: crate::transport::SignalAdmission::new(
-                crate::transport::MAX_DIRECT_PEERS,
-            ),
-            webrtc_ice: crate::transport::IceProfile::default(),
+            webrtc_admission,
+            webrtc_ice,
             #[cfg(feature = "host")]
             link_state_seq: 0,
             reclaim_until: None,

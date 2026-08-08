@@ -156,6 +156,10 @@ pub async fn run<A: NodeDriver>(
                 key: mesh_key,
             },
             per_peer_gate,
+            // The *same* table the Router's signal acceptor holds, not a fresh
+            // one: the cap only counts if both roles count against it together.
+            webrtc_admission,
+            webrtc_ice,
         },
         started,
     );
@@ -165,18 +169,11 @@ pub async fn run<A: NodeDriver>(
         state.multihop = multihop; // `--multihop`: the registered transport's handle
     }
     state.webrtc = Some(webrtc); // the direct-path transport the session manager fills
-    // The *same* table the Router's signal acceptor holds, not a fresh one:
-    // the cap only means anything if both roles count against it together.
-    state.webrtc_admission = webrtc_admission;
-    state.webrtc_ice = webrtc_ice;
-    wire_session_state(
-        &mut state,
-        &endpoint,
-        SessionWireParams {
-            live_count,
-            rendezvous_id: rendezvous_params.id,
-        },
-    );
+    state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone());
+    // Before the first write, so the initial advertisement carries a real count.
+    state.live_count = live_count;
+    state.rendezvous_id = Some(rendezvous_params.id);
+    state.write_peer_count();
 
     // An eager member co-hosts from t=0 so a beacon exists before any
     // joiner subscribes; everyone else defers to the heal gate
@@ -210,12 +207,10 @@ pub async fn run<A: NodeDriver>(
 
     #[cfg(feature = "host")]
     let ipc_rx = spawn_ipc_rx::<A::Ipc>(
-        &IpcBinding {
-            disabled: ipc_listener_disabled,
-            runtime_base: runtime_base.as_deref(),
-            mesh: &mesh_str,
-            author: &author,
-        },
+        ipc_listener_disabled,
+        runtime_base.as_deref(),
+        &mesh_str,
+        &author,
         &sink,
     );
     // A browser binds no control socket. The loop keeps its IPC `select!` arm —
@@ -316,27 +311,6 @@ pub async fn run<A: NodeDriver>(
         unicast_rx: Some(unicast_rx),
     }))
     .await
-}
-
-/// The 1-minute housekeeping arm: the memory warn + reassembly sweep, then
-/// ask authors to re-send what our stalled big shard groups are missing —
-/// Wire the just-built state to this session's endpoint + config: the real
-/// unicast pool (the default is detached), the advertise counter (set before
-/// the first write so the initial ad carries a real count), and the
-/// rendezvous id — then publish the initial count.
-fn wire_session_state(state: &mut EventLoopState, endpoint: &Endpoint, wiring: SessionWireParams) {
-    state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone());
-    state.live_count = wiring.live_count;
-    state.rendezvous_id = Some(wiring.rendezvous_id);
-    state.write_peer_count();
-}
-
-/// The per-session value cluster [`wire_session_state`] folds into a fresh
-/// [`EventLoopState`]: the shared advertise counter (if advertising) and the
-/// well-known rendezvous endpoint id.
-struct SessionWireParams {
-    live_count: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
-    rendezvous_id: EndpointId,
 }
 
 /// The alive tick: note the gap, then broadcast the keepalive presence.
@@ -659,12 +633,8 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
                 let (mono_gap, wall_gap) = timers::note_tick_gap("heal", &mut anchors.heal, &mut anchors.heal_wall, Duration::from_secs(heal_interval_secs()));
                 if state.gossip_open {
                     let ctx = parts.ctx(&sender);
-                    heal_tick(&mut state, &ctx, HealTickParams {
-                        gap: TickGap { mono: mono_gap, wall: wall_gap },
-                        params: &rendezvous_params,
-                        cohost,
-                        started,
-                    }, &mut rendezvous, &mut rival_probe).await;
+                    run_heal(TickGap { mono: mono_gap, wall: wall_gap }, &mut state, &ctx, &rendezvous_params).await;
+                    maybe_cohost(&mut state, &ctx, &CohostArm { policy: cohost, params: &rendezvous_params, started }, &mut rendezvous, &mut rival_probe).await;
                 } else {
                     // Stream ended: resubscribe instead of healing a dead topic
                     // (see `resubscribe_tick`); the beacon keeps the mesh joinable.
@@ -966,7 +936,7 @@ fn spawn_orphan_watch(quit_tx: mpsc::Sender<()>) {
 /// Whether the orphan watch is worth running. Skip it when the daemon already
 /// has no agent to lose — a parent pid of 1 means it was launched detached
 /// straight from init/launchd, so it must never self-terminate.
-#[cfg(unix)]
+#[cfg(all(unix, feature = "host"))]
 fn orphan_watch_warranted(original_ppid: i32) -> bool {
     original_ppid > 1
 }
@@ -976,7 +946,7 @@ fn orphan_watch_warranted(original_ppid: i32) -> bool {
 /// on both platforms — macOS reparents an orphan to launchd (1), but under
 /// systemd Linux reparents to a subreaper at some other pid. Pid reuse can't
 /// fool it: the reaper's pid won't coincidentally equal the original parent's.
-#[cfg(unix)]
+#[cfg(all(unix, feature = "host"))]
 fn parent_lost(original_ppid: i32, current_ppid: i32) -> bool {
     original_ppid != current_ppid
 }
@@ -989,34 +959,20 @@ fn never_quit() -> mpsc::Receiver<()> {
     quit_rx
 }
 
-/// Where [`spawn_ipc_rx`] would bind the control socket, and whether to at all.
-/// Grouped rather than passed loose: the three are only ever used together, to
-/// build one path.
-#[cfg(feature = "host")]
-#[derive(Clone, Copy)]
-struct IpcBinding<'a> {
-    /// In-process drivers (library API / MCP) use the typed `session_rx` and
-    /// bind no socket.
-    disabled: bool,
-    runtime_base: Option<&'a std::path::Path>,
-    mesh: &'a MeshId,
-    author: &'a Nickname,
-}
-
 /// Resolve the IPC receiver: reuse a pre-wired channel (MCP / library API) or,
 /// for the CLI, spawn the unix-socket listener and own the channel.
 /// Returning `Option` keeps the loop's `select!` arm uniform.
+///
+/// `disabled` is set by the in-process drivers (library API / MCP), which use
+/// the typed `session_rx` and bind no socket.
 #[cfg(feature = "host")]
 fn spawn_ipc_rx<C: serde::de::DeserializeOwned + Send + 'static>(
-    binding: &IpcBinding<'_>,
+    disabled: bool,
+    runtime_base: Option<&std::path::Path>,
+    mesh: &MeshId,
+    author: &Nickname,
     sink: &std::sync::Arc<dyn NodeSink>,
 ) -> Option<mpsc::Receiver<IpcMessage<C>>> {
-    let &IpcBinding {
-        disabled,
-        runtime_base,
-        mesh,
-        author,
-    } = binding;
     // In-process mode (in-process: library API or MCP): no socket. Returning `None` leaves
     // the loop's IPC `select!` arm inert (it pends forever), so the
     // unix-socket listener is never bound — those drivers use the typed
@@ -1239,35 +1195,6 @@ async fn run_heal(
 struct TickGap {
     mono: Duration,
     wall: Duration,
-}
-
-/// The value cluster [`heal_tick`] needs beyond the loop state and handler
-/// context: the tick's gap, the rendezvous params to heal/claim under, which
-/// co-host policy governs this session, and (for the unmeshed-joiner grace)
-/// when the event loop started.
-struct HealTickParams<'a> {
-    gap: TickGap,
-    params: &'a beacon::RendezvousParams,
-    cohost: CoHostPolicy,
-    started: Instant,
-}
-
-/// One heal tick: re-bootstrap/heal, then (re)claim the beacon if we
-/// should co-host. Grouped so the event-loop arm stays a one-liner.
-async fn heal_tick(
-    state: &mut EventLoopState,
-    ctx: &HandlerCtx<'_>,
-    tick: HealTickParams<'_>,
-    rendezvous: &mut Option<beacon::Rendezvous>,
-    probe: &mut Option<beacon::RivalProbe>,
-) {
-    run_heal(tick.gap, state, ctx, tick.params).await;
-    let arm = CohostArm {
-        policy: tick.cohost,
-        params: tick.params,
-        started: tick.started,
-    };
-    maybe_cohost(state, ctx, &arm, rendezvous, probe).await;
 }
 
 /// Per-timer gap anchors; the heal gap also drives the resume-edge hard

@@ -11,24 +11,11 @@ use crate::util::bounded_fifo_set::BoundedFifoSet;
 use crate::util::clock::Instant;
 use crate::util::tuning::HEAL_HARD_PROBE_SECS;
 
-/// Hard-heal body: re-resolve/re-path the seed-derived rendezvous via a
-/// detached connect-probe (only wanted for that resolution side effect;
-/// a cold path can take seconds, so it never runs on the sole event
-/// loop), then re-graft it. `join_peers` is a cheap enqueue.
-async fn heal(
-    endpoint: &Endpoint,
-    rendezvous_id: EndpointId,
-    sender: &MeshSender,
-    probe_secs: u64,
-) {
-    let endpoint = endpoint.clone();
-    n0_future::task::spawn(async move {
-        let _ =
-            crate::lookup::probe_connect(&endpoint, rendezvous_id, Duration::from_secs(probe_secs))
-                .await;
-    });
-    // A failing re-graft is the recovery path failing — it must be loud.
-    // The 11h roster-collapse soak ran 2,596 of these with zero log signal.
+/// Re-graft the rendezvous. `join_peers` is a cheap enqueue.
+///
+/// A failing re-graft is the recovery path failing — it must be loud. The 11h
+/// roster-collapse soak ran 2,596 of these with zero log signal.
+async fn regraft(rendezvous_id: EndpointId, sender: &MeshSender) {
     if let Err(error) = sender.join_peers(vec![rendezvous_id]).await {
         tracing::warn!(
             target: "fofoca::gossip",
@@ -59,13 +46,7 @@ pub(crate) async fn tick_heal(rendezvous_id: EndpointId, sender: &MeshSender) {
         target: "fofoca::gossip",
         "heal tick: re-graft the rendezvous"
     );
-    if let Err(error) = sender.join_peers(vec![rendezvous_id]).await {
-        tracing::warn!(
-            target: "fofoca::gossip",
-            %error,
-            "heal: rendezvous re-graft request failed"
-        );
-    }
+    regraft(rendezvous_id, sender).await;
 }
 
 /// Resume-edge re-bootstrap: [`tick_heal`] with a longer probe budget
@@ -78,7 +59,19 @@ pub(crate) async fn tick_heal_hard(
     rendezvous_id: EndpointId,
     sender: &MeshSender,
 ) {
-    heal(endpoint, rendezvous_id, sender, HEAL_HARD_PROBE_SECS).await;
+    // Re-resolve/re-path the rendezvous with a detached connect-probe, wanted
+    // only for that resolution side effect. Detached because a cold path can
+    // take seconds and this must never run on the sole event loop.
+    let endpoint = endpoint.clone();
+    n0_future::task::spawn(async move {
+        let _ = crate::lookup::probe_connect(
+            &endpoint,
+            rendezvous_id,
+            Duration::from_secs(HEAL_HARD_PROBE_SECS),
+        )
+        .await;
+    });
+    regraft(rendezvous_id, sender).await;
 }
 
 /// Rendezvous-independent re-bridge: re-graft every peer we've ever

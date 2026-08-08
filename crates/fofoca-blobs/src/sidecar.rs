@@ -14,7 +14,56 @@ use anyhow::{Result, bail};
 use bao_tree::{ChunkNum, ChunkRanges};
 use range_collections::range_set::RangeSetRange;
 
-use crate::Root;
+use crate::{FileId, Root};
+
+/// One row of the bind table: `key -> (size, mtime, root)`.
+pub(crate) type Bind = (String, u64, i64, Root);
+
+/// The bind table's name, identical in every backend that has one.
+pub(crate) const BINDS: &str = "binds.tsv";
+
+/// The outboard's name for `root`.
+pub(crate) fn obao_name(root: Root) -> String {
+    format!("{}.obao", hex(root))
+}
+
+/// The range set's name for `root`.
+pub(crate) fn ranges_name(root: Root) -> String {
+    format!("{}.ranges", hex(root))
+}
+
+/// The version gate, in the one place every backend reads it from.
+///
+/// A key that still exists but whose bytes moved is *unbound*, not
+/// stale-but-usable: serving it would answer with one file's content under
+/// another's name, which is the silent corruption this crate exists to prevent.
+#[must_use]
+pub(crate) fn gate(entry: Option<&(u64, i64, Root)>, file: &FileId) -> Option<Root> {
+    let &(size, mtime, root) = entry?;
+    (size == file.size && mtime == file.mtime).then_some(root)
+}
+
+/// [`gate`] against a bind table read back from storage.
+///
+/// Only the browser backends re-read the table per call; `FsStore` mirrors it
+/// in memory and gates the entry directly.
+#[cfg(target_arch = "wasm32")]
+#[must_use]
+pub(crate) fn bound_root(binds: &[Bind], file: &FileId) -> Option<Root> {
+    let entry = binds
+        .iter()
+        .find(|(key, ..)| key == &file.key)
+        .map(|&(_, size, mtime, root)| (size, mtime, root))?;
+    gate(Some(&entry), file)
+}
+
+/// Replace `file`'s binding, or add it. See [`bound_root`] on why this is
+/// browser-only.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn upsert(binds: &mut Vec<Bind>, file: &FileId, root: Root) {
+    binds.retain(|(key, ..)| key != &file.key);
+    binds.push((file.key.clone(), file.size, file.mtime, root));
+}
 
 /// Lowercase hex, as every sidecar filename is keyed.
 #[must_use]
@@ -77,7 +126,7 @@ pub(crate) fn parse_ranges(text: &str) -> ChunkRanges {
 }
 
 /// One binding per line: `key \t size \t mtime \t root`.
-pub(crate) fn format_binds(binds: &[(String, u64, i64, Root)]) -> Result<String> {
+pub(crate) fn format_binds(binds: &[Bind]) -> Result<String> {
     use std::fmt::Write as _;
     let mut out = String::new();
     for (key, size, mtime, root) in binds {
@@ -94,7 +143,7 @@ pub(crate) fn format_binds(binds: &[(String, u64, i64, Root)]) -> Result<String>
 
 /// Parse the bind table, skipping anything malformed — see [`parse_ranges`].
 #[must_use]
-pub(crate) fn parse_binds(text: &str) -> Vec<(String, u64, i64, Root)> {
+pub(crate) fn parse_binds(text: &str) -> Vec<Bind> {
     let mut binds = Vec::new();
     for line in text.lines() {
         let mut fields = line.split('\t');
@@ -116,8 +165,25 @@ pub(crate) fn parse_binds(text: &str) -> Vec<(String, u64, i64, Root)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_binds, format_ranges, hex, parse_binds, parse_hex, parse_ranges};
+    use super::{format_binds, format_ranges, gate, hex, parse_binds, parse_hex, parse_ranges};
+    use crate::FileId;
     use bao_tree::{ChunkNum, ChunkRanges};
+
+    /// The gate every backend reads through. A binding is for one *version*, so
+    /// a file whose size or mtime moved is unbound rather than stale-but-usable.
+    #[test]
+    fn a_binding_only_answers_for_the_version_it_was_made_for() {
+        let file = FileId {
+            key: "a.txt".to_owned(),
+            size: 10,
+            mtime: 20,
+        };
+        let root = [3u8; 32];
+        assert_eq!(gate(Some(&(10, 20, root)), &file), Some(root));
+        assert_eq!(gate(Some(&(11, 20, root)), &file), None, "size moved");
+        assert_eq!(gate(Some(&(10, 21, root)), &file), None, "mtime moved");
+        assert_eq!(gate(None, &file), None, "never bound");
+    }
 
     #[test]
     fn a_root_round_trips_through_hex() {

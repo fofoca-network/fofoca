@@ -151,8 +151,8 @@ mod web;
 pub use web::{
     AttachError, BrowserHubTransport, BrowserRtcTransport, BrowserSession, BrowserSessionGuard,
     DataChannelCounters, IceServer, IceServers, PendingAnswer as BrowserPendingAnswer,
-    PendingOffer as BrowserPendingOffer, SessionCounters, SessionCounts, answer as browser_answer,
-    log_signal_sdps, offer as browser_offer,
+    PendingOffer as BrowserPendingOffer, SelectedPairStats, SessionCounters, SessionCounts,
+    answer as browser_answer, log_signal_sdps, offer as browser_offer,
 };
 
 /// A registered `WebRTC` transport, ready to hand to an iroh endpoint builder.
