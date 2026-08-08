@@ -354,7 +354,11 @@ impl MeshDoc {
             return Ingested::Rejected;
         }
         let before = self.to_json();
-        self.apply(change, hash, frame.clone());
+        if !self.apply(change, hash, frame.clone()) {
+            // Refused by automerge, so nothing was recorded and nothing it
+            // could have unblocked has changed. `apply` has already said why.
+            return Ingested::Ignored;
+        }
         self.drain_pending();
         let after = self.to_json();
         Ingested::Applied {
@@ -363,12 +367,34 @@ impl MeshDoc {
         }
     }
 
-    fn apply(&mut self, change: Change, hash: ChangeHash, frame: Message) {
-        // apply_changes only fails on missing deps, which we checked, or a
-        // corrupt change, which decode already validated.
-        let _ = self.doc.apply_changes([change]);
+    /// Apply a change and record it, or record nothing.
+    ///
+    /// Returns whether the document took it. The two must not come apart: a
+    /// hash in `applied` that the document does not hold makes every descendant
+    /// pass `deps_satisfied`, so those land in automerge's own queue instead of
+    /// the document and are recorded as applied in turn. Anti-entropy cannot
+    /// repair it either — a re-served frame is answered `Duplicate` by the very
+    /// bookkeeping that is wrong.
+    ///
+    /// The refusal this actually sees is a repeated `(actor, seq)` carrying
+    /// different content, which automerge rejects before it looks at deps.
+    /// Missing deps are not an error there at all; they are queued. An earlier
+    /// comment here had both backwards and dropped the error on that basis.
+    /// Two processes sharing a signing key reach it without any malice, since
+    /// the actor id is derived from the key.
+    fn apply(&mut self, change: Change, hash: ChangeHash, frame: Message) -> bool {
+        if let Err(error) = self.doc.apply_changes([change]) {
+            tracing::warn!(
+                target: LOG_TARGET,
+                %error,
+                author = %frame.author,
+                "dropping a channel change automerge refused"
+            );
+            return false;
+        }
         self.applied.insert(hash);
         self.frames.insert(hash, frame);
+        true
     }
 
     fn deps_satisfied(&self, deps: &[ChangeHash]) -> bool {
@@ -833,6 +859,54 @@ mod tests {
         assert_eq!(
             doc.to_json(),
             json!({"peers": {"alice": {"model": "sonnet"}}})
+        );
+    }
+
+    /// **A change recorded as applied must actually be in the document.**
+    ///
+    /// Two docs seeded with the same actor mint different content under the
+    /// same `(actor, seq)`. automerge refuses the second with
+    /// `DuplicateSeqNumber`, but the error is dropped and the bookkeeping
+    /// commits anyway, so `applied` claims a hash the document does not have.
+    /// Nothing heals it: anti-entropy re-serves the frame and the dedup check
+    /// answers `Duplicate`.
+    #[test]
+    fn a_change_that_fails_to_apply_is_not_recorded_as_applied() {
+        let alice = nick("alice");
+        let seed = b"shared-actor";
+
+        let mut first_doc = MeshDoc::new_ungated();
+        let first = author_as(&mut first_doc, &alice, seed, &json!({"a": 1}));
+        let mut second_doc = MeshDoc::new_ungated();
+        let second = author_as(&mut second_doc, &alice, seed, &json!({"b": 2}));
+
+        let mut sink = MeshDoc::new_ungated();
+        assert!(matches!(sink.ingest(&first), Ingested::Applied { .. }));
+
+        let outcome = sink.ingest(&second);
+        if matches!(outcome, Ingested::Applied { .. }) {
+            assert_eq!(
+                sink.to_json().get("b"),
+                Some(&json!(2)),
+                "reported applied, but the document never got it: {outcome:?}"
+            );
+        }
+
+        // The damage compounds: recording the refused change as applied makes
+        // its descendant's deps look satisfied, so that one is handed to
+        // automerge, parked in its internal queue, and recorded as applied too.
+        // A descendant must buffer instead, waiting for a parent that never
+        // legitimately arrives.
+        let descendant = author_as(&mut second_doc, &alice, seed, &json!({"c": 3}));
+        let follow_up = sink.ingest(&descendant);
+        assert!(
+            !matches!(follow_up, Ingested::Applied { .. }),
+            "a descendant of a refused change must not report applied: {follow_up:?}"
+        );
+        assert_eq!(
+            sink.to_json().get("c"),
+            None,
+            "and its content must not appear"
         );
     }
 
