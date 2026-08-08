@@ -23,20 +23,11 @@ const PROVENANCE: &str = "iroh-multihop";
 pub(crate) struct MultihopLookup {
     self_id: EndpointId,
     topology: Arc<RwLock<Topology>>,
-    max_paths: usize,
 }
 
 impl MultihopLookup {
-    pub(crate) fn new(
-        self_id: EndpointId,
-        topology: Arc<RwLock<Topology>>,
-        max_paths: usize,
-    ) -> Self {
-        Self {
-            self_id,
-            topology,
-            max_paths,
-        }
+    pub(crate) fn new(self_id: EndpointId, topology: Arc<RwLock<Topology>>) -> Self {
+        Self { self_id, topology }
     }
 }
 
@@ -44,13 +35,18 @@ impl AddressLookup for MultihopLookup {
     fn publish(&self, _data: &EndpointData) {}
 
     fn resolve(&self, endpoint_id: EndpointId) -> Option<Boxed<Result<Item, Error>>> {
-        // Best (lowest-cost) disjoint route; the pool's alternates are for the
-        // send-path's own failover, not iroh's path set.
+        // One route: the pool's alternates are for the send path's own failover,
+        // not iroh's path set, and nothing here reads past the first.
+        //
+        // Asking for `max_paths` and then taking `[0]` cost a Dijkstra per
+        // discarded alternate on every dial. `max_paths` stays on the handle
+        // for the failover consumer that will want it; until one exists, the
+        // resolver pays for exactly what it uses.
         let route = self
             .topology
             .read()
             .expect("topology lock poisoned")
-            .route_to(self.self_id, endpoint_id, self.max_paths)
+            .route_to(self.self_id, endpoint_id, 1)
             .into_iter()
             .next()?;
         let info = EndpointInfo::from_parts(

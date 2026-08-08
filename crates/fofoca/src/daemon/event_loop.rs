@@ -692,7 +692,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
             // 0 when idle while `wakeups` stays equal to the column sum.
             Ok(()) = rung_rx.changed() => {
                 state.idle.external += 1;
-                apply_rung_change(&mut rendezvous_params, &endpoint, &mut rendezvous, &rung_rx);
+                apply_rung_change(&mut state, &mut rendezvous_params, &endpoint, &mut rendezvous, &rung_rx);
             }
             // The off-loop probe-before-claim answered. Its own arm rather
             // than a poll at the next heal tick: the probe already cost up to
@@ -1471,6 +1471,7 @@ async fn try_resubscribe(
 /// at it and drop the beacon so `maybe_cohost` rebuilds it homed on the
 /// new rung.
 fn apply_rung_change(
+    state: &mut EventLoopState,
     params: &mut beacon::RendezvousParams,
     endpoint: &Endpoint,
     rendezvous: &mut Option<beacon::Rendezvous>,
@@ -1498,6 +1499,13 @@ fn apply_rung_change(
         if let Some(old) = rendezvous.take() {
             old.shed();
         }
+        // A rehome starts a fresh arbitration epoch, so the re-check backoff
+        // starts over with it. Without this the next claim reads the round
+        // count the *previous* epoch reached and backs off as though it were
+        // still contending, which defeats `next_recheck_delay`'s round-0
+        // branch — the deterministic tie-break that exists precisely so two
+        // simultaneous claimants shed in a decidable order.
+        state.rival_recheck_rounds = 0;
     }
 }
 
@@ -1942,6 +1950,36 @@ mod tests {
         let backstop = Duration::from_secs(RIVAL_RECHECK_MESHED_SECS);
         let delay = next_recheck_delay(1, 20, id);
         assert!(delay >= backstop && delay <= backstop * 2);
+    }
+
+    /// A rehome is a fresh arbitration epoch, so the backoff restarts with it.
+    ///
+    /// Without the reset the next claim inherits whatever round the previous
+    /// epoch reached, and `next_recheck_delay`'s round-0 branch — the
+    /// deterministic tie-break two simultaneous claimants rely on to shed in a
+    /// decidable order — never runs again for the life of the process.
+    #[test]
+    fn a_rehome_restarts_the_rival_recheck_backoff() {
+        let id = iroh::SecretKey::from_bytes(&[7; 32]).public();
+
+        // Round 0 is the tie-break branch: bounded by the phase-offset span
+        // rather than by the geometric backoff.
+        let fresh = next_recheck_delay(0, 0, id);
+        let settled = next_recheck_delay(5, 0, id);
+        assert!(
+            fresh < settled,
+            "a fresh epoch must re-check sooner than a settled one: {fresh:?} vs {settled:?}"
+        );
+
+        // What `apply_rung_change` now does on a rehome.
+        let mut state = crate::testing::fresh_state();
+        state.rival_recheck_rounds = 5;
+        state.rival_recheck_rounds = 0;
+        assert_eq!(
+            next_recheck_delay(state.rival_recheck_rounds, 0, id),
+            fresh,
+            "after a rehome the next claim is scheduled off round 0"
+        );
     }
 
     #[test]

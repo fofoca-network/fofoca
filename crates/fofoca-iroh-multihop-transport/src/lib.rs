@@ -66,9 +66,6 @@ use crate::underlay::{ForwardAcceptor, Forwarder};
 /// [`CustomAddr`](iroh_base::CustomAddr) (see iroh's `TRANSPORTS.md` registry).
 pub const MULTIHOP_TRANSPORT_ID: u64 = 0x6d68; // "mh"
 
-/// Default number of node-disjoint routes the address lookup considers.
-const DEFAULT_MAX_PATHS: usize = 3;
-
 /// Terminal-delivery queue depth into the local transport's `poll_recv`.
 const INBOUND_CAP: usize = 256;
 
@@ -91,7 +88,6 @@ struct HandleInner {
     self_id: EndpointId,
     underlay: Endpoint,
     transport: Arc<MultihopTransport>,
-    max_paths: usize,
     // Kept alive so the underlay's `FORWARD_ALPN` accept loop keeps running.
     _router: iroh::protocol::Router,
 }
@@ -102,12 +98,6 @@ impl MultihopHandle {
     /// forwarder's accept loop). `app_id` is the application endpoint's id.
     #[must_use]
     pub fn new(app_id: EndpointId, underlay: Endpoint) -> Self {
-        Self::with_max_paths(app_id, underlay, DEFAULT_MAX_PATHS)
-    }
-
-    /// [`new`](Self::new) with an explicit disjoint-route ceiling.
-    #[must_use]
-    pub fn with_max_paths(app_id: EndpointId, underlay: Endpoint, max_paths: usize) -> Self {
         let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel(INBOUND_CAP);
         let forwarder = Arc::new(Forwarder::new(underlay.clone(), app_id, inbound_tx));
 
@@ -136,7 +126,6 @@ impl MultihopHandle {
                 self_id: app_id,
                 underlay,
                 transport,
-                max_paths,
                 _router: router,
             }),
         }
@@ -213,11 +202,7 @@ impl MultihopHandle {
     /// address, for `Builder::address_lookup`.
     #[must_use]
     pub fn address_lookup(&self) -> impl AddressLookup + use<> {
-        MultihopLookup::new(
-            self.inner.self_id,
-            Arc::clone(&self.inner.topology),
-            self.inner.max_paths,
-        )
+        MultihopLookup::new(self.inner.self_id, Arc::clone(&self.inner.topology))
     }
 
     /// The backup path selector (multihop loses to any direct/relay path), for
