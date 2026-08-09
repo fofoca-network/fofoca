@@ -778,6 +778,67 @@ mod tests {
         assert!(store.total_bytes <= REASSEMBLY_TOTAL_BUDGET_BYTES);
     }
 
+    /// The Sybil property, and the reason the budget is per author at all: a
+    /// flooder exhausts its own allowance and leaves everyone else's alone.
+    ///
+    /// `author_budget_evicts_the_stalest_group` above drives a single author,
+    /// so it pins *which* group goes without pinning *whose*. Named to match
+    /// `fofoca_doc`'s `a_floods_orphans_do_not_evict_another_authors`, which
+    /// states the same rule over the other store.
+    #[test]
+    fn a_floods_groups_do_not_evict_another_authors() {
+        let now = Instant::now();
+        let mut store = ReassemblyStore::default();
+        let chunk = "x".repeat(REASSEMBLY_GROUP_MAX_BYTES / 2 + 64);
+
+        // One honest partial transfer, parked.
+        let honest = group("00000000-0000-4000-8000-0000000000aa");
+        assert!(matches!(
+            ingest(
+                &mut store,
+                &shard_msg(
+                    &chunk,
+                    "honest",
+                    Shard {
+                        group: honest.clone(),
+                        idx: 0,
+                        total: 2,
+                    },
+                ),
+                now,
+            ),
+            ShardIngest::Buffered
+        ));
+
+        // A flooder then burns through its own allowance several times over.
+        for round in 0..8u32 {
+            let flood = group(&format!("00000000-0000-4000-8000-0000000000{round:02x}"));
+            let _ = ingest(
+                &mut store,
+                &shard_msg(
+                    &chunk,
+                    "flooder",
+                    Shard {
+                        group: flood,
+                        idx: 0,
+                        total: 2,
+                    },
+                ),
+                now,
+            );
+        }
+
+        let flooder_groups = store.groups.keys().filter(|key| key.0 == "flooder").count();
+        assert!(
+            flooder_groups < 8,
+            "the flood must actually breach its own budget, or this proves nothing"
+        );
+        assert!(
+            store.groups.keys().any(|key| key.1 == honest),
+            "the honest author's partial transfer survived the flood"
+        );
+    }
+
     #[test]
     fn stale_groups_are_swept_and_release_budget() {
         let start = Instant::now();

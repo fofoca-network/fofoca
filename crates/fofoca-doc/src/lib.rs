@@ -958,6 +958,58 @@ mod tests {
         assert!(total <= DOC_PENDING_TOTAL_MAX, "{total} orphans buffered");
     }
 
+    /// The global backstop **refuses the newcomer** rather than evicting across
+    /// authors — pubkeys are free, so the per-author ceiling alone is not a
+    /// bound, but evicting to make room for a Sybil would let one flush
+    /// everyone else out.
+    ///
+    /// `an_orphan_flood_from_one_author_stays_bounded` above only asserts the
+    /// total stays under the cap, which eviction would satisfy too. Named to
+    /// match `fofoca_protocol::reassembly`'s `global_budget_refuses_the_newcomer`,
+    /// which states the same rule over the other store.
+    #[test]
+    fn global_budget_refuses_the_newcomer() {
+        let mut sink = MeshDoc::new_ungated();
+
+        // One honest orphan parked first, from its own author.
+        let honest_nick = nick("honest");
+        let mut honest_source = MeshDoc::new_ungated();
+        let _honest_root = author(&mut honest_source, &honest_nick, &json!({"a": 1}));
+        let mut honest = author(&mut honest_source, &honest_nick, &json!({"b": 2}));
+        honest.pubkey = "11".repeat(32);
+        assert!(matches!(sink.ingest(&honest), Ingested::Buffered));
+
+        // Sybil authors, each staying under the per-author ceiling, until the
+        // global cap bites.
+        let mut refused = false;
+        for who in 0..DOC_PENDING_TOTAL_MAX {
+            let sybil = nick("sybil");
+            let mut source = MeshDoc::new_ungated();
+            let _sybil_root = author(&mut source, &sybil, &json!({"a": who}));
+            let mut orphan = author(&mut source, &sybil, &json!({"b": who}));
+            orphan.pubkey = format!("{who:064x}");
+            if matches!(sink.ingest(&orphan), Ingested::Ignored) {
+                refused = true;
+                break;
+            }
+        }
+
+        assert!(refused, "the global cap must eventually refuse a newcomer");
+        // `ingest` also returns `Ignored` for an undecodable change, so pin the
+        // reason: refusal happens exactly at the cap, never below it.
+        let (total, _) = sink.pending_stats();
+        assert_eq!(
+            total, DOC_PENDING_TOTAL_MAX,
+            "refused at {total} buffered, not at the {DOC_PENDING_TOTAL_MAX} cap"
+        );
+        assert!(
+            sink.pending
+                .values()
+                .any(|entry| entry.frame.pubkey == "11".repeat(32)),
+            "the honest orphan survived: the newcomer is refused, not an incumbent evicted"
+        );
+    }
+
     /// The per-author ceiling exists so a flood costs its author and nobody
     /// else. Evicting across authors would let one hostile stream flush a
     /// joiner's honest backfill out of the buffer.
