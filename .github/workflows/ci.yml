@@ -41,6 +41,14 @@ jobs:
       - name: Clippy (blob)
         run: cargo clippy -p fofoca --features blob --all-targets -- -D warnings
 
+      # A doc link that does not resolve is the same drift as a stale comment,
+      # and nothing else here would catch it: 25 had accumulated, including a
+      # method renamed out from under its own docs.
+      - name: Doc links
+        env:
+          RUSTDOCFLAGS: -D rustdoc::broken_intra_doc_links
+        run: cargo doc --workspace --no-deps --all-features
+
       - name: Check
         run: cargo check --workspace --all-targets
 

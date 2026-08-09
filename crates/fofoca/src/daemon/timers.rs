@@ -17,7 +17,7 @@ use crate::util::tuning;
 /// housekeeping tick (see `run`'s `intervals.prune`). Kept on this tick now
 /// that rate-limiter pruning — its original co-tenant — is gone.
 pub(crate) fn tick_prune(state: &mut EventLoopState, sink: &dyn NodeSink) {
-    warn_on_high_resident_memory(state, sink, tuning::resident_memory_warn_mb());
+    warn_on_high_resident_memory(state, sink, tuning::RESIDENT_MEMORY_WARN_MB);
     let evicted = state.reassembly.sweep_stale(Instant::now());
     if evicted > 0 {
         // A reaped group means a transfer stalled past the TTL — the body is

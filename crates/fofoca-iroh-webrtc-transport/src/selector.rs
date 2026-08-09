@@ -25,6 +25,7 @@
 //! demoted relay path is what lets a connection survive a dead data channel —
 //! so the relay stays open and unused rather than being torn down.
 
+use fofoca_iroh_transport_util::best_of;
 use iroh::endpoint::transports::{
     Addr, PathSelection, PathSelectionContext, PathSelectionData, PathSelector,
 };
@@ -79,26 +80,4 @@ fn tier_of(path: &PathSelectionData<'_>) -> Tier {
         Addr::Custom(addr) if addr.id() == WEBRTC_TRANSPORT_ID => Tier::WebRtc,
         Addr::Custom(_) => Tier::OtherCustom,
     }
-}
-
-/// Lowest-RTT path in `iter`; a path whose stats aren't readable yet (freshly
-/// added, not validated) still counts as a candidate so an unmeasured `WebRTC`
-/// path is never skipped in favour of the relay.
-fn best_of<'a>(
-    iter: impl Iterator<Item = &'a PathSelectionData<'a>>,
-) -> Option<&'a PathSelectionData<'a>> {
-    let mut best: Option<(&PathSelectionData<'_>, std::time::Duration)> = None;
-    let mut fallback: Option<&PathSelectionData<'_>> = None;
-    for path in iter {
-        if fallback.is_none() {
-            fallback = Some(path);
-        }
-        if let Some(stats) = path.stats() {
-            let rtt = stats.rtt;
-            if best.is_none_or(|(_, known)| rtt < known) {
-                best = Some((path, rtt));
-            }
-        }
-    }
-    best.map(|(path, _)| path).or(fallback)
 }

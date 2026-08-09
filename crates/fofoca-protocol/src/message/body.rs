@@ -3,10 +3,10 @@
 //! rejected. Empty is legal: presence and `PeerInfo` messages use it.
 
 use std::fmt;
-use std::str::FromStr;
 
-use serde::{Deserialize, Deserializer, Serialize};
+use crate::newtype::string_newtype;
 
+string_newtype!(
 /// A protocol message body — UTF-8 text. Newlines and tabs are allowed
 /// (multi-line snippets); other control characters are rejected. Empty
 /// is legal: presence and `PeerInfo` messages use it.
@@ -16,19 +16,13 @@ use serde::{Deserialize, Deserializer, Serialize};
 /// control characters (e.g. ANSI/terminal escapes) is rejected at
 /// `Message::parse` instead of being embedded byte-for-byte in the surfaced
 /// display string.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(transparent)]
-pub struct MessageBody(String);
-
-impl<'de> Deserialize<'de> for MessageBody {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let raw = String::deserialize(deserializer)?;
-        MessageBody::new(raw).map_err(serde::de::Error::custom)
-    }
-}
+    MessageBody,
+    error = BodyError,
+    deserialize,
+    from_str,
+    as_ref,
+    test_from,
+);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BodyError(String);
@@ -62,42 +56,11 @@ impl MessageBody {
         }
         Ok(Self(value))
     }
-
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Display for MessageBody {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl FromStr for MessageBody {
-    type Err = BodyError;
-    fn from_str(text: &str) -> Result<Self, Self::Err> {
-        Self::new(text)
-    }
-}
-
-impl AsRef<str> for MessageBody {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
 }
 
 impl AsRef<[u8]> for MessageBody {
     fn as_ref(&self) -> &[u8] {
         self.0.as_bytes()
-    }
-}
-
-#[cfg(any(test, feature = "test-fixtures"))]
-impl From<&str> for MessageBody {
-    fn from(text: &str) -> Self {
-        Self::new(text).expect("invalid message body in test fixture")
     }
 }
 

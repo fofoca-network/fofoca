@@ -5,9 +5,9 @@
 //! `EndpointId` (authenticates the *connection*) and the seed-derived
 //! rendezvous key (shared by every member — see [`super::crypto`]). This
 //! is the first **per-author** credential, and the root of
-//! [`docs/history-integrity.md`].
+//! `docs/history-integrity.md`.
 //!
-//! The public key is the durable identity; the [`Nickname`] is a display
+//! The public key is the durable identity; the [`crate::Nickname`] is a display
 //! label bound to it trust-on-first-use by the receiver.
 //!
 //! The key is currently **in-process / ephemeral** — minted once per

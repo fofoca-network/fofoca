@@ -372,15 +372,21 @@ impl BrowserHubTransport {
             });
         }
 
-        Ok(BrowserSessionGuard(reservation.fulfil(SessionHandle {
-            out_tx,
-            counters,
-            keepalive: SessionKeepalive {
-                peer_connection,
-                data_channel,
-                _callbacks: callbacks,
-            },
-        })))
+        // `None` means the reservation stopped being ours while negotiation
+        // ran. The handle drops here, closing the channel and the peer
+        // connection, rather than recording a session over a retired slot.
+        reservation
+            .fulfil(SessionHandle {
+                out_tx,
+                counters,
+                keepalive: SessionKeepalive {
+                    peer_connection,
+                    data_channel,
+                    _callbacks: callbacks,
+                },
+            })
+            .map(BrowserSessionGuard)
+            .ok_or(AttachError::AlreadyAttached(remote))
     }
 
     /// Whether a *usable* session for `remote` exists.
@@ -885,16 +891,13 @@ impl CustomSender for BrowserHubSender {
         let Ok(remote) = crate::parse_custom_addr(dst) else {
             return Poll::Ready(Err(io::Error::from(io::ErrorKind::NotConnected)));
         };
-        let chunk_size = transmit
-            .segment_size
-            .unwrap_or_else(|| transmit.contents.len().max(1));
         // Clone the sender out under the lock, then queue outside it.
         let Some((mut out_tx, counters)) = self.sessions.with_live(&remote, |handle| {
             (handle.out_tx.clone(), Arc::clone(&handle.counters))
         }) else {
             return Poll::Ready(Err(io::Error::from(io::ErrorKind::NotConnected)));
         };
-        for chunk in transmit.contents.chunks(chunk_size) {
+        for chunk in fofoca_iroh_transport_util::datagrams(transmit) {
             // Never `Pending`: that would stall iroh's shared send loop for
             // every transport. Drop and let QUIC retransmit — but *count* it,
             // because we are about to report success for a datagram nobody

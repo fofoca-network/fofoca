@@ -2,24 +2,26 @@
 //! outside the type until their checksum and complete payload have been
 //! validated.
 
-use std::borrow::Borrow;
 use std::fmt;
-use std::str::FromStr;
-
-use serde::{Deserialize, Deserializer, Serialize};
 
 use super::Mesh;
+use crate::newtype::string_newtype;
 
 const MIN_LEN: usize = 3;
 const MAX_LEN: usize = 512;
 
+string_newtype!(
 /// A mesh identifier — the encoded bare `Base58Check` string.
 ///
 /// Construction validates the length, Base58 charset, checksum, version, and
 /// complete payload. Consequently every `MeshId` can be decoded as a [`Mesh`].
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
-#[serde(transparent)]
-pub struct MeshId(String);
+    MeshId,
+    error = MeshIdError,
+    deserialize,
+    from_str,
+    as_ref,
+    borrow,
+);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MeshIdError {
@@ -72,24 +74,6 @@ impl MeshId {
             .map_err(|_| MeshIdError::InvalidHash)?;
         Ok(Self(value))
     }
-
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Display for MeshId {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.0)
-    }
-}
-
-impl FromStr for MeshId {
-    type Err = MeshIdError;
-    fn from_str(text: &str) -> Result<Self, Self::Err> {
-        Self::new(text)
-    }
 }
 
 impl TryFrom<String> for MeshId {
@@ -97,16 +81,6 @@ impl TryFrom<String> for MeshId {
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
         Self::new(value)
-    }
-}
-
-impl<'de> Deserialize<'de> for MeshId {
-    fn deserialize<DeserializerT>(deserializer: DeserializerT) -> Result<Self, DeserializerT::Error>
-    where
-        DeserializerT: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        Self::new(value).map_err(serde::de::Error::custom)
     }
 }
 
@@ -118,18 +92,6 @@ impl From<&str> for MeshId {
         }
         let mesh = Mesh::from_topic(label, super::MeshConfig::loopback());
         Self::new(mesh.to_string()).expect("generated test mesh id must be valid")
-    }
-}
-
-impl AsRef<str> for MeshId {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
-
-impl Borrow<str> for MeshId {
-    fn borrow(&self) -> &str {
-        &self.0
     }
 }
 

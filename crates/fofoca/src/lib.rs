@@ -39,7 +39,6 @@ pub(crate) mod lookup;
 // carry unconditionally — automerge, tracing-subscriber — and each depends only
 // on `fofoca-protocol`/`-util`, never back on this crate. Aliased so
 // engine code keeps its `crate::doc::…` paths. See docs/mesh-slimming.md.
-pub(crate) use fofoca_directory as directory;
 pub(crate) use fofoca_doc as doc;
 pub(crate) use fofoca_logging as logging;
 
@@ -54,10 +53,11 @@ pub mod protocol {
 /// Creator-minted invites. The redeem + decode primitives back
 /// `resolver::JoinTarget::Invite`; `mint` is re-exported for consumers
 /// through [`ops::invite`](crate::ops::invite).
+pub(crate) use fofoca_protocol::directory;
 pub(crate) use fofoca_protocol::invite;
 pub(crate) use fofoca_protocol::resolver;
 
-pub(crate) use fofoca_reassembly as reassembly;
+pub(crate) use fofoca_protocol::reassembly;
 
 pub(crate) mod transport;
 

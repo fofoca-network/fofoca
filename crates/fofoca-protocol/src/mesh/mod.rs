@@ -31,7 +31,7 @@ pub use lookup::{
     AdvertiseRequiresReachable, DEFAULT_DIRECTORY, DirectorySelection, LookupOpts, MeshConfig,
     RelayChoice, resolve_lookups, validate_advertise,
 };
-pub use lookup::{LookupSet, RelayLadder, RelayLadderError, RelaySelection};
+pub use lookup::{LookupSet, OptFlag, RelayLadder, RelayLadderError, RelaySelection};
 pub use name::{MeshName, NameError};
 
 /// Id format version. A single byte reserved so the encoding can evolve;
@@ -67,23 +67,54 @@ const NAME_MAX_BYTES: usize = super::ident::MAX_CHARS * 4;
 pub struct Mesh {
     pub name: MeshName,
     seed: [u8; SEED_LEN],
-    /// The Argon2id-stretched password key, once a password is applied.
-    /// Every derivation (topic, rendezvous, port ladder) switches onto it,
-    /// so holding the id without the password computes nothing reachable.
-    /// Never serialized — `encode_bytes` writes `seed`.
-    stretched_key: Option<[u8; SEED_LEN]>,
-    /// The invite-only derivation secret (the "root"), held only in memory:
-    /// baked into no hash, carried only by creator-minted invites. When set,
-    /// every derivation switches onto it (see [`Self::effective_seed`]), so the
-    /// bare invite-only hash reaches nothing. Set on the creator by
-    /// [`Self::set_invite`] and on a redeemer by [`Self::apply_invite`].
-    invite_key: Option<[u8; SEED_LEN]>,
-    /// The Ed25519 issuer **private** key of an invite-only mesh — the mint
-    /// authority, held only by the creator's live session (in-memory only, so a
-    /// restart ends minting). `None` on every non-creator. The matching public
-    /// key rides the hash (`config.issuer_pubkey`).
-    issuer_secret: Option<[u8; 32]>,
+    /// What every derivation actually keys on. Never serialized —
+    /// `encode_bytes` writes `seed`.
+    secret: MeshSecret,
     pub config: MeshConfig,
+}
+
+/// The mesh's derivation secret.
+///
+/// One enum rather than three `Option` fields, because at most one of them was
+/// ever meant to be set: an invite-only mesh's password wraps its tickets and
+/// never folds into the topic, so "invite root" and "stretched password key"
+/// are alternatives, not a pair. The old shape let a caller set both and left
+/// [`Mesh::effective_seed`] to pick, which is a precedence rule nothing stated.
+#[derive(Clone)]
+enum MeshSecret {
+    /// No password applied and no invite redeemed: derivations use the wire
+    /// seed.
+    Open,
+    /// The Argon2id-stretched password key. Every derivation (topic,
+    /// rendezvous, port ladder) switches onto it, so holding the id without
+    /// the password computes nothing reachable.
+    Password(Box<[u8; SEED_LEN]>),
+    /// The invite-only derivation secret, held only in memory: baked into no
+    /// hash, carried only by creator-minted invites, so the bare invite-only
+    /// hash reaches nothing.
+    Invite {
+        root: Box<[u8; SEED_LEN]>,
+        /// The Ed25519 issuer **private** key — the mint authority, held only
+        /// by the creator's live session, so a restart ends minting. `None` on
+        /// a redeemer, which can join but never mint.
+        issuer: Option<Box<[u8; 32]>>,
+    },
+}
+
+impl fmt::Debug for MeshSecret {
+    // Redact every variant's payload: the invite root and the issuer secret
+    // gate an invite-only mesh, and the stretched key is the password.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Open => formatter.write_str("Open"),
+            Self::Password(_) => formatter.write_str("Password(***)"),
+            Self::Invite { issuer, .. } => write!(
+                formatter,
+                "Invite {{ root: ***, issuer: {} }}",
+                if issuer.is_some() { "***" } else { "None" }
+            ),
+        }
+    }
 }
 
 impl fmt::Debug for Mesh {
@@ -95,9 +126,7 @@ impl fmt::Debug for Mesh {
             .debug_struct("Mesh")
             .field("name", &self.name)
             .field("seed", &"***")
-            .field("stretched_key", &self.stretched_key.map(|_| "***"))
-            .field("invite_key", &self.invite_key.map(|_| "***"))
-            .field("issuer_secret", &self.issuer_secret.map(|_| "***"))
+            .field("secret", &self.secret)
             .field("config", &self.config)
             .finish()
     }
@@ -109,9 +138,7 @@ impl Mesh {
         Mesh {
             name,
             seed,
-            stretched_key: None,
-            invite_key: None,
-            issuer_secret: None,
+            secret: MeshSecret::Open,
             config,
         }
     }
@@ -129,9 +156,7 @@ impl Mesh {
         Mesh {
             name,
             seed,
-            stretched_key: None,
-            invite_key: None,
-            issuer_secret: None,
+            secret: MeshSecret::Open,
             config,
         }
     }
@@ -152,20 +177,25 @@ impl Mesh {
     /// the id: an invite-only mesh's password, if any, only wraps its invite
     /// tickets — it never folds into the topic here.)
     fn effective_seed(&self) -> &[u8; SEED_LEN] {
-        if self.requires_invite() {
-            return self
-                .invite_key
-                .as_ref()
-                .expect("invite-only mesh derived before an invite was applied");
+        match &self.secret {
+            MeshSecret::Invite { root, .. } => root,
+            MeshSecret::Password(key) => key,
+            // The id declares what the mesh needs; the secret is supplied
+            // afterwards. Deriving from the raw seed while one is still
+            // outstanding lands silently in a topic no peer shares, which is
+            // strictly worse than failing here.
+            MeshSecret::Open => {
+                assert!(
+                    !self.requires_invite(),
+                    "invite-only mesh derived before an invite was applied"
+                );
+                assert!(
+                    self.config.password.is_none(),
+                    "passworded mesh derived before the password was applied"
+                );
+                &self.seed
+            }
         }
-        if let Some(key) = &self.stretched_key {
-            return key;
-        }
-        assert!(
-            self.config.password.is_none(),
-            "passworded mesh derived before the password was applied"
-        );
-        &self.seed
     }
 
     /// Whether the id carries a password verifier (joiners must present
@@ -181,7 +211,10 @@ impl Mesh {
     /// same value every derivation switches onto ([`Self::effective_seed`]).
     #[must_use]
     pub fn stretched_key(&self) -> Option<[u8; SEED_LEN]> {
-        self.stretched_key
+        match &self.secret {
+            MeshSecret::Password(key) => Some(**key),
+            MeshSecret::Open | MeshSecret::Invite { .. } => None,
+        }
     }
 
     /// Join-side: stretch `password` (salt = the wire seed), check it
@@ -199,7 +232,7 @@ impl Mesh {
         if crypto::password_verifier(&key) != *expected {
             bail!("wrong password");
         }
-        self.stretched_key = Some(key);
+        self.secret = MeshSecret::Password(Box::new(key));
         Ok(())
     }
 
@@ -209,7 +242,7 @@ impl Mesh {
     pub fn set_password(&mut self, password: &crypto::Password) {
         let key = crypto::stretch_mesh_password(password, &self.seed);
         self.config.password = Some(crypto::password_verifier(&key));
-        self.stretched_key = Some(key);
+        self.secret = MeshSecret::Password(Box::new(key));
     }
 
     /// Whether this mesh is invite-only (the id carries an issuer pubkey, so
@@ -231,20 +264,28 @@ impl Mesh {
         rand::rng().fill_bytes(&mut issuer);
         let issuer_pubkey = SecretKey::from_bytes(&issuer).public();
         self.config.issuer_pubkey = Some(*issuer_pubkey.as_bytes());
-        self.invite_key = Some(root);
-        self.issuer_secret = Some(issuer);
+        self.secret = MeshSecret::Invite {
+            root: Box::new(root),
+            issuer: Some(Box::new(issuer)),
+        };
     }
 
     /// Redeem-side: switch every derivation onto the invite `root` carried by a
     /// verified invite ticket. The redeemer holds no issuer secret, so it can
     /// join but never mint.
     pub(crate) fn apply_invite(&mut self, root: [u8; SEED_LEN]) {
-        self.invite_key = Some(root);
+        self.secret = MeshSecret::Invite {
+            root: Box::new(root),
+            issuer: None,
+        };
     }
 
     /// The issuer private key, for signing a minted invite (creator only).
     pub(crate) fn issuer_secret(&self) -> Option<&[u8; 32]> {
-        self.issuer_secret.as_ref()
+        match &self.secret {
+            MeshSecret::Invite { issuer, .. } => issuer.as_deref(),
+            MeshSecret::Open | MeshSecret::Password(_) => None,
+        }
     }
 
     /// The issuer public key the id carries — a redeemer verifies each invite's
@@ -255,7 +296,10 @@ impl Mesh {
 
     /// The invite root secret to embed in a minted invite (creator only).
     pub(crate) fn invite_key(&self) -> Option<&[u8; SEED_LEN]> {
-        self.invite_key.as_ref()
+        match &self.secret {
+            MeshSecret::Invite { root, .. } => Some(root),
+            MeshSecret::Open | MeshSecret::Password(_) => None,
+        }
     }
 
     /// The public identity salt (the wire seed) an invite ticket wraps its root
@@ -374,9 +418,7 @@ impl Mesh {
         Ok(Mesh {
             name,
             seed,
-            stretched_key: None,
-            invite_key: None,
-            issuer_secret: None,
+            secret: MeshSecret::Open,
             config,
         })
     }

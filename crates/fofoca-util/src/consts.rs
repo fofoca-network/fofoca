@@ -1,7 +1,15 @@
-//! The single home for constants we may want to tune in the future:
-//! runtime paths plus the network-wide wire constants. The few names the
-//! external test/bench crates assert against are re-exported from the crate
-//! root (see `lib.rs`); the rest stay crate-internal.
+//! The wire contracts: values every member of a mesh must agree on
+//! bit-for-bit, plus the local caps derived from them.
+//!
+//! **The split with [`crate::tuning`] is by who may change a value.** Nothing
+//! here is tunable — changing one changes what this build can interoperate
+//! with, so it changes for everyone or for no one. A knob that only affects
+//! this process's timing, capacity or policy belongs in `tuning` instead,
+//! next to the accessor that reads it.
+//!
+//! The rule used to be invisible: a constant lived here if it happened to have
+//! a hidden CLI flag, and its doc was restated on the accessor in `tuning` that
+//! read it. The two copies had already drifted.
 
 // The runtime base for per-mesh files is per-user and computed at runtime —
 // see [`crate::runtime_base`] / [`crate::ensure_runtime_base`].
@@ -21,15 +29,6 @@
 /// A finite window by default so a forgotten invite stops admitting; the
 /// creator can override, and `--ttl none`/`0` mints a no-expiry invite.
 pub const INVITE_DEFAULT_TTL_SECS: u64 = 24 * 60 * 60;
-
-/// Max bytes a per-member log file grows before rotating to `<file>.1`
-/// (active + one backup ⇒ bounded at `2 ×` this). The `--log-max-bytes` flag
-/// overrides; `0` disables rotation. Resolved by
-/// [`crate::logs::log_max_bytes`].
-///
-/// `host`-only with the file sink: a browser has no log file to rotate.
-#[cfg(feature = "host")]
-pub const LOG_FILE_MAX_BYTES: u64 = 10 * 1024 * 1024; // 10 MiB
 
 /// Maximum size in bytes of a serialized mesh message. A network-wide
 /// wire contract (must be uniform across members), so it lives here.
@@ -110,7 +109,7 @@ pub const REASSEMBLY_STALE_SECS: u64 = 300;
 /// bound and states the limit in the unit the attack is measured in.
 ///
 /// Generous against honest backfill: a holder answers one anti-entropy digest
-/// with at most [`ANTIENTROPY_MAX_RESEND`] frames, and those are spread across
+/// with at most [`crate::tuning::ANTIENTROPY_MAX_RESEND`] frames, and those are spread across
 /// whichever authors wrote them.
 pub const DOC_PENDING_AUTHOR_MAX: usize = 128;
 
@@ -172,15 +171,6 @@ pub const MAX_BLOB_BYTES: u64 = 2 * 1024 * 1024 * 1024; // 2 GiB
 #[cfg(feature = "host")]
 pub const MAX_BLOB_STORE_BYTES: u64 = 4 * 1024 * 1024 * 1024; // 4 GiB
 
-/// Default number of recent messages each member retains in its in-memory
-/// log (anti-entropy recovery source + poll/fetch history). A fixed value
-/// (see `tuning::message_log_size`); edit + commit here to change it. A
-/// bigger log lets a reconnecting peer recover a
-/// longer gap. Not coupled to the consumer's own IPC response cap, which is a
-/// separate fixed window (the log can exceed it; a read then surfaces the
-/// most-recent window and anti-entropy carries the rest).
-pub const DEFAULT_MESSAGE_LOG_SIZE: usize = 1000;
-
 /// Capacity of the unicast inbound channel — frames the `UNICAST_ALPN` acceptor
 /// forwards to the event loop for `gossip::ingest`. Bounded so a peer flooding a
 /// unicast stream can't back-pressure the loop; over the cap a frame is dropped
@@ -235,150 +225,11 @@ pub const PASSWORD_KDF_P_COST: u32 = 1;
 // subprocess test suite passes to run with short timings; production reads the
 // const. See `fofoca::util::tuning`.
 
-/// How long a peer can go unheard before the sweeper evicts it. Must exceed
-/// the alive-keepalive interval comfortably (3× absorbs one or two lost
-/// rounds). Flag: `--alive-timeout-secs` (tests shorten it to seconds).
-pub const ALIVE_TIMEOUT_SECS: u64 = 90;
-
-/// How often the sweeper walks `last_seen` looking for expired peers.
-/// Flag: `--sweep-interval-secs`.
-pub const SWEEP_INTERVAL_SECS: u64 = 10;
-
-/// Grace before an unmeshed joiner co-hosts the rendezvous anyway (empty
-/// mesh ⇒ become the beacon for the next joiner). Flag:
-/// `--beacon-cohost-grace-secs`.
-pub const BEACON_COHOST_GRACE_SECS: u64 = 10;
-
 // A public `EagerProbed` beacon holder (topic joiner, directory advertiser)
 // periodically *sheds* its beacon and re-runs probe-before-claim, because two
 // members that claimed inside each other's probe window both hold the same
 // `rendezvous_id` and each captures its own bootstrap dial — a split that
 // nothing else repairs (see `daemon::event_loop::shed_rival_beacon_if_due`).
-
-/// First shed after a probed public claim. Early, because the likeliest rival
-/// is a peer that started within seconds of us — but past the claim's own
-/// probe + relay-home warmup, so a genuinely lone holder isn't churned while
-/// still settling. Flag: `--rival-recheck-first-secs`.
-pub const RIVAL_RECHECK_FIRST_SECS: u64 = 12;
-
-/// Steady shed cadence while the holder has no real-peer links. A lone
-/// holder's shed disturbs nobody, so it re-checks briskly — this cadence
-/// bounds how long two mutually-invisible lone holders stay split. Flag:
-/// `--rival-recheck-secs`.
-pub const RIVAL_RECHECK_SECS: u64 = 30;
-
-/// Steady shed cadence while meshed — the island-vs-island backstop. Slow,
-/// because a healthy gossip pays the shed's ~probe-budget beacon blip each
-/// cycle and a meshed split (two multi-member islands) is already rare.
-/// Flag: `--rival-recheck-meshed-secs`.
-pub const RIVAL_RECHECK_MESHED_SECS: u64 = 300;
-
-/// Roster size (known live members) at or below which a *meshed* holder uses
-/// the brisk lone cadence ([`RIVAL_RECHECK_SECS`]) instead of the slow
-/// [`RIVAL_RECHECK_MESHED_SECS`] backstop.
-///
-/// The slow cadence is priced for the case it was written for: two
-/// **multi-member** islands, where a shed's beacon blip costs a healthy gossip
-/// something and the split is rare. A two-tab mesh left behind by a departed
-/// origin is neither — the split is the routine outcome of that departure, and
-/// a shed there disturbs almost nobody. So the tier is chosen by how much a
-/// shed actually costs, which is roster size, not by the meshed flag alone.
-///
-/// A pure const with no flag, like [`RIVAL_RECHECK_OFFSET_SPAN_SECS`]: it
-/// picks between two cadences that already have their own knobs.
-pub const RIVAL_RECHECK_SMALL_ROSTER: usize = 4;
-
-/// Span of the deterministic per-node phase offset added to the first shed,
-/// derived from the peer endpoint id. Orders simultaneous claimants so
-/// the earlier-offset node sheds first, finds the other's still-held beacon,
-/// and yields — a tie-break, not a delay knob, so no flag.
-pub const RIVAL_RECHECK_OFFSET_SPAN_SECS: u64 = 8;
-
-/// How long a ping round collects pongs before the daemon emits its
-/// `ping_report`. Flag: `--ping-window-secs`.
-pub const PING_WINDOW_SECS: u64 = 10;
-
-/// Cadence of the unconditional gossip healer (`gossip::heal::tick_heal`).
-/// 15s balances fast re-mesh after a partition against steady-state cost —
-/// one `HyParView` control message per tick when already healthy; shorter
-/// cadences empirically destabilise convergence in production meshes. Flag:
-/// `--heal-interval-secs` (tests shorten it to collapse the multi-cycle
-/// rendezvous-handoff floor; production always runs the default).
-pub const HEAL_INTERVAL_SECS: u64 = 15;
-
-/// A heal inter-tick gap above this (seconds) means the process was frozen
-/// between ticks (App Nap / sleep) and must hard re-bootstrap. Safely above
-/// the default heal interval so normal slack never trips it; a test that
-/// shortens one must keep this comfortably above `--heal-interval-secs`.
-/// Flag: `--heal-stall-threshold-secs`.
-pub const HEAL_STALL_THRESHOLD_SECS: u64 = 60;
-
-/// No verified inbound gossip for this long (seconds), while real peers are
-/// known, trips the starvation watchdog (re-bridge + re-announce). 2× the
-/// alive timeout: by then the sweeper has evicted the whole roster, and an
-/// idle-but-healthy mesh stays far inside it (keepalives every 30s).
-/// Deliberately its own knob, NOT derived from `--alive-timeout-secs` — the
-/// short-evict test profile must not arm the watchdog in unrelated tests.
-/// Flag: `--starvation-threshold-secs`.
-pub const STARVATION_THRESHOLD_SECS: u64 = 2 * ALIVE_TIMEOUT_SECS;
-
-/// How often an advertising `create` re-broadcasts its mesh id into the
-/// directory. Flag: `--advertise-interval-secs`.
-pub const ADVERTISE_INTERVAL_SECS: u64 = 20;
-
-/// How long a discoverer keeps showing a mesh after its last ad (~3×
-/// `ADVERTISE_INTERVAL_SECS`). Flag: `--directory-expiry-secs`.
-pub const DIRECTORY_EXPIRY_SECS: u64 = 60;
-
-/// How often a member broadcasts its anti-entropy digest (recent message
-/// ids it holds) so peers re-send anything it missed while
-/// partitioned/asleep. Flag: `--antientropy-interval-secs` (tests
-/// reconcile backfill gaps in seconds).
-pub const ANTIENTROPY_INTERVAL_SECS: u64 = 10;
-
-/// Max messages re-broadcast in response to one received digest, so a
-/// far-behind peer can't trigger an unbounded backfill burst. Flag:
-/// `--antientropy-max-resend`.
-pub const ANTIENTROPY_MAX_RESEND: usize = 64;
-
-/// How often one peer's digest may be *served*.
-///
-/// Answering a digest costs up to [`ANTIENTROPY_MAX_RESEND`] mesh-wide
-/// broadcasts, and the budget was per digest with nothing per peer, so one
-/// small crafted frame bought that from every member at once. Comfortably under
-/// [`ANTIENTROPY_INTERVAL_SECS`], so the honest cadence is never refused.
-pub const ANTIENTROPY_SERVE_COOLDOWN_SECS: u64 = 5;
-
-/// How often the CLI daemon checks whether its spawning agent is still alive
-/// by re-reading its parent pid. When the parent dies (hard-kill / reinstall),
-/// the daemon is orphaned and reparents away; on the next check it self-quits
-/// through the normal `left`-broadcasting shutdown so it never lingers in the
-/// mesh. Sub-second precision isn't needed — a second or two of orphan
-/// lifetime is fine. Flag: `--ppid-watch-interval-ms` (tests shorten it).
-pub const PPID_WATCH_INTERVAL_MS: u64 = 1500;
-
-/// Soft resident-memory threshold (`MiB`) above which the daemon emits a
-/// one-shot `warn` on its slow prune tick — the in-process leak-visibility
-/// signal. (Resident memory = the physical RAM the process holds; the resident
-/// set size, RSS.) Warn-only; `0` disables. A pure const (no flag): an operator
-/// tunes it by editing here.
-pub const RESIDENT_MEMORY_WARN_MB: u64 = 1024;
-
-/// `HyParView` **active view** capacity — the number of direct gossip neighbors
-/// (open QUIC links) each member maintains per topic. A mesh at or below this
-/// size forms a **full mesh** with nothing to shuffle, so it has **zero
-/// membership churn** (and thus none of the per-connection-churn memory leak);
-/// past it the overlay maintains a partial mesh and continuously
-/// promotes/demotes peers (the churn). Raised from iroh-gossip's default of 5
-/// to **64** so realistic agent meshes (≤ 65) stay churn-free. The ceiling is
-/// performance, not correctness: each slot is a live connection + keepalive
-/// (~0.5 MB resident per link) and a full mesh costs O(S²) broadcast
-/// amplification, so a fully-meshed node runs ~50 MB — 64 deliberately trades
-/// that heavier per-node cost for a larger churn-free mesh. This is the default
-/// for the public `--max-peers` cap; the passive (healing/shuffle) pool is
-/// derived as 2× the live view. Set `--max-peers` *small* to deliberately
-/// reproduce the gossip-churn leak at any node count.
-pub const GOSSIP_ACTIVE_VIEW_CAPACITY: usize = 64;
 
 // QUIC keep-alive / idle timeout are intentionally left at iroh's
 // holepunch-tuned transport defaults (~1s keep-alive, 15s direct / 30s relay

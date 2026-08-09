@@ -45,6 +45,7 @@ native = [
     "dep:rand",
     "dep:bytes",
     "dep:iroh",
+    "dep:fofoca-iroh-transport-util",
     "dep:noq-udp",
     "dep:n0-watcher",
 ]
@@ -56,6 +57,7 @@ web = [
     "dep:web-sys",
     "dep:futures",
     "dep:iroh",
+    "dep:fofoca-iroh-transport-util",
     "dep:noq-udp",
     "dep:n0-watcher",
 ]
@@ -76,6 +78,7 @@ tracing.workspace = true
 # `unstable-custom-transports` gates the CustomTransport/CustomEndpoint/
 # CustomSender traits both backends implement; the workspace entry turns it on.
 iroh = { workspace = true, optional = true }
+fofoca-iroh-transport-util = { path = "../fofoca-iroh-transport-util", optional = true }
 # `RecvMeta` appears in the `CustomEndpoint::poll_recv` signature.
 noq-udp = { workspace = true, optional = true }
 n0-watcher = { workspace = true, optional = true }

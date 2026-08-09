@@ -325,28 +325,38 @@ impl MeshConfig {
     }
 }
 
-/// Relay intent in a [`LookupSet`]: absent / default / custom. Resolved
-/// into a `RelayChoice` by `resolve_lookups`. `Custom` carries the
-/// ordered [`RelayLadder`] (iroh-free), so this enum is part of the public
-/// library API surface.
+/// A three-state optional-value CLI flag: absent, passed bare, or passed with
+/// a value.
+///
+/// One type for what were two identical enums — relay intent and directory
+/// intent — each with the same three variants and the same private `is_set`.
+/// The duplicate admitted it in a doc comment.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub enum RelaySelection {
-    /// No relay (the CLI `--relay` flag absent).
+pub enum OptFlag<T> {
+    /// The flag was absent.
     #[default]
     Unset,
-    /// The pinned default n0 prod relay ladder (bare `--relay`).
+    /// The flag was passed bare, selecting the well-known default.
     Default,
-    /// A custom ordered ladder (`--relay a,b,c`).
-    Custom(RelayLadder),
+    /// The flag was passed with a value.
+    Named(T),
 }
 
-impl RelaySelection {
-    fn is_set(&self) -> bool {
-        !matches!(self, RelaySelection::Unset)
+impl<T> OptFlag<T> {
+    /// Whether the flag was given at all, bare or valued.
+    #[must_use]
+    pub fn is_set(&self) -> bool {
+        !matches!(self, Self::Unset)
     }
 }
 
-impl FromStr for RelaySelection {
+/// Relay intent in a [`LookupSet`]: absent / default / custom ladder.
+/// Resolved into a `RelayChoice` by `resolve_lookups`. [`OptFlag::Named`]
+/// carries the ordered [`RelayLadder`] (iroh-free), so this is part of the
+/// public library API surface.
+pub type RelaySelection = OptFlag<RelayLadder>;
+
+impl FromStr for OptFlag<RelayLadder> {
     type Err = RelayLadderError;
 
     /// Parse a `--relay` optional-value flag. The bare form resolves via the
@@ -358,30 +368,22 @@ impl FromStr for RelaySelection {
         if text == "default" {
             Ok(RelaySelection::Default)
         } else {
-            text.parse::<RelayLadder>().map(RelaySelection::Custom)
+            text.parse::<RelayLadder>().map(RelaySelection::Named)
         }
     }
 }
 
-/// CLI `--advertise` intent: absent / bare / valued — the same
-/// three-state optional-value shape as [`RelaySelection`]. `Unset` ⇒
-/// the mesh is not listed in any directory; `Default` ⇒ the well-known
-/// `global` directory; `Named` ⇒ a custom directory. The directory name is itself a
-/// [`MeshName`] (same charset), since the directory derives its
-/// mesh from it.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub enum DirectorySelection {
-    #[default]
-    Unset,
-    Default,
-    Named(MeshName),
-}
+/// CLI `--advertise` intent. `Unset` ⇒ the mesh is not listed in any
+/// directory; `Default` ⇒ the well-known `global` directory; `Named` ⇒ a
+/// custom one. The directory name is itself a [`MeshName`] (same charset),
+/// since the directory derives its mesh from it.
+pub type DirectorySelection = OptFlag<MeshName>;
 
 /// The well-known default directory — used when `--advertise` is passed
 /// bare (no value).
 pub const DEFAULT_DIRECTORY: &str = "global";
 
-impl DirectorySelection {
+impl OptFlag<MeshName> {
     /// Resolve a clap three-state `--advertise` optional-value flag
     /// (absent / bare / valued) — the one converter shared by every
     /// command that advertises (`create`, `pipe listen`, `file send`,
@@ -398,11 +400,6 @@ impl DirectorySelection {
             None => DirectorySelection::Unset,
             Some(directory) => DirectorySelection::Named(directory),
         }
-    }
-
-    /// `true` when advertising is requested at all (bare or valued).
-    pub(crate) fn is_set(&self) -> bool {
-        !matches!(self, DirectorySelection::Unset)
     }
 
     /// The directory to advertise into, or `None` when not advertising.
@@ -483,7 +480,7 @@ pub fn resolve_lookups(public: bool, lookups: LookupSet) -> LookupOpts {
         let relay = match lookups.relay {
             RelaySelection::Unset => RelayChoice::Disabled,
             RelaySelection::Default => RelayChoice::Pinned,
-            RelaySelection::Custom(ladder) => RelayChoice::Custom(ladder.as_urls().to_vec()),
+            RelaySelection::Named(ladder) => RelayChoice::Custom(ladder.as_urls().to_vec()),
         };
         LookupOpts {
             mdns: lookups.mdns,
@@ -624,7 +621,7 @@ mod lookup_tests {
         // Granular model: naming any lookup uses only those, regardless of
         // `public`. A relay alone yields a reachable (non-loopback) mesh.
         let ladder: RelayLadder = "https://a.example".parse().unwrap();
-        let opts = resolve_lookups(false, lookups(false, false, RelaySelection::Custom(ladder)));
+        let opts = resolve_lookups(false, lookups(false, false, RelaySelection::Named(ladder)));
         assert!(!opts.mdns && !opts.dht);
         assert!(
             !opts.is_loopback(),
@@ -672,7 +669,7 @@ mod lookup_tests {
         let rung0: iroh_base::RelayUrl = "https://a.example".parse().unwrap();
         let rung1: iroh_base::RelayUrl = "https://b.example".parse().unwrap();
         let ladder: RelayLadder = "https://a.example,https://b.example".parse().unwrap();
-        let opts = resolve_lookups(false, lookups(false, false, RelaySelection::Custom(ladder)));
+        let opts = resolve_lookups(false, lookups(false, false, RelaySelection::Named(ladder)));
         assert_eq!(opts.relay, RelayChoice::Custom(vec![rung0, rung1]));
     }
 

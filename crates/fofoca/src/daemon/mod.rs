@@ -42,7 +42,13 @@ pub(crate) mod state;
 pub(crate) mod state_file;
 pub(crate) mod timers;
 
+/// Beacon policy: the co-host decision, split out of `event_loop`.
+mod beacon_arm;
 pub(crate) mod event_loop;
+/// Mesh healing and resubscribe, split out of `event_loop`.
+mod heal;
+/// The graceful-exit path, split out of `event_loop`.
+mod shutdown;
 
 // Crate-internal shorthands. The public spelling of all of these is
 // `crate::runtime`, which is what a consumer imports.

@@ -12,10 +12,10 @@
 //! (`reassembly::ShardCache`) and a stalled receiver asks for the
 //! missing indexes over the `shard/repair` gossip RPC.
 
-use std::fmt;
-
 use serde::{Deserialize, Deserializer, Serialize};
 use uuid::Uuid;
+
+use crate::newtype::string_newtype;
 
 use fofoca_util::consts::MAX_SHARD_TOTAL;
 
@@ -32,13 +32,14 @@ pub fn shard_fits_log(msg: &super::Message) -> bool {
         .is_none_or(|shard| shard.total <= fofoca_util::consts::LOGGED_SHARD_GROUP_MAX_TOTAL)
 }
 
+string_newtype!(
 /// The correlation id shared by every shard of one logical body — a UUID v4
 /// string form, minted once by the sender when it splits a body. Like
 /// task id, deserialization is **validating**, so a
 /// non-UUID group is rejected at `Message::parse`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
-#[serde(transparent)]
-pub struct ShardGroup(String);
+    ShardGroup,
+    error = &'static str,
+);
 
 impl<'de> Deserialize<'de> for ShardGroup {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -58,17 +59,6 @@ impl ShardGroup {
     #[must_use]
     pub fn from_uuid_str(raw: &str) -> Option<Self> {
         Uuid::parse_str(raw).ok().map(|_| Self(raw.to_string()))
-    }
-
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Display for ShardGroup {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.0)
     }
 }
 

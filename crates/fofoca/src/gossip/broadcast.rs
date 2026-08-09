@@ -118,7 +118,7 @@ pub struct StateMergeParams<'a> {
 ///
 /// The change is built on a fork and the frame size-gated **before** the change
 /// touches the live doc, so an oversize merge never lands in a doc it could not
-/// be gossiped for. Applying then runs through [`MeshDoc::ingest`]'s gate, so a
+/// be gossiped for. Applying then runs through [`MeshDoc::ingest`](crate::doc::MeshDoc::ingest)'s gate, so a
 /// local write that would forge another peer's card is refused, not silently
 /// diverged.
 ///

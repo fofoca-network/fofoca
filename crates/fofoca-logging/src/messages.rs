@@ -39,6 +39,20 @@ fn redacted_body(msg: &Message) -> String {
     format!("<redacted {len}B {}>", &hash[..8])
 }
 
+/// The body as a log line should carry it: raw only when the operator asked
+/// for it with `--log-raw`, the redacted stand-in otherwise.
+///
+/// One helper rather than the choice inlined per arm — the broadcast arm used
+/// to spell the whole `tracing::info!` twice, differing in this one field, so
+/// a field added to one copy and not the other would have gone unnoticed.
+fn logged_body(msg: &Message) -> String {
+    if log_raw() {
+        msg.body.as_str().to_owned()
+    } else {
+        redacted_body(msg)
+    }
+}
+
 /// Log an inbound (received) mesh message.
 pub fn log_in(msg: &Message) {
     log("in", msg);
@@ -73,27 +87,14 @@ fn log(direction: &'static str, msg: &Message) {
         // tag; it is not a tag name, and a consumer that addresses chat to one
         // peer lands in the directed arm.
         MessageKind::App { to, corr, .. } => match (to, corr) {
-            (None, _) => {
-                if log_raw() {
-                    tracing::info!(
-                        target: "fofoca::messages",
-                        dir = direction,
-                        author = %msg.author,
-                        ts = msg.timestamp,
-                        body = %msg.body,
-                        "msg"
-                    );
-                } else {
-                    tracing::info!(
-                        target: "fofoca::messages",
-                        dir = direction,
-                        author = %msg.author,
-                        ts = msg.timestamp,
-                        body = %redacted_body(msg),
-                        "msg"
-                    );
-                }
-            }
+            (None, _) => tracing::info!(
+                target: "fofoca::messages",
+                dir = direction,
+                author = %msg.author,
+                ts = msg.timestamp,
+                body = %logged_body(msg),
+                "msg"
+            ),
             (Some(_), None) => {
                 // Any correlation id the app carries rides inside the (possibly
                 // sealed) body — an app-layer concern the engine's redaction log
@@ -106,7 +107,7 @@ fn log(direction: &'static str, msg: &Message) {
                     ts = msg.timestamp,
                     to = ?to,
                     kind = %msg.kind,
-                    body = %if log_raw() { msg.body.as_str().to_owned() } else { redacted_body(msg) },
+                    body = %logged_body(msg),
                     "directed"
                 );
             }
@@ -132,7 +133,7 @@ fn log(direction: &'static str, msg: &Message) {
             author = %msg.author,
             ts = msg.timestamp,
             channel = %msg.kind,
-            body = %if log_raw() { msg.body.as_str().to_owned() } else { redacted_body(msg) },
+            body = %logged_body(msg),
             "state"
         ),
         // Plumbing — exhaustive so a new kind forces a decision.

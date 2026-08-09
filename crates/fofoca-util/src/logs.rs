@@ -6,9 +6,9 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 
 #[cfg(feature = "host")]
-use crate::consts::LOG_FILE_MAX_BYTES;
-#[cfg(feature = "host")]
 use crate::mesh_prefix;
+#[cfg(feature = "host")]
+use crate::tuning::LOG_FILE_MAX_BYTES;
 
 /// Log config, installed **once** at startup from the `--log-dir` /
 /// `--log-max-bytes` / `--log-raw` flags. The consumer parses the flags and

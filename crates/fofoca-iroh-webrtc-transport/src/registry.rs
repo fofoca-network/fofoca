@@ -186,7 +186,14 @@ impl<T> Reservation<T> {
 
     /// Put the session in the slot, handing the release obligation to the
     /// returned guard.
-    pub(crate) fn fulfil(self, value: T) -> SessionGuard<T> {
+    ///
+    /// `None` when the reservation is no longer the slot's owner: it was
+    /// retired while outstanding, or a newer one replaced it. That is exactly
+    /// the case a reservation exists for — a driver that failed and retired its
+    /// own generation while the spawn was still returning. Re-inserting there
+    /// would record a session nothing is driving; instead `value` drops here,
+    /// running whatever teardown it owns.
+    pub(crate) fn fulfil(self, value: T) -> Option<SessionGuard<T>> {
         let registry = Arc::clone(&self.registry);
         let remote = self.remote;
         let generation = self.generation;
@@ -194,19 +201,20 @@ impl<T> Reservation<T> {
         // release the very slot we are about to fill.
         std::mem::forget(self);
 
-        registry.lock().insert(
-            remote,
-            Slot {
-                generation,
-                value: Some(value),
-            },
-        );
-        SessionGuard {
+        {
+            let mut sessions = registry.lock();
+            let slot = sessions.get_mut(&remote)?;
+            if slot.generation != generation || slot.value.is_some() {
+                return None;
+            }
+            slot.value = Some(value);
+        }
+        Some(SessionGuard {
             registry,
             remote,
             generation,
             committed: false,
-        }
+        })
     }
 }
 
@@ -313,7 +321,7 @@ mod tests {
         let reservation = registry.reserve(peer(1)).expect("first reserve");
         assert!(registry.reserve(peer(1)).is_none(), "reserved");
 
-        let guard = reservation.fulfil(probe().0);
+        let guard = reservation.fulfil(probe().0).expect("slot is ours");
         assert!(registry.reserve(peer(1)).is_none(), "live");
         guard.commit();
         assert!(registry.reserve(peer(1)).is_none(), "still live");
@@ -326,7 +334,8 @@ mod tests {
         let guard = registry
             .reserve(peer(1))
             .expect("first reserve")
-            .fulfil(payload);
+            .fulfil(payload)
+            .expect("slot is ours");
 
         assert!(registry.is_live(&peer(1)));
         drop(guard);
@@ -343,6 +352,7 @@ mod tests {
             .reserve(peer(1))
             .expect("first reserve")
             .fulfil(payload)
+            .expect("slot is ours")
             .commit();
 
         assert!(registry.is_live(&peer(1)));
@@ -360,7 +370,8 @@ mod tests {
         let stale = registry
             .reserve(peer(1))
             .expect("first reserve")
-            .fulfil(first);
+            .fulfil(first)
+            .expect("slot is ours");
         registry.remove(&peer(1));
         assert!(first_dropped.get());
 
@@ -369,6 +380,7 @@ mod tests {
             .reserve(peer(1))
             .expect("second reserve")
             .fulfil(second)
+            .expect("slot is ours")
             .commit();
 
         drop(stale);
@@ -386,7 +398,8 @@ mod tests {
             let guard = registry
                 .reserve(peer(1))
                 .expect("first reserve")
-                .fulfil(probe().0);
+                .fulfil(probe().0)
+                .expect("slot is ours");
             let generation = guard.generation();
             guard.commit();
             generation
@@ -396,6 +409,7 @@ mod tests {
             .reserve(peer(1))
             .expect("second reserve")
             .fulfil(probe().0)
+            .expect("slot is ours")
             .commit();
 
         assert!(!registry.remove_if_generation(&peer(1), stale_generation));
@@ -408,7 +422,7 @@ mod tests {
         let reservation = registry.reserve(peer(1)).expect("first reserve");
         assert!(registry.with_live(&peer(1), |_| ()).is_none());
 
-        let guard = reservation.fulfil(probe().0);
+        let guard = reservation.fulfil(probe().0).expect("slot is ours");
         assert!(registry.with_live(&peer(1), |_| ()).is_some());
         guard.commit();
     }
@@ -421,6 +435,7 @@ mod tests {
             .reserve(peer(2))
             .expect("reserve two")
             .fulfil(probe().0)
+            .expect("slot is ours")
             .commit();
 
         assert_eq!(registry.clear(), 1, "only the live one counts");

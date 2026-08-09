@@ -21,8 +21,8 @@ use crate::util::clock::Instant;
 use crate::util::cooldown::Cooldown;
 
 use crate::util::tuning::{
-    KNOWN_ENDPOINTS_CAP, PENDING_OUTBOUND_CAP, QUIET_CAP, RELINK_COOLDOWN_SECS, message_log_size,
-    seen_ids_cap,
+    KNOWN_ENDPOINTS_CAP, MESSAGE_LOG_SIZE, PENDING_OUTBOUND_CAP, QUIET_CAP, RELINK_COOLDOWN_SECS,
+    SEEN_IDS_CAP,
 };
 
 /// `RELINK_COOLDOWN_SECS` as a `Duration` — the window both per-endpoint
@@ -266,7 +266,7 @@ pub struct EventLoopState {
     /// (GRAFT/repair, topology churn, our own re-broadcasts, anti-entropy
     /// re-sends, the rendezvous double-path) can deliver the same message
     /// twice; `mark_seen` drops the repeat before it reaches the log /
-    /// inbound push channel / agent. Bounded (`seen_ids_cap`, 2× the message log)
+    /// inbound push channel / agent. Bounded (`SEEN_IDS_CAP`, 2× the message log)
     /// so it always covers the retention window.
     pub(crate) seen: BoundedFifoSet<[u8; 16]>,
     /// User messages sent before we had a real-peer link (no gossip
@@ -519,7 +519,7 @@ impl EventLoopState {
             relink: Cooldown::new(RELINK_COOLDOWN),
             peerinfo: Cooldown::new(RELINK_COOLDOWN),
             digest_serves: Cooldown::new(Duration::from_secs(
-                fofoca_util::consts::ANTIENTROPY_SERVE_COOLDOWN_SECS,
+                fofoca_util::tuning::ANTIENTROPY_SERVE_COOLDOWN_SECS,
             )),
             peers: HashSet::new(),
             last_seen: HashMap::new(),
@@ -545,14 +545,14 @@ impl EventLoopState {
             reclaim_until: None,
             next_rival_recheck: None,
             rival_recheck_rounds: 0,
-            seen: BoundedFifoSet::new(seen_ids_cap()),
+            seen: BoundedFifoSet::new(SEEN_IDS_CAP),
             pending_outbound: BoundedQueue::new(PENDING_OUTBOUND_CAP),
             #[cfg(feature = "host")]
             state_file,
             ready: false,
             live_count: None,
-            message_log: MessageLog::new(message_log_size()),
-            reassembled_groups: BoundedFifoSet::new(message_log_size()),
+            message_log: MessageLog::new(MESSAGE_LOG_SIZE),
+            reassembled_groups: BoundedFifoSet::new(MESSAGE_LOG_SIZE),
             reassembly: super::reassembly::ReassemblyStore::default(),
             shard_cache: super::reassembly::ShardCache::default(),
             state_doc: super::doc::MeshDoc::new_ungated().with_key(state_key),
@@ -1349,7 +1349,7 @@ mod tests {
     fn a_peer_is_served_one_digest_per_window() {
         let mut state = fresh_state();
         let now = Instant::now();
-        let window = Duration::from_secs(fofoca_util::consts::ANTIENTROPY_SERVE_COOLDOWN_SECS);
+        let window = Duration::from_secs(fofoca_util::tuning::ANTIENTROPY_SERVE_COOLDOWN_SECS);
 
         assert!(state.admit_digest("aa", now), "the first is served");
         assert!(
@@ -1545,24 +1545,15 @@ mod tests {
 
     #[test]
     fn dedup_window_covers_the_retention_window() {
-        use crate::util::tuning::{message_log_size, seen_ids_cap};
+        use crate::util::tuning::MESSAGE_LOG_SIZE;
 
-        // Invariant the whole design rests on: the dedup set must outlive
-        // the message log. Anti-entropy re-broadcasts any message still in
-        // the log; if its id had scrolled out of the dedup set the resend
-        // would be reprocessed and **re-surfaced** to the agent.
-        assert!(
-            seen_ids_cap() >= message_log_size(),
-            "dedup cap ({}) must cover the retention window ({})",
-            seen_ids_cap(),
-            message_log_size(),
-        );
-
+        // The cap relationship itself is asserted at compile time where both
+        // consts live; this covers the behaviour it exists for.
         let mut state = fresh_state();
         let earliest = msg_with_id(&MessageId::random());
         assert!(!state.mark_seen(&earliest));
         // Mark a full buffer's worth of later messages.
-        for _ in 1..message_log_size() {
+        for _ in 1..MESSAGE_LOG_SIZE {
             state.mark_seen(&msg_with_id(&MessageId::random()));
         }
         // The earliest is still within the dedup window, so an anti-entropy

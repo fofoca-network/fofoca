@@ -570,7 +570,7 @@ async fn claim(
     // real peer endpoint.
     let (gossip, router) = build_mesh(
         endpoint.clone(),
-        crate::util::consts::GOSSIP_ACTIVE_VIEW_CAPACITY,
+        crate::util::tuning::GOSSIP_ACTIVE_VIEW_CAPACITY,
         None,
         None,
         // The rendezvous serves no caller protocol either — it is a meeting

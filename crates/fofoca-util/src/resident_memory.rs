@@ -4,7 +4,7 @@
 //! The distributed soak that crashed a host had **no in-process leak
 //! visibility** — resident memory was only observable from an external `ps`
 //! sampler. This reads our own so the daemon can emit a `warn` when it crosses
-//! a soft threshold ([`crate::tuning::resident_memory_warn_mb`]).
+//! a soft threshold ([`crate::tuning::RESIDENT_MEMORY_WARN_MB`]).
 //! Warn-only by design: host safety comes from the scenario runbook's OS resource
 //! caps, not from the daemon exiting.
 

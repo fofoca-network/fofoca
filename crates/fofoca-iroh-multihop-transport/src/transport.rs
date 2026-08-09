@@ -163,8 +163,7 @@ impl CustomSender for MultihopSender {
         };
         // A GSO batch is several datagrams concatenated; each is an independent
         // QUIC packet and rides its own cell.
-        let segment = transmit.segment_size.unwrap_or(transmit.contents.len());
-        for chunk in split_segments(transmit.contents, segment) {
+        for chunk in fofoca_iroh_transport_util::datagrams(transmit) {
             let cell = Cell {
                 path: route.clone(),
                 pos: 0,
@@ -184,13 +183,4 @@ fn revisits_us(route: &Route, me: &RouteHop) -> bool {
         .hops()
         .iter()
         .any(|hop| hop.underlay.id == me.underlay.id || hop.app_id == me.app_id)
-}
-
-/// Split a GSO'd transmit into its constituent datagrams. An empty payload still
-/// yields one (empty) datagram so a keep-alive is not silently dropped.
-fn split_segments(contents: &[u8], segment: usize) -> Vec<&[u8]> {
-    if contents.is_empty() {
-        return vec![&contents[0..0]];
-    }
-    contents.chunks(segment.max(1)).collect()
 }

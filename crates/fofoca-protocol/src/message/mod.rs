@@ -18,6 +18,7 @@ use fofoca_util::clock;
 use super::identity::{self, Identity};
 use super::mesh::MeshId;
 use super::nickname::Nickname;
+use crate::newtype::string_newtype;
 
 mod body;
 mod id;
@@ -135,15 +136,17 @@ pub fn sole_addressee(kind: &MessageKind) -> Option<&Nickname> {
     }
 }
 
+string_newtype!(
 /// An opaque application-payload tag — the wire discriminant for a
 /// [`MessageKind::App`] frame (serialized in the `tag` field). The engine never
 /// interprets it; the consuming application owns the taxonomy (e.g. an application
 /// layer's `app_msg` / `app_status` / `app_req` tags) and dispatches on it.
 /// Validated as a short non-empty ASCII slug so a crafted value can't smuggle
 /// structure into the routing layer.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
-#[serde(transparent)]
-pub struct AppTag(String);
+    AppTag,
+    error = &'static str,
+    deserialize,
+);
 
 impl AppTag {
     fn validate(raw: &str) -> bool {
@@ -163,22 +166,6 @@ impl AppTag {
         }
         Ok(Self(raw))
     }
-
-    /// The wire tag string.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl<'de> Deserialize<'de> for AppTag {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let raw = String::deserialize(deserializer)?;
-        Self::new(raw).map_err(serde::de::Error::custom)
-    }
 }
 
 impl From<&str> for AppTag {
@@ -187,20 +174,15 @@ impl From<&str> for AppTag {
     }
 }
 
-impl fmt::Display for AppTag {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
+string_newtype!(
 /// An opaque request/response correlation id carried on a directed
 /// [`MessageKind::App`] frame (the `corr` field). Matched by the engine's
 /// pending-call registry to pair a reply with its outstanding call; the app
 /// mints and interprets its value (the application layer uses a UUID). Kept generic so
 /// the engine correlates without knowing the payload model.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
-#[serde(transparent)]
-pub struct CorrId(String);
+    CorrId,
+    error = &'static str,
+);
 
 impl CorrId {
     fn validate(raw: &str) -> bool {
@@ -215,11 +197,6 @@ impl CorrId {
             return Err("invalid correlation id");
         }
         Ok(Self(raw))
-    }
-
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
     }
 }
 
@@ -240,12 +217,6 @@ impl<'de> Deserialize<'de> for CorrId {
 impl From<&str> for CorrId {
     fn from(raw: &str) -> Self {
         Self::new(raw).expect("invalid correlation id")
-    }
-}
-
-impl fmt::Display for CorrId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
     }
 }
 
@@ -295,7 +266,7 @@ pub enum MessageKind {
         to: Nickname,
     },
     /// A durable `state`-channel event: one Base58 automerge change
-    /// (`{"k":"change",…}`) applied to the channel's [`MeshDoc`](crate::daemon::doc)
+    /// (`{"k":"change",…}`) applied to the channel's `MeshDoc`
     /// CRDT. Carried on the gossip topic like everything else; the signed frame
     /// is retained as the doc's re-serve store. Signed like any message; never
     /// entered into the chat message-log, never surfaced via poll/fetch.
@@ -469,10 +440,10 @@ pub struct Message {
     /// Author's Ed25519 public key (lowercase hex), and the detached
     /// signature over the message's [canonical bytes](Message::canonical_bytes).
     /// Empty on an unsigned message: the empty fields are skipped, which is
-    /// also the **canonical pre-signing form** that [`canonical_bytes`] hashes
+    /// also the **canonical pre-signing form** that [`Message::canonical_bytes`] hashes
     /// (the signature cannot cover itself). Real outbound traffic is always
     /// signed on the broadcast path, and the receive path drops anything that
-    /// fails verification. See [`docs/history-integrity.md`].
+    /// fails verification. See `docs/history-integrity.md`.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub pubkey: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -482,7 +453,7 @@ pub struct Message {
     /// previous `Msg` (`None` at `seq 0`). Both are signed. Plumbing /
     /// presence kinds leave them `None`. The message's own content hash is
     /// computed locally (`content_hash_hex`), never transmitted. See
-    /// [`docs/history-integrity.md`].
+    /// `docs/history-integrity.md`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seq: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -490,7 +461,7 @@ pub struct Message {
     /// Cross-author DAG (Phase 3), `Msg` only: content hashes of the DAG
     /// tips this author had seen when authoring — the causal links. Signed.
     /// Empty for the very first message / messages with no observed
-    /// predecessor. See [`docs/history-integrity.md`].
+    /// predecessor. See `docs/history-integrity.md`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub parents: Vec<String>,
     /// Shard header: present only on a message that is one slice of a body
@@ -790,7 +761,7 @@ impl Message {
         buf
     }
 
-    /// This message's content hash (SHA-256 of [`canonical_bytes`], hex) —
+    /// This message's content hash (SHA-256 of [`Message::canonical_bytes`], hex) —
     /// the id used by another author's `prev` backlink and by fork
     /// detection. Recomputed locally on receive; never trusted off the wire.
     #[must_use]
@@ -878,7 +849,7 @@ impl Message {
         self.verify_signature_with(&self.canonical_bytes())
     }
 
-    /// Like [`verify_signature`](Self::verify_signature) but against
+    /// Like `verify_signature` but against
     /// **precomputed** canonical bytes. The hot receive path computes
     /// `canonical_bytes()` once and reuses it for both this check and the
     /// content hash, instead of re-serializing the message twice per `Msg`.

@@ -309,12 +309,19 @@ Items 4 and 6 of the backlog below, plus the whole of Part 2, are **implemented*
 | crate | owns | resolved deps |
 |---|---|---:|
 | `fofoca-util` | runtime dirs, clock, tuning dials, bounded containers, build stamp | 13 |
-| `fofoca-protocol` | messages, mesh ids, nicknames, identity, sealing, invites | 138 |
+| `fofoca-protocol` | messages, mesh ids, nicknames, identity, sealing, invites, multipart reassembly, the directory ad codec | 138 |
 | `fofoca-doc` | the CRDT channels — **the only crate that names automerge** | |
 | `fofoca-logging` | the tracing sink — **the only crate that names tracing-subscriber** | |
-| `fofoca-reassembly` | multipart body reassembly | |
-| `fofoca-directory` | the discovery-mesh ad codec | |
 | `fofoca` | daemon, gossip, lifecycle, transport, lookup, beacon | 436 |
+
+`fofoca-reassembly` and `fofoca-directory` were folded back into
+`fofoca-protocol`. The split's stated rationale is dependency closure, and it
+measurably did not apply to those two: every name each used was already one of
+`fofoca-protocol`'s, so `cargo tree -p fofoca --no-default-features` resolves
+the identical external set either way. They cost a manifest, a `host` and an
+`adversarial` feature copied verbatim, and a lib target, and they bought
+nothing — both were aliased straight back in at `fofoca/src/lib.rs`, so the
+split did not even buy a path distinction.
 
 The blob-transfer crate this table originally listed has since been deleted —
 it had no consumer here, and the `fofoca-blobs` name now belongs to an unrelated

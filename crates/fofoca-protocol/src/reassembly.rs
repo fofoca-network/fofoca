@@ -1,6 +1,10 @@
+//! Multipart body reassembly with byte budgets.
+//!
+//! Folded in from its own crate for the same reason as [`crate::directory`].
+
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
-use fofoca_protocol::{Message, MessageBody, MessageId, MessageKind, Nickname, ShardGroup};
+use crate::{Message, MessageBody, MessageId, MessageKind, Nickname, ShardGroup};
 use fofoca_util::clock::Instant;
 use fofoca_util::consts::{
     LOGGED_SHARD_GROUP_MAX_TOTAL, REASSEMBLY_AUTHOR_BUDGET_BYTES, REASSEMBLY_GROUP_MAX_BYTES,
@@ -387,9 +391,7 @@ mod tests {
     use std::time::Duration;
 
     use super::{ReassemblyStore, ShardIngest};
-    use fofoca_protocol::{
-        AppFrameParams, MeshId, Message, MessageBody, Nickname, Shard, ShardGroup,
-    };
+    use crate::{AppFrameParams, MeshId, Message, MessageBody, Nickname, Shard, ShardGroup};
     use fofoca_util::consts::{
         REASSEMBLY_AUTHOR_BUDGET_BYTES, REASSEMBLY_GROUP_MAX_BYTES, REASSEMBLY_STALE_SECS,
         REASSEMBLY_TOTAL_BUDGET_BYTES,
@@ -409,7 +411,7 @@ mod tests {
             &MeshId::from("test"),
             &Nickname::from("author"),
             AppFrameParams {
-                tag: fofoca_protocol::AppTag::from("app_msg"),
+                tag: crate::AppTag::from("app_msg"),
                 to: None,
                 corr: None,
                 body: MessageBody::from(body),
@@ -579,8 +581,8 @@ mod tests {
                 total: 3,
             },
         );
-        wrong_kind.kind = fofoca_protocol::MessageKind::Presence {
-            subtype: fofoca_protocol::PresenceSubtype::Joined,
+        wrong_kind.kind = crate::MessageKind::Presence {
+            subtype: crate::PresenceSubtype::Joined,
         };
         assert!(matches!(
             ingest(&mut store, &wrong_kind, now),

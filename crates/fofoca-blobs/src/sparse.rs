@@ -169,7 +169,7 @@ impl Size for SparseBlocks {
 impl ReadAt for SparseBlocks {
     /// Read from `pos`, never crossing a block boundary in one call.
     ///
-    /// Returning a short count is how [`positioned_io::ReadAt`] expects a
+    /// Returning a short count is how `positioned_io::ReadAt` expects a
     /// segmented source to behave; `read_exact_at` loops. But a *hole* is an
     /// error rather than a short read — see the module docs.
     fn read_at(&self, pos: u64, buf: &mut [u8]) -> io::Result<usize> {

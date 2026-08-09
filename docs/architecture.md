@@ -82,7 +82,7 @@ The user-facing word in the CLI is **gossip**, and that word never reaches the w
 
 ## 3. Workspace structure
 
-The workspace is a virtual manifest with eleven member crates.
+The workspace is a virtual manifest with nine member crates.
 All crates share one version from `[workspace.package]`.
 Dependencies point strictly downward.
 
@@ -91,13 +91,9 @@ graph TD
     ffi["fofoca-ffi<br>C ABI shim"] --> engine
     engine["fofoca<br>the engine"] --> doc["fofoca-doc<br>CRDT channels"]
     engine --> logging["fofoca-logging<br>tracing sink"]
-    engine --> reasm["fofoca-reassembly<br>multipart bodies"]
-    engine --> dir["fofoca-directory<br>advertisement codec"]
     engine --> mh["fofoca-iroh-multihop-transport"]
     doc --> proto["fofoca-protocol<br>wire vocabulary"]
     logging --> proto
-    reasm --> proto
-    dir --> proto
     proto --> util["fofoca-util<br>host helpers, constants"]
     blobs["fofoca-blobs<br>verified byte ranges"]
     webrtc["fofoca-iroh-webrtc-transport"]
@@ -110,11 +106,9 @@ The engine meets the WebRTC transport in a consumer, through injected transport 
 | Crate | Role |
 |---|---|
 | `fofoca-util` | Host helpers: runtime directories, clock, tuning dials, bounded containers, every constant. |
-| `fofoca-protocol` | Wire vocabulary: messages, mesh ids, identity, sealing, invites. Depends on `iroh-base` only. |
+| `fofoca-protocol` | Wire vocabulary: messages, mesh ids, identity, sealing, invites, multipart reassembly, the directory ad codec. Depends on `iroh-base` only. |
 | `fofoca-doc` | The `state` and `meta` CRDT channels (automerge). |
 | `fofoca-logging` | Tracing sink and directive filter. |
-| `fofoca-reassembly` | Multipart body reassembly with byte budgets. |
-| `fofoca-directory` | Discovery-mesh advertisement codec. |
 | `fofoca` | The engine. The only crate that names `iroh` and `iroh-gossip`. |
 | `fofoca-ffi` | A C-ABI shim, so a non-Rust process joins a mesh in-process. |
 | `fofoca-blobs` | BLAKE3/bao metadata store for verified byte ranges over data the crate does not own. |

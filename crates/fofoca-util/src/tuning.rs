@@ -2,28 +2,28 @@
 //! policy but never the on-the-wire format — the size cap belongs in
 //! `protocol::message` (`MAX_MESSAGE_SIZE`).
 //!
-//! The poll/MCP buffer size (`DEFAULT_MESSAGE_LOG_SIZE`) lives in
-//! `crate::consts` — it anchors the shared IPC response cap.
+//! **The split with `crate::consts` is by who may change a value.** A `pub
+//! const` here is fixed at build time; a `pub fn` reads the process [`Tuning`]
+//! and so honours a CLI override. `crate::consts` keeps only what every member
+//! of a mesh must agree on bit-for-bit — the wire contracts.
 
 /// In-memory message-log capacity: how many recent messages each member
 /// retains as the anti-entropy recovery source and poll/fetch history. A
-/// bigger log lets a reconnecting peer recover a longer gap. Fixed at
-/// [`crate::consts::DEFAULT_MESSAGE_LOG_SIZE`] (1000), clamped to `>= 1`; edit
-/// the const to change it.
-#[must_use]
-pub fn message_log_size() -> usize {
-    crate::consts::DEFAULT_MESSAGE_LOG_SIZE.max(1)
-}
+/// bigger log lets a reconnecting peer recover a longer gap. It also anchors
+/// the shared IPC response cap.
+pub const MESSAGE_LOG_SIZE: usize = 1000;
+const _: () = assert!(MESSAGE_LOG_SIZE >= 1, "a zero-length log retains nothing");
 
 /// How many recently-seen message ids are retained for duplicate
 /// suppression. Kept at **2× the message log** so it always covers the
 /// retention window with margin: anti-entropy resends any message still
 /// in the log, and a resend whose id had scrolled out of this set would be
-/// reprocessed and **re-surfaced**. Scales with `message_log_size()`.
-#[must_use]
-pub fn seen_ids_cap() -> usize {
-    message_log_size().saturating_mul(2)
-}
+/// reprocessed and **re-surfaced**. Derived, so the two cannot drift.
+pub const SEEN_IDS_CAP: usize = MESSAGE_LOG_SIZE * 2;
+const _: () = assert!(
+    SEEN_IDS_CAP >= MESSAGE_LOG_SIZE,
+    "the dedup set must outlive the message log"
+);
 
 /// How many outbound frames are buffered while the node has no gossip link
 /// yet (sent before the first `NeighborUp`). Flushed in order once connected;
@@ -49,10 +49,12 @@ pub const KNOWN_ENDPOINTS_CAP: usize = 64;
 /// while partitioned/asleep. Short enough that a returning peer
 /// recovers within a couple of cycles; digests are small and a
 /// re-send only happens when there is an actual gap, so steady-state
-/// cost is one tiny message per interval. Default
-/// [`crate::consts::ANTIENTROPY_INTERVAL_SECS`]; hidden flag
+/// cost is one tiny message per interval. Hidden flag
 /// `--antientropy-interval-secs` so the backfill tests reconcile in
 /// seconds. Clamped to `>= 1`.
+pub const ANTIENTROPY_INTERVAL_SECS: u64 = 10;
+
+/// The live value, after any CLI override of [`ANTIENTROPY_INTERVAL_SECS`].
 #[must_use]
 pub fn antientropy_interval_secs() -> u64 {
     current().antientropy_interval_secs.max(1)
@@ -80,20 +82,22 @@ pub const ANTIENTROPY_DIGEST_WINDOW_IDS: usize = 70;
 /// Max messages re-broadcast in response to one received digest, so a
 /// far-behind peer can't trigger an unbounded burst. This throttles
 /// deep-backfill throughput (~`this × peers` messages per
-/// `ANTIENTROPY_INTERVAL_SECS`). Default [`crate::consts::ANTIENTROPY_MAX_RESEND`];
-/// hidden flag `--antientropy-max-resend` (tests raise it for deep backfill).
+/// `ANTIENTROPY_INTERVAL_SECS`). Hidden flag `--antientropy-max-resend` (tests raise it for deep backfill).
+pub const ANTIENTROPY_MAX_RESEND: usize = 64;
+
+/// The live value, after any CLI override of [`ANTIENTROPY_MAX_RESEND`].
 #[must_use]
 pub fn antientropy_max_resend() -> usize {
     current().antientropy_max_resend.max(1)
 }
 
-/// Capacity of a [`Node`](crate::daemon::Node)'s inbound push channel
+/// Capacity of a `fofoca`'s `Node`'s inbound push channel
 /// (`DriverMode::InProcess::msg_tx`). Bounded so a slow consumer never
 /// backpressures the gossip/membership loop; under sustained lag the oldest
 /// buffered messages are dropped and the consumer observes `RecvError::Lagged`.
 pub const NODE_INBOUND_CAP: usize = 1024;
 
-/// Depth of the typed session-request channel a [`Node`](crate::daemon::Node)'s
+/// Depth of the typed session-request channel a `fofoca`'s `Node`'s
 /// driver drains. Pure backpressure: every request carries its own `oneshot`
 /// reply, so one caller has at most one in flight — the queue only grows when
 /// several tasks share a session.
@@ -102,13 +106,9 @@ pub const SESSION_REQUEST_CAP: usize = 64;
 /// Soft resident-memory threshold (`MiB`) above which the daemon emits a
 /// one-shot `warn` (log + JSON `info` event) on its slow prune tick — the
 /// in-process leak-visibility signal the distributed soak lacked. **Warn-only**:
-/// it never exits; host safety is the deployment runbook's OS resource caps. Fixed at
-/// [`crate::consts::RESIDENT_MEMORY_WARN_MB`] (1024, well above a healthy
-/// node's tens of `MiB`); `0` there disables it. Edit the const to tune.
-#[must_use]
-pub fn resident_memory_warn_mb() -> u64 {
-    crate::consts::RESIDENT_MEMORY_WARN_MB
-}
+/// it never exits; host safety is the deployment runbook's OS resource caps.
+/// Well above a healthy node's tens of `MiB`; `0` disables it.
+pub const RESIDENT_MEMORY_WARN_MB: u64 = 1024;
 
 /// How often an idle daemon broadcasts a `Presence::Alive` keepalive.
 /// Active talkers never emit one — any sent gossip message resets the
@@ -120,9 +120,12 @@ pub const ALIVE_INTERVAL_SECS: u64 = 30;
 /// two lost gossip rounds. Worst-case ghost window is
 /// `alive_timeout + sweep_interval`.
 ///
-/// Default [`crate::consts::ALIVE_TIMEOUT_SECS`]; hidden flag
+/// Hidden flag
 /// `--alive-timeout-secs` so integration tests exercise eviction in
 /// seconds instead of minutes.
+pub const ALIVE_TIMEOUT_SECS: u64 = 90;
+
+/// The live value, after any CLI override of [`ALIVE_TIMEOUT_SECS`].
 #[must_use]
 pub fn alive_timeout_secs() -> u64 {
     current().alive_timeout_secs
@@ -131,6 +134,9 @@ pub fn alive_timeout_secs() -> u64 {
 /// How often the sweeper walks `last_seen` looking for expired peers.
 /// Bounds the maximum statusline staleness from a peer's true
 /// disappearance to its eviction. Hidden flag `--sweep-interval-secs`.
+pub const SWEEP_INTERVAL_SECS: u64 = 10;
+
+/// The live value, after any CLI override of [`SWEEP_INTERVAL_SECS`].
 #[must_use]
 pub fn sweep_interval_secs() -> u64 {
     current().sweep_interval_secs
@@ -142,6 +148,9 @@ pub fn sweep_interval_secs() -> u64 {
 /// on heal ticks, never delays `ready`; a joiner that meshes co-hosts
 /// the moment it has a neighbor, well before this. Hidden flag
 /// `--beacon-cohost-grace-secs`.
+pub const BEACON_COHOST_GRACE_SECS: u64 = 10;
+
+/// The live value, after any CLI override of [`BEACON_COHOST_GRACE_SECS`].
 #[must_use]
 pub fn cohost_grace_secs() -> u64 {
     current().cohost_grace_secs
@@ -151,15 +160,23 @@ pub fn cohost_grace_secs() -> u64 {
 /// emits its `ping_report`. Long enough for a relayed round-trip
 /// across the mesh; hidden flag `--ping-window-secs` so tests don't
 /// wait the full window.
+pub const PING_WINDOW_SECS: u64 = 10;
+
+/// The live value, after any CLI override of [`PING_WINDOW_SECS`].
 #[must_use]
 pub fn ping_window_secs() -> u64 {
     current().ping_window_secs
 }
 
 /// How often the CLI daemon re-reads its parent pid to detect orphaning.
-/// Default [`crate::consts::PPID_WATCH_INTERVAL_MS`]; hidden flag
-/// `--ppid-watch-interval-ms` so the subprocess test sees the self-exit in
-/// milliseconds instead of the production seconds.
+/// Hidden flag `--ppid-watch-interval-ms` so the subprocess test sees the
+/// self-exit in milliseconds instead of the production seconds.
+///
+/// Ungated, unlike its accessor: [`Tuning::DEFAULTS`] is one `const` for every
+/// target and cannot name a field that disappears off a host.
+pub const PPID_WATCH_INTERVAL_MS: u64 = 1500;
+
+/// The live value, after any CLI override of [`PPID_WATCH_INTERVAL_MS`].
 ///
 /// Gated with its only caller (`daemon::event_loop::spawn_orphan_watch`): the
 /// orphan watch is `libc::getppid`, which arrives with `host`.
@@ -198,22 +215,22 @@ pub struct Tuning {
 impl Tuning {
     /// The production defaults, all from `crate::consts`.
     pub const DEFAULTS: Self = Self {
-        alive_timeout_secs: crate::consts::ALIVE_TIMEOUT_SECS,
-        sweep_interval_secs: crate::consts::SWEEP_INTERVAL_SECS,
-        heal_interval_secs: crate::consts::HEAL_INTERVAL_SECS,
-        antientropy_interval_secs: crate::consts::ANTIENTROPY_INTERVAL_SECS,
-        cohost_grace_secs: crate::consts::BEACON_COHOST_GRACE_SECS,
-        ping_window_secs: crate::consts::PING_WINDOW_SECS,
-        ppid_watch_interval_ms: crate::consts::PPID_WATCH_INTERVAL_MS,
-        heal_stall_threshold_secs: crate::consts::HEAL_STALL_THRESHOLD_SECS,
-        starvation_threshold_secs: crate::consts::STARVATION_THRESHOLD_SECS,
-        advertise_interval_secs: crate::consts::ADVERTISE_INTERVAL_SECS,
-        directory_expiry_secs: crate::consts::DIRECTORY_EXPIRY_SECS,
-        antientropy_max_resend: crate::consts::ANTIENTROPY_MAX_RESEND,
+        alive_timeout_secs: ALIVE_TIMEOUT_SECS,
+        sweep_interval_secs: SWEEP_INTERVAL_SECS,
+        heal_interval_secs: HEAL_INTERVAL_SECS,
+        antientropy_interval_secs: ANTIENTROPY_INTERVAL_SECS,
+        cohost_grace_secs: BEACON_COHOST_GRACE_SECS,
+        ping_window_secs: PING_WINDOW_SECS,
+        ppid_watch_interval_ms: PPID_WATCH_INTERVAL_MS,
+        heal_stall_threshold_secs: HEAL_STALL_THRESHOLD_SECS,
+        starvation_threshold_secs: STARVATION_THRESHOLD_SECS,
+        advertise_interval_secs: ADVERTISE_INTERVAL_SECS,
+        directory_expiry_secs: DIRECTORY_EXPIRY_SECS,
+        antientropy_max_resend: ANTIENTROPY_MAX_RESEND,
         directory_private: false,
-        rival_recheck_first_secs: crate::consts::RIVAL_RECHECK_FIRST_SECS,
-        rival_recheck_secs: crate::consts::RIVAL_RECHECK_SECS,
-        rival_recheck_meshed_secs: crate::consts::RIVAL_RECHECK_MESHED_SECS,
+        rival_recheck_first_secs: RIVAL_RECHECK_FIRST_SECS,
+        rival_recheck_secs: RIVAL_RECHECK_SECS,
+        rival_recheck_meshed_secs: RIVAL_RECHECK_MESHED_SECS,
         topic_mdns_only: false,
     };
 }
@@ -249,10 +266,12 @@ pub const STATE_REFRESH_SECS: u64 = 10;
 /// Cadence of the unconditional gossip healer (`gossip::heal::tick_heal`).
 /// The default balances fast re-mesh after a partition against
 /// steady-state cost — one detached rendezvous connect-probe plus one
-/// `HyParView` control message per tick when already healthy. Default
-/// [`crate::consts::HEAL_INTERVAL_SECS`]; hidden flag
+/// `HyParView` control message per tick when already healthy. Hidden flag
 /// `--heal-interval-secs` so the subprocess reliability tests collapse the
 /// multi-cycle rendezvous-handoff floor to seconds. Clamped to `>= 1`.
+pub const HEAL_INTERVAL_SECS: u64 = 15;
+
+/// The live value, after any CLI override of [`HEAL_INTERVAL_SECS`].
 #[must_use]
 pub fn heal_interval_secs() -> u64 {
     current().heal_interval_secs.max(1)
@@ -325,11 +344,13 @@ pub const HEAL_HARD_PROBE_SECS: u64 = 20;
 
 /// A heal inter-tick gap above this many seconds means the process was
 /// frozen between ticks (App Nap / coalescing / sleep) and must hard
-/// re-bootstrap. Default [`crate::consts::HEAL_STALL_THRESHOLD_SECS`]
-/// (60s) — safely above the default heal interval (15s) so normal slack
-/// never trips it. Hidden flag `--heal-stall-threshold-secs` so subprocess
+/// re-bootstrap. Safely above the default heal interval (15s) so normal
+/// slack never trips it. Hidden flag `--heal-stall-threshold-secs` so subprocess
 /// tests drive it in seconds; a test shortening `--heal-interval-secs`
 /// must keep this comfortably above the cadence it injects.
+pub const HEAL_STALL_THRESHOLD_SECS: u64 = 60;
+
+/// The live value, after any CLI override of [`HEAL_STALL_THRESHOLD_SECS`].
 #[must_use]
 pub fn heal_stall_threshold_secs() -> u64 {
     current().heal_stall_threshold_secs
@@ -339,9 +360,11 @@ pub fn heal_stall_threshold_secs() -> u64 {
 /// trips the heal arm's starvation watchdog (re-bridge + re-announce; see
 /// `gossip::heal::recover_from_starvation`). Keyed on traffic, not the link
 /// view — links can look alive while nothing flows (the roster-collapse
-/// signature). Default [`crate::consts::STARVATION_THRESHOLD_SECS`]
-/// (2× alive timeout); hidden flag `--starvation-threshold-secs`, its own
-/// knob so the tests' short-evict profile doesn't arm it everywhere.
+/// signature). Hidden flag `--starvation-threshold-secs`, its own knob so
+/// the tests' short-evict profile doesn't arm it everywhere.
+pub const STARVATION_THRESHOLD_SECS: u64 = 2 * ALIVE_TIMEOUT_SECS;
+
+/// The live value, after any CLI override of [`STARVATION_THRESHOLD_SECS`].
 #[must_use]
 pub fn starvation_threshold_secs() -> u64 {
     current().starvation_threshold_secs
@@ -392,9 +415,11 @@ pub const RELINK_COOLDOWN_SECS: u64 = 10;
 /// mesh within one cycle (the join-horizon only surfaces ads stamped
 /// after the discoverer joined), long enough that the directory stays
 /// quiet — directory traffic is one tiny message per advertiser per
-/// interval. Default [`crate::consts::ADVERTISE_INTERVAL_SECS`]; hidden
-/// flag `--advertise-interval-secs` so the subprocess directory test re-ads
+/// interval. Hidden flag `--advertise-interval-secs` so the subprocess directory test re-ads
 /// quickly.
+pub const ADVERTISE_INTERVAL_SECS: u64 = 20;
+
+/// The live value, after any CLI override of [`ADVERTISE_INTERVAL_SECS`].
 #[must_use]
 pub fn advertise_interval_secs() -> u64 {
     current().advertise_interval_secs
@@ -403,35 +428,46 @@ pub fn advertise_interval_secs() -> u64 {
 /// How long a discoverer keeps showing a mesh after its last ad. A
 /// publisher that exits stops re-broadcasting, so its listing ages out
 /// within this window. ~3× `ADVERTISE_INTERVAL_SECS` so one or two lost
-/// gossip rounds don't flicker a live mesh out of the list. Default
-/// [`crate::consts::DIRECTORY_EXPIRY_SECS`]; hidden flag
+/// gossip rounds don't flicker a live mesh out of the list. Hidden flag
 /// `--directory-expiry-secs` so the subprocess directory test can shorten the
 /// `mesh_lost` window.
+pub const DIRECTORY_EXPIRY_SECS: u64 = 60;
+
+/// The live value, after any CLI override of [`DIRECTORY_EXPIRY_SECS`].
 #[must_use]
 pub fn directory_expiry_secs() -> u64 {
     current().directory_expiry_secs
 }
 
 /// First shed of an `EagerProbed` public beacon after a probed claim — see
-/// [`crate::consts::RIVAL_RECHECK_FIRST_SECS`] for the rationale.
+/// [`RIVAL_RECHECK_FIRST_SECS`] for the rationale.
 /// Hidden flag `--rival-recheck-first-secs` (tests converge in seconds).
 /// Clamped to `>= 1`.
+pub const RIVAL_RECHECK_FIRST_SECS: u64 = 12;
+
+/// The live value, after any CLI override of [`RIVAL_RECHECK_FIRST_SECS`].
 #[must_use]
 pub fn rival_recheck_first_secs() -> u64 {
     current().rival_recheck_first_secs.max(1)
 }
 
 /// Steady shed cadence for a lone `EagerProbed` public beacon holder —
-/// see [`crate::consts::RIVAL_RECHECK_SECS`]. Hidden flag
+/// see [`RIVAL_RECHECK_SECS`]. Hidden flag
 /// `--rival-recheck-secs`. Clamped to `>= 1`.
+pub const RIVAL_RECHECK_SECS: u64 = 30;
+
+/// The live value, after any CLI override of [`RIVAL_RECHECK_SECS`].
 #[must_use]
 pub fn rival_recheck_secs() -> u64 {
     current().rival_recheck_secs.max(1)
 }
 
 /// Steady shed cadence while meshed (island-vs-island backstop) — see
-/// [`crate::consts::RIVAL_RECHECK_MESHED_SECS`]. Hidden flag
+/// [`RIVAL_RECHECK_MESHED_SECS`]. Hidden flag
 /// `--rival-recheck-meshed-secs`. Clamped to `>= 1`.
+pub const RIVAL_RECHECK_MESHED_SECS: u64 = 300;
+
+/// The live value, after any CLI override of [`RIVAL_RECHECK_MESHED_SECS`].
 #[must_use]
 pub fn rival_recheck_meshed_secs() -> u64 {
     current().rival_recheck_meshed_secs.max(1)
@@ -517,3 +553,56 @@ pub const RENDEZVOUS_PROBE_SECS: u64 = 1;
 /// drop this exists to prevent came straight back. 2s clears the measured cost
 /// with headroom and still leaves ~500ms of `Node::leave`'s budget unspent.
 pub const RENDEZVOUS_CLOSE_SECS: u64 = 2;
+
+/// Roster size (known live members) at or below which a *meshed* holder uses
+/// the brisk lone cadence ([`RIVAL_RECHECK_SECS`]) instead of the slow
+/// [`RIVAL_RECHECK_MESHED_SECS`] backstop.
+///
+/// The slow cadence is priced for the case it was written for: two
+/// **multi-member** islands, where a shed's beacon blip costs a healthy gossip
+/// something and the split is rare. A two-tab mesh left behind by a departed
+/// origin is neither — the split is the routine outcome of that departure, and
+/// a shed there disturbs almost nobody. So the tier is chosen by how much a
+/// shed actually costs, which is roster size, not by the meshed flag alone.
+///
+/// A pure const with no flag, like [`RIVAL_RECHECK_OFFSET_SPAN_SECS`]: it
+/// picks between two cadences that already have their own knobs.
+pub const RIVAL_RECHECK_SMALL_ROSTER: usize = 4;
+
+/// Span of the deterministic per-node phase offset added to the first shed,
+/// derived from the peer endpoint id. Orders simultaneous claimants so
+/// the earlier-offset node sheds first, finds the other's still-held beacon,
+/// and yields — a tie-break, not a delay knob, so no flag.
+pub const RIVAL_RECHECK_OFFSET_SPAN_SECS: u64 = 8;
+
+/// How often one peer's digest may be *served*.
+///
+/// Answering a digest costs up to [`ANTIENTROPY_MAX_RESEND`] mesh-wide
+/// broadcasts, and the budget was per digest with nothing per peer, so one
+/// small crafted frame bought that from every member at once. Comfortably under
+/// [`ANTIENTROPY_INTERVAL_SECS`], so the honest cadence is never refused.
+pub const ANTIENTROPY_SERVE_COOLDOWN_SECS: u64 = 5;
+
+/// `HyParView` **active view** capacity — the number of direct gossip neighbors
+/// (open QUIC links) each member maintains per topic. A mesh at or below this
+/// size forms a **full mesh** with nothing to shuffle, so it has **zero
+/// membership churn** (and thus none of the per-connection-churn memory leak);
+/// past it the overlay maintains a partial mesh and continuously
+/// promotes/demotes peers (the churn). Raised from iroh-gossip's default of 5
+/// to **64** so realistic agent meshes (≤ 65) stay churn-free. The ceiling is
+/// performance, not correctness: each slot is a live connection + keepalive
+/// (~0.5 MB resident per link) and a full mesh costs O(S²) broadcast
+/// amplification, so a fully-meshed node runs ~50 MB — 64 deliberately trades
+/// that heavier per-node cost for a larger churn-free mesh. This is the default
+/// for the public `--max-peers` cap; the passive (healing/shuffle) pool is
+/// derived as 2× the live view. Set `--max-peers` *small* to deliberately
+/// reproduce the gossip-churn leak at any node count.
+pub const GOSSIP_ACTIVE_VIEW_CAPACITY: usize = 64;
+
+/// Max bytes a per-member log file grows before rotating to `<file>.1`
+/// (active + one backup ⇒ bounded at `2 ×` this). The `--log-max-bytes` flag
+/// overrides; `0` disables rotation. Resolved by [`crate::logs::log_max_bytes`].
+///
+/// `host`-only with the file sink: a browser has no log file to rotate.
+#[cfg(feature = "host")]
+pub const LOG_FILE_MAX_BYTES: u64 = 10 * 1024 * 1024; // 10 MiB

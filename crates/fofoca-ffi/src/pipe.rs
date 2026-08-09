@@ -26,7 +26,8 @@ use fofoca::protocol::{
 };
 use fofoca::runtime::{CreateParams, JoinParams, Node, Resolved, TopicParams};
 use fofoca::runtime::{SetupKind, SetupParams, setup_mesh};
-use fofoca::util::consts::{GOSSIP_ACTIVE_VIEW_CAPACITY, MAX_MESSAGE_SIZE};
+use fofoca::util::consts::MAX_MESSAGE_SIZE;
+use fofoca::util::tuning::GOSSIP_ACTIVE_VIEW_CAPACITY;
 
 use anyhow::{Context, Result};
 use base64::Engine as _;

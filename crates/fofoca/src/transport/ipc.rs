@@ -274,7 +274,7 @@ where
 }
 
 /// Client-side: send an IPC command to a specific socket path. `doctor` uses
-/// this to query each live daemon discovered under [`runtime_base`] — a
+/// this to query each live daemon discovered under [`crate::util::runtime_base`] — a
 /// missing/dead socket is a plain `Err` the caller can skip.
 ///
 /// # Errors

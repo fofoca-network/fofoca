@@ -42,7 +42,9 @@ impl CustomSender for WebRtcSender {
         transmit: &Transmit<'_>,
     ) -> Poll<io::Result<()>> {
         let remote = parse_custom_addr(dst)?;
-        let Some((out_tx, dropped_tx)) = self.registry.outbound_for(&remote) else {
+        let Some((out_tx, dropped_tx)) = self.registry.with_live(&remote, |handle| {
+            (handle.out_tx.clone(), Arc::clone(&handle.dropped_tx))
+        }) else {
             // No negotiated session: report the path dead rather than
             // buffering — signaling is out of band and iroh should fall
             // back to other paths meanwhile.
@@ -50,10 +52,7 @@ impl CustomSender for WebRtcSender {
         };
 
         // Undo any GSO batching: one QUIC datagram per data-channel message.
-        let chunk_size = transmit
-            .segment_size
-            .unwrap_or_else(|| transmit.contents.len().max(1));
-        for chunk in transmit.contents.chunks(chunk_size) {
+        for chunk in fofoca_iroh_transport_util::datagrams(transmit) {
             match out_tx.try_send(Bytes::copy_from_slice(chunk)) {
                 Ok(()) => {}
                 Err(TrySendError::Full(_)) => {

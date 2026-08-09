@@ -23,8 +23,6 @@ fofoca-util          host helpers, no deps of consequence   (13 crates resolved)
   └── fofoca-protocol    wire vocabulary, + iroh-base      (138 crates)
         ├── fofoca-doc          shared-state CRDT channels
         ├── fofoca-logging      tracing sink + filter
-        ├── fofoca-reassembly   multipart body reassembly
-        ├── fofoca-directory    discovery advertisement codec
         └── fofoca         the engine, + iroh, iroh-gossip (436 crates)
               ├── fofoca-ffi                    the C ABI
               ├── fofoca-iroh-webrtc-transport  QUIC over a WebRTC data channel

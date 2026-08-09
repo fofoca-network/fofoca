@@ -1,9 +1,8 @@
-use std::borrow::Borrow;
 use std::fmt;
-use std::str::FromStr;
 
-use serde::{Deserialize, Deserializer, Serialize};
+use crate::newtype::string_newtype;
 
+string_newtype!(
 /// An agent nickname — a "safe UTF-8" identifier.
 ///
 /// 1..=32 Unicode scalar values from any script (letters, marks,
@@ -18,19 +17,14 @@ use serde::{Deserialize, Deserializer, Serialize};
 /// over-length nickname is rejected at `Message::parse` instead of reaching
 /// the surfaced display string (terminal-injection / `<nick>`/`#mesh`
 /// spoofing).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
-#[serde(transparent)]
-pub struct Nickname(String);
-
-impl<'de> Deserialize<'de> for Nickname {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let raw = String::deserialize(deserializer)?;
-        Nickname::new(raw).map_err(serde::de::Error::custom)
-    }
-}
+    Nickname,
+    error = NicknameError,
+    deserialize,
+    from_str,
+    as_ref,
+    borrow,
+    test_from,
+);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NicknameError {
@@ -90,43 +84,6 @@ impl Nickname {
     pub fn random() -> Self {
         Self::new(super::wordlist::random_pair())
             .expect("wordlist combinations are always valid nicknames")
-    }
-
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Display for Nickname {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.0)
-    }
-}
-
-impl FromStr for Nickname {
-    type Err = NicknameError;
-    fn from_str(text: &str) -> Result<Self, Self::Err> {
-        Self::new(text)
-    }
-}
-
-impl AsRef<str> for Nickname {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
-
-impl Borrow<str> for Nickname {
-    fn borrow(&self) -> &str {
-        &self.0
-    }
-}
-
-#[cfg(any(test, feature = "test-fixtures"))]
-impl From<&str> for Nickname {
-    fn from(text: &str) -> Self {
-        Self::new(text).expect("invalid nickname in test fixture")
     }
 }
 

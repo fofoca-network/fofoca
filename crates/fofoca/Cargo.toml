@@ -25,7 +25,7 @@ test-fixtures = ["fofoca-protocol/test-fixtures"]
 # Off by default. Exposes the engine internals (crafted-message + state-doc
 # constructors) the app's `harness::adversarial` shim reaches so the adversarial
 # suite can inject malicious wire messages. Never enabled in a normal build.
-adversarial = ["test-fixtures", "fofoca-protocol/adversarial", "fofoca-doc/adversarial", "fofoca-reassembly/adversarial"]
+adversarial = ["test-fixtures", "fofoca-protocol/adversarial", "fofoca-doc/adversarial"]
 # Off by default. Gates out the daemon's `std::process::exit` on the quit path
 # so the daemon returns cleanly and the app's dhat heap profiler (installed in
 # `main`) can flush `dhat-heap.json`. The app's `dhat-heap` feature forwards to
@@ -82,8 +82,6 @@ host = [
     "fofoca-protocol/host",
     "fofoca-doc/host",
     "fofoca-logging/host",
-    "fofoca-reassembly/host",
-    "fofoca-directory/host",
     "dep:fofoca-iroh-multihop-transport",
     "dep:interprocess",
     "dep:libc",
@@ -127,8 +125,6 @@ fofoca-protocol = { path = "../fofoca-protocol", default-features = false }
 # tracing-subscriber), multipart reassembly, and the directory ad codec.
 fofoca-doc = { path = "../fofoca-doc", default-features = false }
 fofoca-logging = { path = "../fofoca-logging", default-features = false }
-fofoca-reassembly = { path = "../fofoca-reassembly", default-features = false }
-fofoca-directory = { path = "../fofoca-directory", default-features = false }
 bs58.workspace = true
 sha2.workspace = true
 rand.workspace = true

@@ -6,6 +6,7 @@
 //! layer never touches the peer roster directly — it calls into
 //! `lifecycle::observe` and dispatches by kind.
 
+use std::ops::ControlFlow;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -271,10 +272,6 @@ async fn flush_pending(state: &mut EventLoopState, ctx: &HandlerCtx<'_>, edge: &
 /// `mark_seen` dedup are identical on both planes — a message delivered over
 /// both surfaces exactly once. `message` is mutable so a directed frame sealed
 /// to us can be decrypted in place before surfacing (see `gate_and_decrypt`).
-#[expect(
-    clippy::too_many_lines,
-    reason = "one straight-line validate/dispatch pipeline (parse, self-echo drop, rate-check, lifecycle observe, dispatch by kind, message-log); splitting would scatter a single sequential gate chain across helpers"
-)]
 pub(crate) async fn ingest(
     content: Bytes,
     state: &mut EventLoopState,
@@ -384,85 +381,6 @@ pub(crate) async fn ingest(
     maybe_push_inbound(ctx, &message, surfaceable, app_class.as_ref());
 
     match &message.kind {
-        MessageKind::PeerInfo => {
-            handle_peer_info(&message, content, state, ctx).await;
-            return;
-        }
-        MessageKind::Digest => {
-            antientropy::handle_digest(&message, state, ctx).await;
-            return;
-        }
-        MessageKind::Ping => {
-            auto_pong(&message, state, ctx).await;
-            return;
-        }
-        MessageKind::Pong { to } => {
-            // Record arrival for the active round only if addressed to us
-            // and from a known peer — the roster gate bounds the
-            // map and keeps `responded`/`known` honest against a peer that
-            // forges pongs from fabricated authors.
-            if to == ctx.author
-                && state.peers.contains(message.author.as_str())
-                && let Some(round) = state.ping_round.as_mut()
-            {
-                round
-                    .pongs
-                    .insert(message.author.clone(), TokioInstant::now());
-            }
-            return;
-        }
-        MessageKind::State => {
-            dispatch_channel(
-                ChannelEvent {
-                    channel: Channel::State,
-                    message: &message,
-                    surfaceable,
-                },
-                state,
-                app,
-                ctx,
-            );
-            return;
-        }
-        MessageKind::StateDigest => {
-            antientropy::handle_state_digest(Channel::State, &message, state, ctx).await;
-            return;
-        }
-        MessageKind::Meta => {
-            dispatch_channel(
-                ChannelEvent {
-                    channel: Channel::Meta,
-                    message: &message,
-                    surfaceable,
-                },
-                state,
-                app,
-                ctx,
-            );
-            return;
-        }
-        MessageKind::MetaDigest => {
-            antientropy::handle_state_digest(Channel::Meta, &message, state, ctx).await;
-            return;
-        }
-        MessageKind::LinkState => {
-            handle_link_state(&message, state);
-            return;
-        }
-        MessageKind::Presence { subtype } => {
-            lifecycle::handle_presence(
-                lifecycle::PresenceEvent {
-                    message: &message,
-                    subtype: *subtype,
-                    update: &observed.update,
-                    surfaceable,
-                },
-                state,
-                app,
-                ctx,
-            )
-            .await;
-        }
         MessageKind::App { .. } => {
             // The app-payload seam: dispatch RPC legs / chat / task frames.
             // `false` means the frame is plumbing or addressed elsewhere —
@@ -477,6 +395,34 @@ pub(crate) async fn ingest(
                     ctx,
                 )
                 .await
+            {
+                return;
+            }
+        }
+        // Everything the engine owns itself. `Break` means the kind is fully
+        // handled and never reaches retention. Spelled out rather than `_` so
+        // a new kind has to be routed deliberately.
+        MessageKind::Presence { .. }
+        | MessageKind::PeerInfo
+        | MessageKind::Digest
+        | MessageKind::Ping
+        | MessageKind::Pong { .. }
+        | MessageKind::State
+        | MessageKind::StateDigest
+        | MessageKind::Meta
+        | MessageKind::MetaDigest
+        | MessageKind::LinkState => {
+            if dispatch_infra(
+                &message,
+                content,
+                surfaceable,
+                &observed.update,
+                state,
+                app,
+                ctx,
+            )
+            .await
+            .is_break()
             {
                 return;
             }
@@ -497,6 +443,108 @@ pub(crate) async fn ingest(
         state,
         ctx,
     );
+}
+
+/// The engine's own message kinds: presence, peer info, digests, ping/pong,
+/// channel events, link state.
+///
+/// [`ControlFlow::Break`] means the kind is fully handled here and must not
+/// reach retention — which is every arm but `Presence`, whose frame is still
+/// logged like any other. Split out of [`ingest`] because ten arms of routing
+/// sat between that function's gate and its retention step, and only one of
+/// them was the app seam the gate exists for.
+async fn dispatch_infra(
+    message: &Message,
+    content: Bytes,
+    surfaceable: bool,
+    update: &lifecycle::membership::MembershipUpdate,
+    state: &mut EventLoopState,
+    app: &mut dyn NodeApp,
+    ctx: &HandlerCtx<'_>,
+) -> ControlFlow<()> {
+    match &message.kind {
+        MessageKind::PeerInfo => {
+            handle_peer_info(message, content, state, ctx).await;
+            return ControlFlow::Break(());
+        }
+        MessageKind::Digest => {
+            antientropy::handle_digest(message, state, ctx).await;
+            return ControlFlow::Break(());
+        }
+        MessageKind::Ping => {
+            auto_pong(message, state, ctx).await;
+            return ControlFlow::Break(());
+        }
+        MessageKind::Pong { to } => {
+            // Record arrival for the active round only if addressed to us
+            // and from a known peer — the roster gate bounds the
+            // map and keeps `responded`/`known` honest against a peer that
+            // forges pongs from fabricated authors.
+            if to == ctx.author
+                && state.peers.contains(message.author.as_str())
+                && let Some(round) = state.ping_round.as_mut()
+            {
+                round
+                    .pongs
+                    .insert(message.author.clone(), TokioInstant::now());
+            }
+            return ControlFlow::Break(());
+        }
+        MessageKind::State => {
+            dispatch_channel(
+                ChannelEvent {
+                    channel: Channel::State,
+                    message,
+                    surfaceable,
+                },
+                state,
+                app,
+                ctx,
+            );
+            return ControlFlow::Break(());
+        }
+        MessageKind::StateDigest => {
+            antientropy::handle_state_digest(Channel::State, message, state, ctx).await;
+            return ControlFlow::Break(());
+        }
+        MessageKind::Meta => {
+            dispatch_channel(
+                ChannelEvent {
+                    channel: Channel::Meta,
+                    message,
+                    surfaceable,
+                },
+                state,
+                app,
+                ctx,
+            );
+            return ControlFlow::Break(());
+        }
+        MessageKind::MetaDigest => {
+            antientropy::handle_state_digest(Channel::Meta, message, state, ctx).await;
+            return ControlFlow::Break(());
+        }
+        MessageKind::LinkState => {
+            handle_link_state(message, state);
+            return ControlFlow::Break(());
+        }
+        MessageKind::Presence { subtype } => {
+            lifecycle::handle_presence(
+                lifecycle::PresenceEvent {
+                    message,
+                    subtype: *subtype,
+                    update,
+                    surfaceable,
+                },
+                state,
+                app,
+                ctx,
+            )
+            .await;
+        }
+        MessageKind::App { .. } => unreachable!("the app seam is handled by `ingest`"),
+    }
+    ControlFlow::Continue(())
 }
 
 /// Fold a received multihop link-state advertisement into the routing table. The

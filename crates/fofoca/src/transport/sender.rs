@@ -3,7 +3,7 @@ use iroh::EndpointId;
 use iroh_gossip::api::{ApiError, GossipSender};
 
 /// The mesh's outbound broadcast plane: a thin wrapper over the gossip sender
-/// that survives a topic resubscribe (`gossip::heal`) via [`replace_gossip`],
+/// that survives a topic resubscribe (`gossip::heal`) via [`MeshSender::replace_gossip`],
 /// so the ~ten existing `.broadcast()` call sites hold a stable handle across
 /// the swap.
 #[derive(Debug)]

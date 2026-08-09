@@ -10,7 +10,9 @@
 
 pub mod base58check;
 pub mod crypto;
+pub mod directory;
 mod ident;
+mod newtype;
 mod topic;
 
 pub mod identity;
@@ -22,6 +24,7 @@ pub mod mesh;
 pub mod message;
 pub mod nickname;
 pub mod peer_addr;
+pub mod reassembly;
 /// A join token: a literal mesh id, or a creator-minted invite ticket.
 pub mod resolver;
 pub mod seal;
@@ -46,7 +49,7 @@ pub use crypto::{Password, TicketAuth, ct_eq};
 pub use identity::{Identity, encode_pubkey};
 pub use mesh::{
     AdvertiseRequiresReachable, DEFAULT_DIRECTORY, DirectorySelection, LookupOpts, LookupSet, Mesh,
-    MeshConfig, MeshId, MeshIdError, MeshName, NameError, RelayChoice, RelayLadder,
+    MeshConfig, MeshId, MeshIdError, MeshName, NameError, OptFlag, RelayChoice, RelayLadder,
     RelayLadderError, RelaySelection, resolve_lookups, validate_advertise,
 };
 pub use message::{
@@ -58,7 +61,7 @@ pub use seal::seal_to_body;
 pub use topic::TopicId;
 
 /// The invite token itself. Minting lives in
-/// [`ops::invite`](crate::ops::invite); decoding is part of the join vocabulary.
+/// `fofoca::ops::invite`; decoding is part of the join vocabulary.
 pub use crate::invite::InviteTicket;
 /// A join token: a literal mesh id, or a creator-minted invite.
 pub use crate::resolver::{JoinTarget, JoinTargetError};

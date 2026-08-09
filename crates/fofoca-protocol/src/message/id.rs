@@ -2,13 +2,13 @@
 //! The newtype prevents argument-order confusion between `id` and
 //! `after`-cursor parameters that carry the same kind of value.
 
-use std::borrow::Borrow;
 use std::fmt;
-use std::str::FromStr;
 
-use serde::{Deserialize, Deserializer, Serialize};
 use uuid::Uuid;
 
+use crate::newtype::string_newtype;
+
+string_newtype!(
 /// A protocol message identifier — UUID v4 string form.
 ///
 /// Construction goes through `new` (validates UUID format) or `random`
@@ -18,19 +18,14 @@ use uuid::Uuid;
 /// transparent one): an inbound id off the wire is run through `new`, so a
 /// non-UUID `id` is rejected at `Message::parse` rather than panicking later
 /// in `as_uuid_bytes` (the anti-entropy digest path).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
-#[serde(transparent)]
-pub struct MessageId(String);
-
-impl<'de> Deserialize<'de> for MessageId {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let raw = String::deserialize(deserializer)?;
-        MessageId::new(raw).map_err(serde::de::Error::custom)
-    }
-}
+    MessageId,
+    error = IdError,
+    deserialize,
+    from_str,
+    as_ref,
+    borrow,
+    test_from,
+);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IdError(String);
@@ -57,11 +52,6 @@ impl MessageId {
         Self(Uuid::new_v4().to_string())
     }
 
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
     /// The id's 16 raw UUID bytes — the compact form packed into an
     /// anti-entropy digest (vs the 36-char string), so far more ids fit
     /// one gossip message. Infallible: a `MessageId` is always a valid
@@ -70,38 +60,6 @@ impl MessageId {
         Uuid::parse_str(&self.0)
             .expect("MessageId always holds a valid UUID")
             .into_bytes()
-    }
-}
-
-impl fmt::Display for MessageId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl FromStr for MessageId {
-    type Err = IdError;
-    fn from_str(text: &str) -> Result<Self, Self::Err> {
-        Self::new(text)
-    }
-}
-
-impl AsRef<str> for MessageId {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
-
-impl Borrow<str> for MessageId {
-    fn borrow(&self) -> &str {
-        &self.0
-    }
-}
-
-#[cfg(any(test, feature = "test-fixtures"))]
-impl From<&str> for MessageId {
-    fn from(text: &str) -> Self {
-        Self::new(text).expect("invalid message id in test fixture")
     }
 }
 

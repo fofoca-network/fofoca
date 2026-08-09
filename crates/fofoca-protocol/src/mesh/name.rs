@@ -5,12 +5,11 @@
 //! newtype is the single validation point.
 
 use std::fmt;
-use std::str::FromStr;
 
-use serde::Serialize;
-
+use crate::newtype::string_newtype;
 use crate::{ident, wordlist};
 
+string_newtype!(
 /// A human-readable mesh label, bound cryptographically into the topic id.
 ///
 /// 1..=32 "safe UTF-8" scalar values from any script; see
@@ -20,9 +19,10 @@ use crate::{ident, wordlist};
 /// separators `/ \`** — it is never used in a filesystem path — so a mesh name
 /// can be a URL. The newtype is the single validation point — every
 /// construction path goes through `new`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
-#[serde(transparent)]
-pub struct MeshName(String);
+    MeshName,
+    error = NameError,
+    from_str,
+);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NameError {
@@ -182,11 +182,6 @@ impl MeshName {
     }
 
     #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
         self.0.as_bytes()
     }
@@ -196,19 +191,6 @@ impl MeshName {
     /// truncates.
     pub(crate) fn len_u8(&self) -> u8 {
         u8::try_from(self.0.len()).expect("MeshName is <= 128 bytes")
-    }
-}
-
-impl fmt::Display for MeshName {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl FromStr for MeshName {
-    type Err = NameError;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Self::new(s)
     }
 }
 

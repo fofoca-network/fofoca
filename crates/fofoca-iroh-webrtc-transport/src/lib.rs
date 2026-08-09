@@ -44,9 +44,9 @@
 
 mod addr;
 mod ice_uri;
-// Consumed by the browser backend. The host backend has its own equivalent in
-// `native::session`, built the same way for the same reasons — a generation per
-// session, and teardown on drop rather than on a cleanup branch.
+// The session table both backends use. The host backend had a verbatim copy in
+// `native::session`; that copy is gone and `SessionRegistry` is now an alias
+// for `Registry<SessionHandle>`.
 //
 // Compiled in every configuration even so, because this is the only place that
 // logic is provable *cheaply*: the browser backend needs a real browser and a
@@ -58,12 +58,12 @@ mod ice_uri;
 // does drive the browser backend end to end against Chrome, and it is where a
 // question about the *transport* — as opposed to this registry's bookkeeping —
 // gets answered. It is a local run, not a CI one.
+// Still gated on `web` rather than on "no backend": both backends use the type
+// now, but `live_ids`, `clear` and `SessionGuard::remote` are reached only from
+// the browser one.
 #[cfg_attr(
     not(feature = "web"),
-    expect(
-        dead_code,
-        reason = "only the browser backend consumes it; its tests still run"
-    )
+    expect(dead_code, reason = "the browser-only methods; its tests still run")
 )]
 mod registry;
 #[cfg(any(feature = "native", feature = "web"))]
@@ -103,9 +103,11 @@ pub const DATA_CHANNEL_LABEL: &str = "iroh";
 /// Bound on queued outbound datagrams per session. Overflow drops the datagram
 /// (QUIC above retransmits); blocking would stall iroh's shared send loop
 /// across every transport.
+#[cfg(any(feature = "native", feature = "web"))]
 pub(crate) const OUT_QUEUE: usize = 256;
 
 /// Bound on inbound datagrams fanned in from all sessions toward QUIC.
+#[cfg(any(feature = "native", feature = "web"))]
 pub(crate) const IN_QUEUE: usize = 512;
 
 /// The default STUN servers, as `host:port`. Both backends derive their own
@@ -131,6 +133,7 @@ pub const DEFAULT_STUN_HOSTS: [&str; 2] = ["stun1.l.google.com:19302", "stun.clo
 /// Both backends are lossy by design, so a congested lane is indistinguishable
 /// from a broken one unless it says something — but saying it per datagram
 /// would itself be the problem. `total` is the counter *after* the increment.
+#[cfg(any(feature = "native", feature = "web"))]
 pub(crate) fn should_log_drop(total: u64) -> bool {
     total == 1 || total.is_multiple_of(256)
 }

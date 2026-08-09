@@ -5,7 +5,7 @@
 //! `HashMap<K, Instant>` whose bounded-ness relies on every caller remembering
 //! to prune — the map can never outgrow the keys touched within one window. Two
 //! instances tame the membership amplifier: the re-link throttle and the
-//! `PeerInfo`-reflood throttle (see [`crate::daemon::state::EventLoopState`]).
+//! `PeerInfo`-reflood throttle (see `fofoca`'s `EventLoopState`).
 
 use std::collections::HashMap;
 use std::hash::Hash;

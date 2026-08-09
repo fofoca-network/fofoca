@@ -21,6 +21,7 @@ path = "src/lib.rs"
 
 [dependencies]
 iroh.workspace = true
+fofoca-iroh-transport-util = { path = "../fofoca-iroh-transport-util" }
 # `CustomAddr` is not re-exported through `iroh`; name it from iroh-base
 # directly. A consumer that patches `iroh` to a fork must patch `iroh-base` to
 # the same repo and rev, or the graph carries two `iroh_base` versions and the

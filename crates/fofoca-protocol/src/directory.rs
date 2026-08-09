@@ -1,6 +1,11 @@
 //! The directory — opt-in mesh discovery ("meshes all the way
 //! down").
 //!
+//! Folded in from its own crate: it isolated no dependency of its own — every
+//! name it used was already one of this crate's — so the split bought a
+//! manifest, two feature sets and a cross-crate public API where a module
+//! does. See `docs/mesh-slimming.md`.
+//!
 //! A mesh created with `--advertise[=<name>]` re-broadcasts its own
 //! mesh id into a **directory**; a consumer's discovery command browses it. A directory
 //! is not a server — it is itself a well-known public [`Mesh`] derived
@@ -22,9 +27,9 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use fofoca_protocol::crypto::derive_secret;
-use fofoca_protocol::mesh::{LookupOpts, Mesh, MeshConfig, MeshName};
-use fofoca_protocol::{MeshId, MessageBody};
+use crate::crypto::derive_secret;
+use crate::mesh::{LookupOpts, Mesh, MeshConfig, MeshName};
+use crate::{MeshId, MessageBody};
 use fofoca_util::clock::Instant;
 
 /// Domain-separation seed for every directory. The directory name is
@@ -126,7 +131,7 @@ pub struct Listing {
     pub first_seen_unix: i64,
 }
 
-/// The change one [`Listings::observe`] made: a newly seen mesh or a
+/// The change one [`Listings::note`] made: a newly seen mesh or a
 /// refreshed peer count. Departures aren't here — they come from
 /// [`Listings::expire`], which returns the aged-out ids directly. A consumer
 /// maps this onto its own public directory-event type.
@@ -135,7 +140,7 @@ pub enum ListingChange {
     /// A mesh seen for the first time.
     Found(MeshId),
     /// A re-ad whose visible data (peer count) changed. A re-ad with an
-    /// unchanged count produces no event — see [`Listings::observe`].
+    /// unchanged count produces no event — see [`Listings::note`].
     Updated(MeshId),
 }
 
@@ -253,8 +258,8 @@ mod tests {
     use std::time::Duration;
 
     use super::{Ad, ListingChange, Listings, directory_mesh};
-    use fofoca_protocol::MeshId;
-    use fofoca_protocol::mesh::{LookupOpts, MeshName};
+    use crate::MeshId;
+    use crate::mesh::{LookupOpts, MeshName};
 
     fn directory(name: &str) -> MeshName {
         MeshName::new(name).unwrap()

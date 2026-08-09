@@ -13,7 +13,7 @@ use tokio::sync::mpsc;
 
 use super::driver::{NegotiatedSession, drive_session};
 use super::endpoint::WebRtcEndpoint;
-use super::session::{InboundPacket, SessionRegistry};
+use super::session::{InboundPacket, SessionHandle, SessionRegistry};
 use crate::custom_addr;
 use crate::{IN_QUEUE, OUT_QUEUE};
 
@@ -37,7 +37,7 @@ impl WebRtcTransport {
         let (inbound_tx, inbound_rx) = mpsc::channel(IN_QUEUE);
         Arc::new(Self {
             local_id,
-            registry: Arc::new(SessionRegistry::default()),
+            registry: SessionRegistry::new(),
             inbound_tx,
             inbound_rx: Mutex::new(Some(inbound_rx)),
             local_addrs: Watchable::new(vec![custom_addr(local_id)]),
@@ -62,10 +62,11 @@ impl WebRtcTransport {
         // generation when it ends, and a session that fails immediately does
         // that while this call is still returning — against an empty registry,
         // that removal is lost and the record below becomes permanent.
-        let generation = self
+        let reservation = self
             .registry
             .reserve(remote)
             .with_context(|| format!("a live WebRTC session for {remote} already exists"))?;
+        let generation = reservation.generation();
         let task = tokio::spawn(drive_session(
             session,
             remote,
@@ -75,8 +76,15 @@ impl WebRtcTransport {
             self.inbound_tx.clone(),
             dropped_tx.clone(),
         ));
-        self.registry
-            .fulfil(remote, out_tx, dropped_tx, generation, task)?;
+        // `None` means the driver already failed and retired its own
+        // generation while this spawn was returning. The handle drops, which
+        // aborts the task rather than recording a session nothing pumps.
+        let guard = reservation
+            .fulfil(SessionHandle::new(out_tx, dropped_tx, task))
+            .with_context(|| {
+                format!("the session for {remote} was retired before it was recorded")
+            })?;
+        guard.commit();
         tracing::debug!(%remote, "webrtc session attached");
         Ok(())
     }
@@ -89,12 +97,12 @@ impl WebRtcTransport {
 
     #[must_use]
     pub fn has_session(&self, remote: &EndpointId) -> bool {
-        self.registry.contains(remote)
+        self.registry.is_live(remote)
     }
 
     #[must_use]
     pub fn session_count(&self) -> usize {
-        self.registry.len()
+        self.registry.live_len()
     }
 
     /// A builder preset that makes this the endpoint's *only* transport
@@ -113,7 +121,7 @@ impl std::fmt::Debug for WebRtcTransport {
         formatter
             .debug_struct("WebRtcTransport")
             .field("local_id", &self.local_id)
-            .field("sessions", &self.registry.len())
+            .field("sessions", &self.registry.live_len())
             .finish_non_exhaustive()
     }
 }

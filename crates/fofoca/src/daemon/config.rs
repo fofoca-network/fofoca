@@ -25,7 +25,7 @@ pub enum DriverMode {
     /// A long-running CLI daemon. Owns the unix-socket IPC listener
     /// (for `msg` / `poll`); ctrl-c / SIGTERM `std::process::exit`s.
     Cli,
-    /// Fully in-process, driven by a [`Node`](super::Node). Outbound sends +
+    /// Fully in-process, driven by a [`Node`](super::node::Node). Outbound sends +
     /// polls arrive **typed** on the `session_rx` that [`run`](super::run) takes
     /// alongside this; `msg_tx` fans inbound out to the consumer's broadcast, or
     /// is `None` when the consumer drains frames some other way (a poll-only
@@ -84,7 +84,7 @@ pub const DIRECTORY_ADVERTISER_COHOST: CoHostPolicy = CoHostPolicy::EagerProbed;
 /// The driver-specific channels live in [`DriverMode`].
 /// Opaque to consumers: built whole by
 /// [`setup_mesh`](super::setup::setup_mesh) and handed to
-/// [`Node::spawn`](super::Node::spawn) or [`run`](super::run) unmodified. The
+/// [`Node::spawn`](super::node::Node::spawn) or [`run`](super::run) unmodified. The
 /// fields are crate-private both because most are `iroh` types the surface must
 /// not expose, and because three of them used to be patched in after
 /// construction — a window in which the value was knowingly wrong.
@@ -191,7 +191,7 @@ pub struct EventLoopConfig {
     /// it before `run` (same late-assignment pattern as `driver`).
     pub(crate) live_count: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
     /// Who drives the loop (CLI / in-process) and the channels that driver
-    /// needs. Assigned by [`Node::spawn`](super::Node::spawn) for an in-process
+    /// needs. Assigned by [`Node::spawn`](super::node::Node::spawn) for an in-process
     /// consumer; a config handed straight to [`run`](super::run) keeps the CLI
     /// default. Crate-private, so it cannot be the wrong variant in a window
     /// visible to a consumer.
