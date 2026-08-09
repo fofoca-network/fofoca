@@ -88,9 +88,34 @@ cargo check --workspace
 cargo test  --workspace          # 29 suites, 518 tests
 ```
 
+That is the default position only. Several features are off by default and a
+whole target is invisible from here, so the gate CI applies is wider — the
+clippy pass over `blob`, the WebRTC crate's two mutually exclusive backends, the
+doc-link check, and the wasm32 half. `cargo task` runs it:
+
+```bash
+cargo task ci                    # the whole gate, in the order CI runs it
+cargo task lint                  # or one part of it
+cargo task wasm
+```
+
+Every task takes `-p` to narrow it to one crate, which keeps the edit-check loop
+proportional to what you changed:
+
+```bash
+cargo task ci   -p fofoca-blobs  # the same gate, one crate
+cargo task test -p fofoca        # its default tests and its `blob` ones
+```
+
+The gate itself is a table in [`tasks/src/gate.rs`](tasks/src/gate.rs), one row
+per invocation in [`.github/workflows/ci.yml`](.github/workflows/ci.yml). CI
+still runs those commands directly, so it stays readable as a workflow and each
+step keeps its own result; the table is the same list, runnable. If the two ever
+disagree, the table is the one that is wrong.
+
 The `mdns` and `dht` features (default on) gate iroh's discovery closure, and
 `async-io` on `fofoca-util` gates its only tokio use, so the off positions are
-worth checking too:
+worth checking too — `cargo task check` covers both, or by hand:
 
 ```bash
 cargo check --workspace --no-default-features
@@ -106,13 +131,13 @@ a CLI runs, not a reduced stand-in. What it loses is the control socket, the
 session state file, the process helpers and the log sink, none of which have a
 wasm32 equivalent.
 
-Three crates reach that target and CI checks each:
+Three crates reach that target, each at its own feature position, and CI checks
+and lints every one:
 
 ```bash
 rustup target add wasm32-unknown-unknown
-cargo check --target wasm32-unknown-unknown -p fofoca --no-default-features
-cargo check --target wasm32-unknown-unknown -p fofoca-blobs --all-targets
-cargo check --target wasm32-unknown-unknown -p fofoca-iroh-webrtc-transport --features web
+cargo task wasm                              # all three
+cargo task wasm -p fofoca-blobs              # or one
 ```
 
 `cargo check` is not enough on its own, which is why
@@ -129,6 +154,10 @@ CC=$(brew --prefix llvm)/bin/clang CC_wasm32_unknown_unknown=$(brew --prefix llv
 
 `fofoca-blobs`'s eight OPFS tests need a real browser and are not in CI:
 `wasm-pack test --headless --chrome crates/fofoca-blobs`.
+
+Neither is the WebRTC transport's browser suite, which drives real browsers over
+a build-profile and main-thread-pressure sweep: `cargo task e2e`, or
+`cargo task e2e --quick` for the fast single-browser pass.
 
 [`examples/chat-webrtc`](examples/chat-webrtc) is a runnable demonstration of
 the browser leg on its own: a chat room a tab and a terminal both join, where

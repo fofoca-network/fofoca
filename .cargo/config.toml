@@ -8,3 +8,14 @@
 # from inside this directory, not the crates themselves.
 [target.wasm32-unknown-unknown]
 rustflags = ["--cfg", 'getrandom_backend="wasm_js"']
+
+# `cargo task <task>` — the quality gate and the browser sweep, runnable
+# without transcribing `.github/workflows/ci.yml`.
+#
+# Cargo reads every `.cargo/config.toml` from the invocation's directory up to
+# the filesystem root, so this one alias reaches every crate in the workspace.
+# There is deliberately no per-crate copy: a crate-local file defining the same
+# key would shadow this one, and `cargo task` would mean something different
+# depending on where you stood. Scope with `-p <crate>` instead.
+[alias]
+task = "run --package tasks --"

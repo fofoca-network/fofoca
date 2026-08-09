@@ -1,0 +1,269 @@
+//! The quality gate, as data.
+//!
+//! Every clippy, check, and test invocation in `.github/workflows/ci.yml` is
+//! one row of [`STEPS`], in the workflow's order. Two things follow from that.
+//!
+//! One, the gate is readable in a single screen instead of being spread across
+//! a hundred lines of YAML and shell continuations, and `cargo task ci` is
+//! provably the same list rather than a sincere attempt at the same list.
+//!
+//! Two, `-p` is a filter over the table rather than a second code path. A task
+//! scoped to one crate keeps that crate's rows and drops the rest, so a scoped
+//! run can never quietly diverge from the full run — there is only one
+//! description of what a crate needs.
+
+/// What a step runs, and how the result is judged.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Kind {
+    Lint,
+    Check,
+    Test,
+    /// The same two, against `wasm32-unknown-unknown`. Separate kinds rather
+    /// than a flag on the host ones because the wasm rows are not the host rows
+    /// with a target bolted on: three crates reach that target, each with its
+    /// own feature position, and the check list carries one row the clippy list
+    /// does not.
+    WasmCheck,
+    WasmClippy,
+}
+
+impl Kind {
+    fn subcommand(self) -> &'static str {
+        match self {
+            Self::Lint | Self::WasmClippy => "clippy",
+            Self::Check | Self::WasmCheck => "check",
+            Self::Test => "test",
+        }
+    }
+
+    /// The participle that heads the status line, matching cargo's own.
+    pub(crate) fn verb(self) -> &'static str {
+        match self {
+            Self::Lint | Self::WasmClippy => "Linting",
+            Self::Check | Self::WasmCheck => "Checking",
+            Self::Test => "Testing",
+        }
+    }
+
+    /// How to name this group of rows when reporting that it had none.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Lint => "clippy",
+            Self::Check => "check",
+            Self::Test => "test",
+            Self::WasmCheck => "wasm check",
+            Self::WasmClippy => "wasm clippy",
+        }
+    }
+
+    fn is_wasm(self) -> bool {
+        matches!(self, Self::WasmCheck | Self::WasmClippy)
+    }
+
+    /// Clippy is only a gate if its findings fail the build.
+    fn denies_warnings(self) -> bool {
+        matches!(self, Self::Lint | Self::WasmClippy)
+    }
+}
+
+/// Which packages a step covers.
+#[derive(Clone, Copy)]
+pub(crate) enum Scope {
+    /// The whole workspace. Narrowed to the `-p` names when the task is scoped.
+    Workspace,
+    /// One crate, because the row exists for something only that crate has —
+    /// a non-default feature, or a target nothing else reaches. Dropped when
+    /// the task is scoped to anything else.
+    Crate(&'static str),
+}
+
+pub(crate) struct Step {
+    pub(crate) kind: Kind,
+    pub(crate) scope: Scope,
+    /// Everything after the package selection.
+    pub(crate) args: &'static [&'static str],
+}
+
+/// `.github/workflows/ci.yml`, transcribed. Keep the two in step: if they
+/// disagree, this file is the one that is wrong, because CI is what gates the
+/// branch.
+pub(crate) const STEPS: &[Step] = &[
+    Step {
+        kind: Kind::Lint,
+        scope: Scope::Workspace,
+        args: &["--all-targets"],
+    },
+    // `blob` is off by default (only agent-gossip enables it), so the row above
+    // never lints `src/blob/` — ~1,300 lines including its own ALPN server. The
+    // `--all-features` check row below only *checks* it.
+    Step {
+        kind: Kind::Lint,
+        scope: Scope::Crate("fofoca"),
+        args: &["--features", "blob", "--all-targets"],
+    },
+    // `fofoca-iroh-webrtc-transport` compiles one of two mutually exclusive
+    // backends and neither is on by default, so every default-feature row above
+    // builds neither. `native` is the str0m one, and it owns the loopback test.
+    Step {
+        kind: Kind::Lint,
+        scope: Scope::Crate("fofoca-iroh-webrtc-transport"),
+        args: &["--features", "native", "--all-targets"],
+    },
+    Step {
+        kind: Kind::Check,
+        scope: Scope::Workspace,
+        args: &["--all-targets"],
+    },
+    // The `mdns` and `dht` features exist so a consumer can drop iroh's
+    // discovery closure, and `async-io` so `fofoca-util` can shed tokio.
+    // Nothing else proves those combinations still compile.
+    Step {
+        kind: Kind::Check,
+        scope: Scope::Workspace,
+        args: &["--no-default-features"],
+    },
+    Step {
+        kind: Kind::Check,
+        scope: Scope::Workspace,
+        args: &["--all-features"],
+    },
+    Step {
+        kind: Kind::Check,
+        scope: Scope::Crate("fofoca-iroh-webrtc-transport"),
+        args: &["--features", "native", "--all-targets"],
+    },
+    // Three crates are reachable on wasm32 and between them that is a
+    // substantial amount of code nothing else compiles: roughly a third of
+    // `fofoca-blobs` (`src/opfs.rs`, `src/idb.rs`, `tests/opfs_browser.rs`), the
+    // whole `web` backend of the WebRTC transport, and the portable half of the
+    // engine. Without these rows that code rots silently, and the
+    // `#[expect(...)]` attributes inside it are never lint-checked either.
+    Step {
+        kind: Kind::WasmCheck,
+        scope: Scope::Crate("fofoca-blobs"),
+        args: &["--all-targets"],
+    },
+    Step {
+        kind: Kind::WasmCheck,
+        scope: Scope::Crate("fofoca-iroh-webrtc-transport"),
+        args: &["--features", "web"],
+    },
+    // The engine itself must reach the browser, not merely be avoidable from
+    // it. `--no-default-features` is the portable half: no `host`, so no IPC
+    // listener, no state file, no process helpers.
+    //
+    // Not `--all-targets`: the unit tests pull proptest and insta, which are
+    // host-only dev-deps. The one wasm test target is named on the next row.
+    Step {
+        kind: Kind::WasmCheck,
+        scope: Scope::Crate("fofoca"),
+        args: &["--no-default-features"],
+    },
+    Step {
+        kind: Kind::WasmCheck,
+        scope: Scope::Crate("fofoca"),
+        args: &["--no-default-features", "--test", "wasm_runtime"],
+    },
+    // Clippy, not just check. The `web` backend had never been linted before
+    // these rows existed and carried 18 findings on its first pass.
+    Step {
+        kind: Kind::WasmClippy,
+        scope: Scope::Crate("fofoca-blobs"),
+        args: &["--all-targets"],
+    },
+    Step {
+        kind: Kind::WasmClippy,
+        scope: Scope::Crate("fofoca-iroh-webrtc-transport"),
+        args: &["--features", "web"],
+    },
+    Step {
+        kind: Kind::WasmClippy,
+        scope: Scope::Crate("fofoca"),
+        args: &["--no-default-features"],
+    },
+    Step {
+        kind: Kind::Test,
+        scope: Scope::Workspace,
+        args: &[],
+    },
+    // Not covered by the workspace row: `blob` is off by default, so its ticket
+    // round-trips and the loopback offload→fetch test never run there.
+    Step {
+        kind: Kind::Test,
+        scope: Scope::Crate("fofoca"),
+        args: &["--features", "blob"],
+    },
+    // Not covered by the workspace row either: the loopback suite is behind
+    // `required-features = ["native"]`. It stands up two real endpoints and
+    // completes a QUIC handshake over a str0m data channel, offline via
+    // `IceConfig::host_only()`.
+    Step {
+        kind: Kind::Test,
+        scope: Scope::Crate("fofoca-iroh-webrtc-transport"),
+        args: &["--features", "native"],
+    },
+];
+
+/// The rows of `kind` that survive a `-p` filter, in table order.
+///
+/// An empty `packages` means the unscoped run: every row, workspace rows
+/// covering the workspace.
+pub(crate) fn select(kind: Kind, packages: &[String]) -> Vec<&'static Step> {
+    STEPS
+        .iter()
+        .filter(|step| step.kind == kind)
+        .filter(|step| match step.scope {
+            Scope::Workspace => true,
+            Scope::Crate(name) => packages.is_empty() || packages.iter().any(|want| want == name),
+        })
+        .collect()
+}
+
+impl Step {
+    /// The full argument list, ready to hand to cargo.
+    pub(crate) fn command(&self, packages: &[String]) -> Vec<String> {
+        let mut argv = vec![self.kind.subcommand().to_owned()];
+
+        if self.kind.is_wasm() {
+            argv.push("--target".to_owned());
+            argv.push("wasm32-unknown-unknown".to_owned());
+        }
+
+        match self.scope {
+            // A scoped run replaces the whole workspace with the named crates;
+            // an unscoped one keeps `--workspace`.
+            Scope::Workspace if packages.is_empty() => argv.push("--workspace".to_owned()),
+            Scope::Workspace => argv.extend(
+                packages
+                    .iter()
+                    .flat_map(|name| ["-p".to_owned(), name.clone()]),
+            ),
+            Scope::Crate(name) => {
+                argv.push("-p".to_owned());
+                argv.push(name.to_owned());
+            }
+        }
+
+        argv.extend(self.args.iter().map(|&arg| arg.to_owned()));
+
+        if self.kind.denies_warnings() {
+            argv.push("--".to_owned());
+            argv.push("-D".to_owned());
+            argv.push("warnings".to_owned());
+        }
+
+        argv
+    }
+
+    /// The status line: the participle cargo would use, then the part of the
+    /// invocation that says which slice of the workspace this row is.
+    pub(crate) fn describe(&self, packages: &[String]) -> (&'static str, String) {
+        let subject = self
+            .command(packages)
+            .into_iter()
+            .skip(1)
+            .collect::<Vec<_>>()
+            .join(" ");
+        (self.kind.verb(), subject)
+    }
+}

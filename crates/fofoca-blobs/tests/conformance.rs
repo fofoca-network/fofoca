@@ -497,7 +497,7 @@ macro_rules! backends {
 /// A browser-backed harness. Both browser stores hold the bytes themselves, so
 /// `place` materializes through the store rather than writing a file beside it.
 ///
-/// `dir`/`db` are scoped by the case name: OPFS and IndexedDB persist across
+/// `dir`/`db` are scoped by the case name: OPFS and `IndexedDB` persist across
 /// runs, so a shared name would let one case read another's leftovers.
 #[cfg(target_arch = "wasm32")]
 struct OpfsHarness {
