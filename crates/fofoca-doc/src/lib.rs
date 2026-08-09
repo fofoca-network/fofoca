@@ -204,7 +204,16 @@ impl MeshDoc {
     /// field other than the author's own? Applied to a throwaway fork so the live
     /// doc is never touched by an unauthorized change. Always `false` on an
     /// ungated channel — there is no field to guard.
-    fn forges_foreign_entry(&self, change: &Change, author: &Nickname) -> bool {
+    /// `hydrated` lets a caller that already holds `self.to_json()` for this
+    /// same, still-unmutated document hand it over instead of paying for a
+    /// second one. `None` when there is none to reuse — `drain_pending` applies
+    /// between checks, so each pass there needs its own.
+    fn forges_foreign_entry(
+        &self,
+        change: &Change,
+        author: &Nickname,
+        hydrated: Option<&Value>,
+    ) -> bool {
         let Some(gate) = self.gate.as_ref() else {
             return false;
         };
@@ -212,7 +221,10 @@ impl MeshDoc {
         if fork.apply_changes([change.clone()]).is_err() {
             return true;
         }
-        let before = peer_entries(&self.doc, gate);
+        let before = match hydrated {
+            Some(json) => gated_entries(json, gate),
+            None => peer_entries(&self.doc, gate),
+        };
         let after = peer_entries(&fork, gate);
         before
             .keys()
@@ -350,10 +362,15 @@ impl MeshDoc {
         if !self.deps_satisfied(change.deps()) {
             return self.buffer_orphan(hash, change, frame);
         }
-        if self.forges_foreign_entry(&change, &frame.author) {
+        // Hoisted above the gate so the two share one hydration: nothing
+        // mutates the document between them, and `doc_json` over the whole
+        // `meta` map was the dominant cost of ingesting a frame. On the
+        // rejection path this pays for a hydration it does not use, which is
+        // the rare adversarial case rather than the steady-state one.
+        let before = self.to_json();
+        if self.forges_foreign_entry(&change, &frame.author, Some(&before)) {
             return Ingested::Rejected;
         }
-        let before = self.to_json();
         if !self.apply(change, hash, frame.clone()) {
             // Refused by automerge, so nothing was recorded and nothing it
             // could have unblocked has changed. `apply` has already said why.
@@ -510,7 +527,7 @@ impl MeshDoc {
         let Some(entry) = self.pending.remove(&hash) else {
             return;
         };
-        if self.forges_foreign_entry(&entry.change, &entry.frame.author) {
+        if self.forges_foreign_entry(&entry.change, &entry.frame.author, None) {
             return; // dropped, same as a directly-rejected change
         }
         self.apply(entry.change, hash, entry.frame);
@@ -531,7 +548,14 @@ fn decode_hash(encoded: &str) -> Option<ChangeHash> {
 /// Each peer's gated field, keyed by nick (absent → no entry). Derived from the
 /// hydrated JSON so it captures the field whatever its shape.
 fn peer_entries(doc: &Automerge, gate: &SelfWriteGate) -> Map<String, Value> {
-    let json = doc_json(doc);
+    gated_entries(&doc_json(doc), gate)
+}
+
+/// Each peer's gated field, picked out of an already-hydrated document.
+///
+/// Split from [`peer_entries`] so a caller holding a hydration can reuse it
+/// rather than paying for a second one of the same document.
+fn gated_entries(json: &Value, gate: &SelfWriteGate) -> Map<String, Value> {
     let mut entries = Map::new();
     if let Some(peers) = json.get(&gate.map).and_then(Value::as_object) {
         for (nick, entry) in peers {

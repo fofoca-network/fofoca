@@ -47,6 +47,14 @@ pub(crate) struct MissingQuery<'a> {
 pub struct MessageLog {
     capacity: usize,
     messages: VecDeque<Message>,
+    /// How many messages each author currently holds.
+    ///
+    /// Maintained on every push and eviction rather than rebuilt, because
+    /// [`Self::eviction_index`] needs it on nearly every steady-state message:
+    /// at capacity it was hashing a thousand base58 pubkeys to recount what two
+    /// counter updates already know. The map is the *only* derived state here,
+    /// and both mutation sites are in [`Self::push`], so it cannot drift.
+    per_author: HashMap<String, usize>,
 }
 
 impl MessageLog {
@@ -54,6 +62,7 @@ impl MessageLog {
         MessageLog {
             capacity,
             messages: VecDeque::with_capacity(capacity),
+            per_author: HashMap::new(),
         }
     }
 
@@ -67,12 +76,24 @@ impl MessageLog {
     /// union of divergent arrival-order windows. The returned eviction lets
     /// callers prune side indexes keyed by it (the DAG `by_hash`, fork map).
     pub fn push(&mut self, msg: Message) -> Option<Message> {
+        *self.per_author.entry(msg.pubkey.clone()).or_default() += 1;
         self.messages.push_back(msg);
         if self.messages.len() <= self.capacity {
             return None;
         }
         let victim = self.eviction_index();
-        self.messages.remove(victim)
+        let evicted = self.messages.remove(victim);
+        if let Some(gone) = &evicted
+            && let Some(held) = self.per_author.get_mut(&gone.pubkey)
+        {
+            *held -= 1;
+            // No zero entries: one would win the lowest-pubkey tie-break in
+            // `eviction_index` while holding nothing to evict.
+            if *held == 0 {
+                self.per_author.remove(&gone.pubkey);
+            }
+        }
+        evicted
     }
 
     /// Which message to drop when over capacity: the smallest eviction key
@@ -96,18 +117,15 @@ impl MessageLog {
     /// Not a Sybil defence: pubkeys are free, so N identities hold N shares.
     /// It removes the case where one identity costs everyone their history.
     fn eviction_index(&self) -> usize {
-        let mut per_author: HashMap<&str, usize> = HashMap::new();
-        for msg in &self.messages {
-            *per_author.entry(msg.pubkey.as_str()).or_default() += 1;
-        }
         // Ties go to the lowest pubkey, so the choice is total and identical
         // on every node.
-        let fullest = per_author
-            .into_iter()
+        let fullest = self
+            .per_author
+            .iter()
             .max_by(|(lhs_key, lhs_count), (rhs_key, rhs_count)| {
                 lhs_count.cmp(rhs_count).then_with(|| rhs_key.cmp(lhs_key))
             })
-            .map(|(pubkey, _)| pubkey)
+            .map(|(pubkey, _)| pubkey.as_str())
             .expect("over-capacity log is non-empty");
         self.messages
             .iter()
@@ -519,6 +537,38 @@ mod tests {
         );
         let bodies: HashSet<&str> = log.messages.iter().map(|msg| msg.body.as_str()).collect();
         assert!(bodies.contains("honest"), "the honest message must survive");
+    }
+
+    /// The author counts are maintained incrementally rather than recounted,
+    /// so the one way this can go wrong is the map drifting from the log it
+    /// describes — silently picking the wrong victim, on every node, forever.
+    #[test]
+    fn the_author_counts_match_a_fresh_recount_after_churn() {
+        use std::collections::HashMap;
+
+        let mut log = MessageLog::new(8);
+        // Three authors at different rates, well past capacity, so eviction
+        // fires repeatedly and each author is both added and dropped.
+        for step in 0..60i64 {
+            let author = ["aa", "bb", "cc"][usize::try_from(step).expect("fits") % 3];
+            let mut message = msg_at(&format!("{author}-{step}"), 1_700_000_000 + step);
+            message.pubkey = author.repeat(32);
+            log.push(message);
+
+            let mut recounted: HashMap<&str, usize> = HashMap::new();
+            for held in &log.messages {
+                *recounted.entry(held.pubkey.as_str()).or_default() += 1;
+            }
+            let maintained: HashMap<&str, usize> = log
+                .per_author
+                .iter()
+                .map(|(key, count)| (key.as_str(), *count))
+                .collect();
+            assert_eq!(maintained, recounted, "counts drifted at step {step}");
+        }
+        // A dropped author leaves no zero entry behind, or it would win the
+        // lowest-pubkey tie-break while holding nothing.
+        assert!(log.per_author.values().all(|count| *count > 0));
     }
 
     /// **Retention must not depend on arrival order**, across authors too.
