@@ -47,7 +47,23 @@ pub(crate) use fofoca_logging as logging;
 /// iroh, no iroh-gossip, no tokio — so a consumer that only needs to speak
 /// the protocol does not pull in a network stack.
 pub mod protocol {
-    pub use fofoca_protocol::*;
+    // Listed rather than `pub use fofoca_protocol::*`. A glob makes every
+    // future `pub` item in the leaf crate part of *this* crate's API the
+    // moment it is written, with no edit here and nothing to review — which
+    // is how a surface nobody chose ends up needing a cross-repo grep to
+    // shrink. Adding a name below is now a deliberate line.
+    pub use fofoca_protocol::{
+        AdvertiseRequiresReachable, AppFrameParams, AppTag, BodyError, Channel, CorrId,
+        DEFAULT_DIRECTORY, DirectorySelection, IdError, Identity, InviteTicket, JoinTarget,
+        JoinTargetError, LookupOpts, LookupSet, Mesh, MeshConfig, MeshId, MeshIdError, MeshName,
+        Message, MessageBody, MessageId, MessageKind, NameError, Nickname, NicknameError, OptFlag,
+        Password, PresenceSubtype, RelayChoice, RelayLadder, RelayLadderError, RelaySelection,
+        Shard, ShardGroup, TicketAuth, TopicId, base58check, crypto, ct_eq, directory,
+        encode_pubkey, identity, invite, iroh_base, mesh, message, nickname, peer_addr, reassembly,
+        resolve_lookups, resolver, seal, seal_to_body, sole_addressee, validate_advertise,
+    };
+    #[cfg(any(test, feature = "test-fixtures"))]
+    pub use fofoca_protocol::{BuildMsgParams, ChainCtx, build_msg_bytes};
 }
 
 /// Creator-minted invites. The redeem + decode primitives back
@@ -72,7 +88,27 @@ pub(crate) mod testing;
 /// and engine code keep reaching it as `util::…`. The `logging` facade stays
 /// on this side because it fronts the engine's own log sink.
 pub mod util {
-    pub use fofoca_util::*;
+    // Listed rather than a glob, for the reason given on [`protocol`].
+    pub use fofoca_util::{
+        bounded_fifo_set, bounded_queue, clock, consts, cooldown, logs, mesh_prefix,
+        resident_memory, tuning, version,
+    };
+    // The runtime-directory helpers are `host`-gated in the leaf crate: they
+    // are filesystem and uid work a browser has no equivalent of. The glob
+    // this replaced forwarded them without saying so.
+    #[cfg(feature = "host")]
+    pub use fofoca_util::{
+        ensure_mesh_runtime_dir, ensure_parent_private, ensure_runtime_base, is_under_runtime_base,
+        mesh_runtime_dir, runtime_base,
+    };
+    // `bounded_read` is gated on `fofoca-util`'s `async-io`, which this crate
+    // turns on unconditionally in its manifest — so it is always here, and a
+    // `#[cfg(feature = "async-io")]` would be checking a feature *this* crate
+    // does not have and silently never fire. `process` is gated on `host`,
+    // which both crates do have, and this one forwards.
+    pub use fofoca_util::bounded_read;
+    #[cfg(feature = "host")]
+    pub use fofoca_util::process;
 
     /// Deferred `tracing` sink and the pinned directive filter.
     pub mod logging {
