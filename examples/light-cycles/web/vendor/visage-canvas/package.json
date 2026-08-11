@@ -1,0 +1,22 @@
+{
+  "name": "visage-canvas",
+  "version": "0.0.0",
+  "type": "module",
+  "private": true,
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./scene": "./src/scene/index.ts",
+    "./shapes": "./src/shapes/index.ts",
+    "./hit": "./src/hit/index.ts",
+    "./types": "./src/types/index.ts"
+  },
+  "dependencies": {
+    "visage-dom": "workspace:*"
+  },
+  "scripts": {
+    "build": "bun run ../../scripts/build.ts visage-canvas",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  }
+}

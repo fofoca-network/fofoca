@@ -1,0 +1,18 @@
+{
+  "name": "visage-style",
+  "version": "0.0.0",
+  "type": "module",
+  "private": true,
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "visage-dom": "workspace:*"
+  },
+  "scripts": {
+    "build": "bun run ../../scripts/build.ts visage-style",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  }
+}

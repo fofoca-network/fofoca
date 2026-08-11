@@ -81,8 +81,8 @@ jobs:
       # Clippy, not just check. The `web` backend had never been linted before
       # this job existed and carried 18 findings on its first pass.
       #
-      # Nothing else in the workspace builds for wasm32, hence `-p`. No
-      # rustflags and no C toolchain are needed: neither crate pulls
+      # Only these crates build for wasm32, hence `-p` throughout. No
+      # rustflags and no C toolchain are needed: none of them pulls
       # `getrandom` or a C dependency.
       - name: Check (wasm32)
         run: |
@@ -98,12 +98,19 @@ jobs:
           # are host-only dev-deps. The one wasm test target is named below.
           cargo check --target wasm32-unknown-unknown -p fofoca --no-default-features
           cargo check --target wasm32-unknown-unknown -p fofoca --no-default-features --test wasm_runtime
+          # fofoca-netplay sits above the engine (rollback netcode for
+          # peer-to-peer games, not part of it), but must be just as
+          # portable: a browser peer is exactly who needs it, and a match
+          # between a browser and a terminal only works if both run a
+          # bit-identical simulation.
+          cargo check --target wasm32-unknown-unknown -p fofoca-netplay --no-default-features
 
       - name: Clippy (wasm32)
         run: |
           cargo clippy --target wasm32-unknown-unknown -p fofoca-blobs --all-targets -- -D warnings
           cargo clippy --target wasm32-unknown-unknown -p fofoca-iroh-webrtc-transport --features web -- -D warnings
           cargo clippy --target wasm32-unknown-unknown -p fofoca --no-default-features -- -D warnings
+          cargo clippy --target wasm32-unknown-unknown -p fofoca-netplay --no-default-features -- -D warnings
 
       - name: Test
         run: cargo test --workspace
@@ -150,3 +157,117 @@ jobs:
             echo "$missing"
             exit 1
           fi
+
+  # `examples/light-cycles/native/` is its own cargo workspace (a separate
+  # `rust-toolchain.toml` pins it to nightly — `visage-rust-tui` uses native
+  # generators, a nightly-only feature — so it can't join the root `check`
+  # job's stable toolchain). Not covered by anything above; the root CI
+  # doesn't touch `chat-webrtc` either, so this is the first example to get
+  # its own job, not a gap being left open.
+  light-cycles-native:
+    name: light-cycles (native)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: examples/light-cycles/native
+
+    steps:
+      - uses: actions/checkout@v6
+
+      # `rust-src-dir` is what makes this read *this workspace's*
+      # rust-toolchain.toml (nightly, for `visage-rust-tui`'s generators)
+      # rather than the repo root's — the action cds into it before looking
+      # for the file, and hard-fails if the path is gone. So the version
+      # still lives in exactly one place, same as the root `check` job.
+      # It also drives the action's embedded rust-cache (`workspaces`
+      # defaults to it), which is why there is no separate cache step here.
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rust-src-dir: examples/light-cycles/native
+          components: clippy, rustfmt
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # Includes `game/tests/two_bots.rs` — two headless bots on a
+      # loopback-only mesh, no internet, converging purely from exchanged
+      # `lc_turn` inputs. See the plan's "Verification plan" #6.
+      - name: Test
+        run: cargo test --workspace
+
+  # `examples/light-cycles/web/wasm/` is its own cargo workspace (an empty
+  # `[workspace]` table, same trick chat-web uses — `web-sys` doesn't exist
+  # off wasm32). Root toolchain applies (no nightly features here), unlike
+  # the native example above.
+  light-cycles-web:
+    name: light-cycles (web)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      # Root toolchain (no `rust-src-dir`): this workspace pins nothing of
+      # its own. `cache-workspaces` still has to be spelled out, since it
+      # otherwise defaults to `rust-src-dir`, which is unset here.
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: wasm32-unknown-unknown
+          cache-workspaces: examples/light-cycles/web/wasm
+
+      - name: Format
+        working-directory: examples/light-cycles/web/wasm
+        run: cargo fmt --check
+
+      - name: Clippy
+        working-directory: examples/light-cycles/web/wasm
+        run: cargo clippy --all-targets -- -D warnings
+
+      # Native (rlib) target: the crate's own unit tests (grid/round/sim/wire
+      # logic, ported from — and kept wire-compatible with — native/game's
+      # copy) run here since proptest and wasm32 don't mix.
+      - name: Test
+        working-directory: examples/light-cycles/web/wasm
+        run: cargo test
+
+      # `--no-default-features`: the portable half only — see wasm/Cargo.toml's
+      # own comment on why. This is the engine actually reaching the browser,
+      # not merely being avoidable from it.
+      - name: Check (wasm32)
+        working-directory: examples/light-cycles/web/wasm
+        run: cargo check --target wasm32-unknown-unknown --no-default-features
+
+      - name: Clippy (wasm32)
+        working-directory: examples/light-cycles/web/wasm
+        run: cargo clippy --target wasm32-unknown-unknown --no-default-features -- -D warnings
+
+      # `wasm-bindgen-cli`'s version must match the `wasm-bindgen` crate
+      # version resolved into wasm/Cargo.lock, or the glue it emits and the
+      # binary it emits it for disagree at load time. Read out of the
+      # lockfile rather than written down again here, so the two cannot
+      # drift apart silently.
+      - name: Install wasm-bindgen-cli
+        working-directory: examples/light-cycles/web/wasm
+        run: |
+          version=$(cargo pkgid wasm-bindgen | sed 's/.*[@#]//')
+          echo "wasm-bindgen resolved to $version"
+          cargo install wasm-bindgen-cli --version "$version" --locked
+
+      - name: Build wasm
+        run: ./examples/light-cycles/web/build-wasm.sh
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Install frontend dependencies
+        working-directory: examples/light-cycles/web
+        run: bun install --frozen-lockfile
+
+      # Covers the app's own tsconfig.json plus every vendored package's
+      # (visage-dom/visage-canvas/visage-style) — see package.json's
+      # `typecheck` script. Needs the real wasm build above: `wasm.ts`
+      # imports the wasm-bindgen glue's generated types.
+      - name: Typecheck
+        working-directory: examples/light-cycles/web
+        run: bun run typecheck

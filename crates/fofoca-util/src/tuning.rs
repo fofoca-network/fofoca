@@ -527,14 +527,53 @@ pub const RELAY_LIVENESS_FAILS_TO_EVICT: u32 = 2;
 pub const RELAY_REPROBE_BACKOFF_MIN_SECS: u64 = 30;
 pub const RELAY_REPROBE_BACKOFF_MAX_SECS: u64 = 300;
 
-/// Timeout for the private-mode rendezvous identity probe. When a
-/// ladder rung is `AddrInUse`, a member probes it to tell *our*
-/// mesh's beacon (→ stay a peer) from an unrelated mesh
-/// squatting the rung (→ try the next rung). The probe is a loopback
-/// connect to a live listener, so it resolves in milliseconds; this
-/// is only a guard against a pathological non-responding socket, kept
-/// tight so a contended-rung walk can't stall the event loop.
+/// Timeout for *one attempt* of the private-mode rendezvous identity
+/// probe. When a ladder rung is `AddrInUse`, a member probes it to tell
+/// *our* mesh's beacon (→ stay a peer) from an unrelated mesh squatting
+/// the rung (→ try the next rung). The probe is a loopback connect to a
+/// live listener, so it resolves in milliseconds; this is only a guard
+/// against a pathological non-responding socket, kept tight so a
+/// contended-rung walk can't stall the event loop.
+///
+/// See [`RENDEZVOUS_PROBE_ATTEMPTS`] for why a miss is retried rather
+/// than given a longer single window.
 pub const RENDEZVOUS_PROBE_SECS: u64 = 1;
+
+/// How many times the private rung identity-probe is attempted before its
+/// answer is believed.
+///
+/// One shot is not enough, and the reason is asymmetric: a false
+/// *negative* here is not a slow retry, it is a **permanent** split.
+/// `probe_connect` reports a rejected dial and a timed-out dial as the
+/// same `false`, and `beacon::build_rendezvous_endpoint` reads that
+/// `false` as a positive finding of "foreign" — which authorizes it to
+/// bind a rung of its own. Two beacons then serve one mesh forever,
+/// because the loopback path deliberately has no rival-recheck repair
+/// (`daemon::beacon_arm::rival_recheck_applies` is `false` whenever
+/// `bind_ports` is non-empty, on the premise that bind-time arbitration
+/// is atomic — true of the bind, not of the bind *plus a network probe
+/// with a timeout*).
+///
+/// Retrying rather than lengthening the single window is the cheaper
+/// half of the fix: same worst case, but it also covers a transient
+/// rejection, which no timeout value can. The common cases are both
+/// unchanged — a live listener answers on the first attempt in
+/// milliseconds, and a genuine foreign squat rejects just as fast — so
+/// the extra attempts are only ever spent right before an irreversible
+/// decision.
+pub const RENDEZVOUS_PROBE_ATTEMPTS: u32 = 3;
+
+/// How long to wait between two rung identity-probe attempts.
+///
+/// Without this the retry only covers the *timeout* failure, which is the
+/// rarer one. The failure that actually splits a loopback mesh is a rung
+/// that is bound but not yet serving: the owner won the bind race
+/// microseconds ago and its accept loop is not up, so the dial is refused
+/// **immediately**. Back-to-back attempts against that all fail inside a
+/// single millisecond and the retry buys nothing. Spacing them is what
+/// turns [`RENDEZVOUS_PROBE_ATTEMPTS`] into a window the owner can finish
+/// starting up inside.
+pub const RENDEZVOUS_PROBE_RETRY_MS: u64 = 250;
 
 /// How long a departing member waits for its co-hosted rendezvous endpoint
 /// to close (`beacon::Rendezvous::shed_and_wait`).

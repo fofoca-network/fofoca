@@ -1,0 +1,4 @@
+node_modules/
+dist/
+# Written by scripts/wasm-asset.ts, carries the current wasm's content hash.
+src/wasm-path.ts

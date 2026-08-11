@@ -43,7 +43,8 @@ use tokio::sync::{oneshot, watch};
 use crate::lookup::{TransportHandles, add_peer_addr, build_endpoint, build_mesh, probe_connect};
 use crate::protocol::mesh::{LookupOpts, RelayChoice};
 use crate::util::tuning::{
-    HEAL_PROBE_SECS, RENDEZVOUS_CLOSE_SECS, RENDEZVOUS_PROBE_SECS, heal_interval_secs,
+    HEAL_PROBE_SECS, RENDEZVOUS_CLOSE_SECS, RENDEZVOUS_PROBE_ATTEMPTS, RENDEZVOUS_PROBE_RETRY_MS,
+    RENDEZVOUS_PROBE_SECS, heal_interval_secs,
 };
 
 /// Everything [`ensure`] needs to (re)build the rendezvous endpoint.
@@ -377,12 +378,54 @@ fn bare_id_resolvable(lookups: &LookupOpts) -> bool {
 /// TLS handshake) — a foreign rendezvous (different key) is rejected,
 /// a dead socket times out. Resolves in milliseconds against a live
 /// loopback listener; the timeout only guards a pathological socket.
-async fn rung_serves_our_mesh(peer: &Endpoint, rendezvous_id: EndpointId, port: u16) -> bool {
+///
+/// `prober` must be a **throwaway** endpoint, never this member's peer
+/// endpoint, and that is a correctness requirement rather than hygiene.
+/// The dial goes out on `GOSSIP_ALPN`, which is exactly what the beacon's
+/// gossip accepts and adopts as a peer connection. Dialed from our own
+/// endpoint it arrives as a second connection *from us*, and
+/// `PeerState::accept_conn` promotes the newcomer to our **active**
+/// connection, superseding the real one. Closing the probe then reads to
+/// the beacon as our active connection dropping: it marks us
+/// disconnected and emits `NeighborDown`. The probe would tear down the
+/// very link whose existence it is asking about — and on a ticker, kill
+/// it again every time it was re-established. From a throwaway identity
+/// the beacon sees a stranger arrive and leave, which costs it nothing.
+/// [`spawn_rival_probe`] takes the same precaution for the public path.
+async fn rung_serves_our_mesh(prober: &Endpoint, rendezvous_id: EndpointId, port: u16) -> bool {
     let addr = EndpointAddr::new(rendezvous_id)
         .with_ip_addr(SocketAddr::from((Ipv4Addr::LOCALHOST, port)));
-    let ours = probe_connect(peer, addr, Duration::from_secs(RENDEZVOUS_PROBE_SECS)).await;
-    tracing::trace!(target: "fofoca::beacon", port, ours, "private rung identity-probe");
-    ours
+    // Retried, and *spaced*: a `false` here is read by the caller as a
+    // positive "foreign" finding and authorizes an irreversible bind, so
+    // it has to be worth believing, and the miss worth covering is a rung
+    // whose owner won the bind race microseconds ago and is not yet
+    // accepting — which refuses instantly, so unspaced attempts would all
+    // land inside that same gap. See `RENDEZVOUS_PROBE_ATTEMPTS` and
+    // `RENDEZVOUS_PROBE_RETRY_MS`. Both common cases still cost one
+    // attempt — a live listener answers, a foreign squat rejects.
+    for attempt in 1..=RENDEZVOUS_PROBE_ATTEMPTS {
+        if attempt > 1 {
+            n0_future::time::sleep(Duration::from_millis(RENDEZVOUS_PROBE_RETRY_MS)).await;
+        }
+        let ours = probe_connect(
+            prober,
+            addr.clone(),
+            Duration::from_secs(RENDEZVOUS_PROBE_SECS),
+        )
+        .await;
+        if ours {
+            tracing::trace!(target: "fofoca::beacon", port, attempt, "private rung identity-probe: ours");
+            return true;
+        }
+        tracing::trace!(
+            target: "fofoca::beacon",
+            port,
+            attempt,
+            attempts = RENDEZVOUS_PROBE_ATTEMPTS,
+            "private rung identity-probe: no answer"
+        );
+    }
+    false
 }
 
 /// The beacon mirrors the peer's *address-lookups* (so a joiner
@@ -413,7 +456,7 @@ fn beacon_lookups(params: &RendezvousParams) -> LookupOpts {
 /// rung; on `AddrInUse`, probe — *ours* ⇒ `None` (stay a peer),
 /// *foreign* ⇒ next rung. `None` also covers public build failure /
 /// every rung foreign-squatted (≈0); the next tick retries.
-async fn build_rendezvous_endpoint(params: &RendezvousParams, peer: &Endpoint) -> Option<Endpoint> {
+async fn build_rendezvous_endpoint(params: &RendezvousParams) -> Option<Endpoint> {
     let lookups = beacon_lookups(params);
     if params.bind_ports.is_empty() {
         // The public probe-before-claim that used to run here — the analog
@@ -437,6 +480,13 @@ async fn build_rendezvous_endpoint(params: &RendezvousParams, peer: &Endpoint) -
         }
         return endpoint;
     }
+    // Built on the first contended rung and reused for the rest of the
+    // walk, then closed. A throwaway identity, for the reason
+    // `rung_serves_our_mesh` gives at length: probing from `peer` would
+    // make the beacon mistake the probe for this member's own gossip
+    // connection and drop the real one when the probe closes.
+    let mut prober: Option<Endpoint> = None;
+    let mut verdict = None;
     for &port in &params.bind_ports {
         if let Ok(endpoint) = build_endpoint(
             &lookups,
@@ -448,17 +498,41 @@ async fn build_rendezvous_endpoint(params: &RendezvousParams, peer: &Endpoint) -
         .await
         {
             tracing::info!(target: "fofoca::beacon", port, "beacon assumed: bound rendezvous ladder rung");
-            return Some(endpoint);
+            verdict = Some(endpoint);
+            break;
         }
         // build failed (AddrInUse): is it our beacon, or a foreign squat?
-        if rung_serves_our_mesh(peer, params.id, port).await {
+        if prober.is_none() {
+            prober = build_endpoint(
+                &lookups,
+                None,
+                None,
+                Vec::new(),
+                TransportHandles::default(),
+            )
+            .await
+            .ok();
+        }
+        let Some(prober) = prober.as_ref() else {
+            tracing::debug!(target: "fofoca::beacon", "rung probe endpoint build failed; staying peer this tick");
+            break;
+        };
+        if rung_serves_our_mesh(prober, params.id, port).await {
             tracing::debug!(target: "fofoca::beacon", port, "rung already serves our beacon; staying peer");
-            return None;
+            break;
         }
         tracing::debug!(target: "fofoca::beacon", port, "rung squatted by a foreign mesh; trying next rung");
     }
-    tracing::debug!(target: "fofoca::beacon", "all rendezvous ladder rungs occupied; staying peer");
-    None
+    if let Some(prober) = prober {
+        // Closed, not dropped: a dropped endpoint reaches `Drop` open and
+        // iroh says so loudly, and the orderly close also retires the
+        // stranger the beacon just saw instead of leaving it to time out.
+        prober.close().await;
+    }
+    if verdict.is_none() {
+        tracing::debug!(target: "fofoca::beacon", "no rendezvous ladder rung taken; staying peer");
+    }
+    verdict
 }
 
 /// Idempotent: a no-op while we co-host and the task is alive;
@@ -470,8 +544,14 @@ async fn build_rendezvous_endpoint(params: &RendezvousParams, peer: &Endpoint) -
 /// immediately; the verdict lands on the event loop's own arm, which calls
 /// [`claim_after_probe`]. The bind that follows is milliseconds, and
 /// `subscribe_and_join` runs inside the spawned co-host task. The private
-/// ladder walk stays inline: its rung identity-probes resolve in
-/// milliseconds against a live loopback listener.
+/// ladder walk stays inline: against a live loopback listener a rung
+/// identity-probe answers on its first attempt, in milliseconds. Its
+/// *bound* is not milliseconds though — an unresponsive rung costs
+/// `RENDEZVOUS_PROBE_SECS * RENDEZVOUS_PROBE_ATTEMPTS` before the walk
+/// moves on, on this task. That is deliberate (see
+/// [`RENDEZVOUS_PROBE_ATTEMPTS`] on why the answer has to be worth
+/// believing) but it is the one inline cost here that is not trivially
+/// short.
 ///
 /// Returns whether this call stood up a **new** rendezvous (a
 /// `None`/dead → live transition) — the edge the event loop's rival
@@ -553,7 +633,7 @@ async fn claim(
     peer: &Endpoint,
     current: &mut Option<Rendezvous>,
 ) -> bool {
-    let Some(endpoint) = build_rendezvous_endpoint(params, peer).await else {
+    let Some(endpoint) = build_rendezvous_endpoint(params).await else {
         // Public: endpoint build failed. Private: every ladder rung is
         // occupied — our mesh's beacon(s) already exist on the ladder
         // (joiners reach them by identity-checked dial). Either way,

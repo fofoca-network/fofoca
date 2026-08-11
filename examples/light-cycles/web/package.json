@@ -1,0 +1,22 @@
+{
+  "name": "light-cycles-web",
+  "private": true,
+  "type": "module",
+  "workspaces": ["vendor/*"],
+  "scripts": {
+    "dev": "bun --hot dev.ts",
+    "build": "bun build.ts",
+    "preview": "bun preview.ts",
+    "typecheck": "bun scripts/gen-wasm-path.ts && tsc --noEmit -p tsconfig.json && tsc --noEmit -p vendor/visage-dom && tsc --noEmit -p vendor/visage-canvas && tsc --noEmit -p vendor/visage-style"
+  },
+  "dependencies": {
+    "visage-canvas": "workspace:*",
+    "visage-dom": "workspace:*",
+    "visage-style": "workspace:*"
+  },
+  "devDependencies": {
+    "@happy-dom/global-registrator": "^20.11.1",
+    "@types/bun": "^1.3.14",
+    "typescript": "^7.0.2"
+  }
+}

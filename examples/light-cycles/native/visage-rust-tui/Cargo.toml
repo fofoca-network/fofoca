@@ -1,0 +1,17 @@
+[package]
+name = "visage-rust-tui"
+description = "spike + (eventually) a Rust port of visage-dom's generator/signal core and visage-tui's terminal diffing, for light-cycles' native client"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Grapheme segmentation and cell-width measurement — see `tui::width`'s
+# doc comment on why this stands in for `visage-tui`'s own hand-rolled
+# Unicode range tables in v1.
+unicode-segmentation = "1"
+unicode-width = "0.2"

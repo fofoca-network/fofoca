@@ -1623,6 +1623,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "fofoca-netplay"
+version = "0.5.0"
+dependencies = [
+ "anyhow",
+ "fofoca",
+ "proptest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "fofoca-protocol"
 version = "0.5.0"
 dependencies = [

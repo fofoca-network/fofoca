@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.base.json",
+  // Unlike agent-share/web/tsconfig.json's `types: []`: this app's import
+  // graph reaches `visage-dom/reconcile`, which reads `globalThis.process`
+  // in its `dev/flag.ts` (see that file's own doc comment) — untyped
+  // without `bun`'s ambient `process` declaration. Loading it here doesn't
+  // risk this browser app calling a Bun-only API by mistake: the types are
+  // additive globals, not anything that changes what DOM/browser API
+  // surface looks available.
+  "compilerOptions": { "types": ["bun"] },
+  "include": ["src"]
+}

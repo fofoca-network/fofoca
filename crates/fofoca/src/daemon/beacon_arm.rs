@@ -129,6 +129,16 @@ pub(super) async fn maybe_cohost(
 /// the rendezvous is held. `Never` consumers never reclaim; everyone
 /// else probes first (`!Eager`) so a survivor that already took over
 /// isn't displaced by a colliding duplicate.
+///
+/// Reclaiming the identity is only half of what the window is for. The
+/// other half is the *symmetric* loss: the beacon is alive and belongs to
+/// somebody else, and what we lost is our own gossip link to it. `ensure`
+/// answers that with "stay a peer" and returns `false`, which used to end
+/// the tick — leaving us off the mesh until the heal arm's re-graft came
+/// round, up to 15s later. On a loopback mesh that is the whole
+/// bootstrap: a peer whose rendezvous link drops in the first
+/// milliseconds sees an empty roster for 15s, and a two-peer mesh simply
+/// never forms in time. So the re-graft rides this ticker too.
 pub(super) async fn maybe_reclaim(
     state: &mut EventLoopState,
     ctx: &HandlerCtx<'_>,
@@ -151,8 +161,28 @@ pub(super) async fn maybe_reclaim(
         .await;
         if claimed {
             schedule_rival_recheck(state, arm.policy, arm.params, ctx.endpoint);
+            return;
+        }
+        if regrafts_rendezvous(current.is_some(), state.rendezvous_linked) {
+            tracing::info!(
+                target: "fofoca::gossip",
+                "reclaim tick: re-graft the rendezvous (link lost, beacon is someone else's)"
+            );
+            crate::gossip::heal::tick_heal(arm.params.id, ctx.sender).await;
         }
     }
+}
+
+/// Whether a reclaim tick that did not claim should re-graft.
+///
+/// Both guards matter. A beacon holder has nothing to graft to — it *is*
+/// the rendezvous — and a peer that still holds a live link must not dial
+/// again: both heal legs dial `GOSSIP_ALPN`, which the beacon's gossip
+/// adopts, superseding the healthy link and flapping it once per tick.
+/// That is the same pair of conditions [`super::heal::run_heal`] gates its
+/// own re-graft on; this one just gets there sooner.
+fn regrafts_rendezvous(holds_beacon: bool, rendezvous_linked: bool) -> bool {
+    !holds_beacon && !rendezvous_linked
 }
 /// Whether this session's beacon is subject to the periodic rival
 /// re-check shed: any **public** co-host that had to *probe* for the
@@ -300,9 +330,33 @@ pub(super) fn shed_rival_beacon_if_due(
 mod tests {
     use super::super::config::CoHostPolicy;
     use super::{
-        claims_at_startup, next_recheck_delay, probes_before_claim, rival_recheck_applies,
+        claims_at_startup, next_recheck_delay, probes_before_claim, regrafts_rendezvous,
+        rival_recheck_applies,
     };
     use std::time::Duration;
+
+    /// Regression for a two-peer loopback mesh that never formed: a peer
+    /// whose rendezvous link dropped in the first milliseconds after
+    /// joining waited for the 15s heal tick to re-graft, and the mesh
+    /// missed its window. The reclaim tick now re-grafts — but only when
+    /// there is a link to regain and no beacon of our own to graft to.
+    #[test]
+    fn a_reclaim_tick_regrafts_only_when_the_link_is_lost_and_the_beacon_is_not_ours() {
+        assert!(
+            regrafts_rendezvous(false, false),
+            "link lost and the beacon is someone else's: this is the case that stalled"
+        );
+        assert!(
+            !regrafts_rendezvous(false, true),
+            "a live link must not be re-dialled — both heal legs dial GOSSIP_ALPN, and the \
+             beacon adopting the new one flaps the healthy link once per tick"
+        );
+        assert!(
+            !regrafts_rendezvous(true, false),
+            "a beacon holder is the rendezvous; it has nothing to graft to"
+        );
+        assert!(!regrafts_rendezvous(true, true));
+    }
 
     #[test]
     fn directory_advertiser_claims_at_startup_with_probe() {

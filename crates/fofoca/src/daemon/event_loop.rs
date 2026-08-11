@@ -205,6 +205,22 @@ pub async fn run<A: NodeDriver>(
         }
     }
 
+    // Open the fast reclaim window for the first few seconds of the loop's
+    // life, so bootstrap gets the same event-driven retry that failover
+    // does.
+    //
+    // Every other path into this window is armed by a `NeighborDown`
+    // (`gossip::recv::arms_reclaim`), which a node that has *never* linked
+    // never receives. That node is not a hypothetical: two peers starting
+    // together race the beacon's own bind, and the one that dials the
+    // rendezvous in the millisecond before it accepts gets nothing, has no
+    // link to lose, and so arms nothing. Recovery then waited out the 15s
+    // heal cadence — long enough that a two-peer mesh looks simply broken.
+    // With the window open, `maybe_reclaim` re-grafts within
+    // `RECLAIM_INTERVAL_MS` instead, and stops as soon as the link is up.
+    state.reclaim_until =
+        Some(Instant::now() + Duration::from_secs(crate::util::tuning::RECLAIM_WINDOW_SECS));
+
     let (gossip_sender, receiver) = topic.split();
 
     let sender = MeshSender::new(gossip_sender);

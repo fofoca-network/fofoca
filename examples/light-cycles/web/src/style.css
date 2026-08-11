@@ -1,0 +1,364 @@
+/**
+ * The arcade cabinet: a full-bleed dark screen with the arena filling it,
+ * rather than a canvas floating in a document. The original ran a 4:3
+ * field edged in neon with the players' readouts flanking the top, and the
+ * layout here follows that — see `Game.tsx` for the matching structure.
+ *
+ * Dark only. There is no light variant to switch to: a light-cycle trail
+ * has to be drawn on a dark field or it doesn't read as light.
+ *
+ * One type size throughout, including the headings and the attract-mode
+ * banner. This is a monospaced UI: it reads as one because every glyph
+ * sits on the same grid, and a second size breaks that. Emphasis comes
+ * from colour, weight and letter-spacing instead — so there is no
+ * `font-size` anywhere below this block, and adding one is a regression.
+ *
+ * The palette is `moonspace-theme`'s `superstylinDark`, transcribed rather
+ * than imported — and transcribed a *second* time in `colors.ts`, because
+ * the arena is a canvas and a canvas has no cascade to inherit these from.
+ * Change one, change the other.
+ */
+
+:root {
+  font: menu;
+  font-family:
+    'TX-02', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  color-scheme: dark;
+  line-height: 150%;
+
+  --bg: #272727;
+  --bg-sunken: #1e1d1e;
+  --bg-raised: #343334;
+  --fg: #ffffff;
+  --fg-muted: #a6a5a6;
+  --fg-subtle: #777677;
+  --seam: #000000;
+  --accent: #5aaafa;
+  --danger: #ff7d87;
+  --info: #5ad0e8;
+
+  /* The arena's neon edge, as a glow. Alpha rather than a lighter hue, so
+     it sits on whatever is behind it. */
+  --neon: rgb(90 208 232 / 40%);
+  --neon-faint: rgb(90 208 232 / 12%);
+  /* The arena's ruled grid — barely above the floor, so it reads as depth
+     rather than as something in play. */
+  --grid-line: #1d4048;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+#root {
+  height: 100%;
+}
+
+/* ---------------------------------------------------------------- lobby */
+
+.lobby {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 1em;
+  width: min(40ch, 100% - 4ch);
+  min-height: 100%;
+  margin: 0 auto;
+}
+
+h1 {
+  font-weight: bold;
+  letter-spacing: 0.4ch;
+  text-transform: uppercase;
+  text-align: center;
+  margin: 0 0 0.5em;
+  color: var(--info);
+  text-shadow: 0 0 18px var(--neon);
+}
+
+.lobby label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25em;
+}
+
+input {
+  font: inherit;
+  padding: 0.4em 0.6em;
+  border: 1px solid var(--bg-raised);
+  background: var(--bg-sunken);
+  color: var(--fg);
+  width: 100%;
+}
+
+input:focus-visible {
+  outline: 1px solid var(--info);
+  border-color: var(--info);
+}
+
+button {
+  font: inherit;
+  text-transform: uppercase;
+  letter-spacing: 0.2ch;
+  padding: 0.5em 1ch;
+  border: 1px solid var(--info);
+  background: transparent;
+  color: var(--info);
+  cursor: pointer;
+  width: 100%;
+}
+
+button:hover {
+  background: var(--info);
+  color: var(--seam);
+}
+
+button:disabled {
+  color: var(--fg-subtle);
+  border-color: var(--bg-raised);
+  background: transparent;
+  cursor: default;
+}
+
+.error {
+  color: var(--danger);
+}
+
+.faint {
+  color: var(--fg-subtle);
+}
+
+/* ----------------------------------------------------------------- game */
+
+.game {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.75rem;
+  height: 100%;
+  padding: 0.75rem 1rem;
+}
+
+.hud,
+.controls {
+  display: flex;
+  width: 100%;
+  margin: 0;
+}
+
+.hud {
+  flex-direction: column;
+  gap: 0.15em;
+}
+
+/* The players flank the screen: two land at the edges, more spread evenly.
+   This is the readout arrangement the cabinet used. */
+.players {
+  display: flex;
+  justify-content: space-between;
+  width: 100%;
+  gap: 2ch;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  min-height: 1.5em;
+  text-transform: uppercase;
+  letter-spacing: 0.2ch;
+}
+
+.player {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75ch;
+  text-shadow: 0 0 12px currentcolor;
+}
+
+.player__you {
+  color: var(--fg-subtle);
+  letter-spacing: 0.1ch;
+  text-shadow: none;
+}
+
+.player[data-alive='false'] .player__name {
+  opacity: 0.35;
+  text-decoration: line-through;
+}
+
+.player--lobby {
+  color: var(--fg-muted);
+  text-shadow: none;
+}
+
+.status {
+  width: 100%;
+  margin: 0;
+  text-align: center;
+  text-transform: uppercase;
+  letter-spacing: 0.4ch;
+  min-height: 1.5em;
+  color: var(--info);
+  text-shadow: 0 0 16px var(--neon);
+}
+
+.status[data-desync='true'] {
+  color: var(--danger);
+  text-shadow: none;
+}
+
+/* The arena. Sized by its contents — 64 by 48 characters — rather than by
+   the viewport, the way a terminal's grid is sized by its font. */
+.arena {
+  position: relative;
+  display: flex;
+  min-height: 0;
+  overflow: hidden;
+  /* Centres the arena in whatever height is left, so a 4:3 field in a
+     taller viewport letterboxes evenly instead of pooling all the slack
+     below it — and it pins the readouts to the top and the controls to
+     the bottom on the way, which is the cabinet's arrangement. */
+  margin: auto 0;
+  border: 2px solid var(--info);
+  box-shadow:
+    0 0 24px var(--neon),
+    inset 0 0 32px var(--neon-faint);
+}
+
+/* One cell is one character: `1ch` across, and `1ch` down too, which is
+   what makes the cells square and the 64×48 field come out 4:3 — the
+   aspect the cabinet ran at. A terminal cannot choose its cell aspect, so
+   this is the one place `native/game` cannot match exactly; everything
+   drawn into the grid is identical. */
+.board {
+  margin: 0;
+  padding: 0;
+  font-family: inherit;
+  /* The arena is the one thing that scales, and it scales as a unit — the
+     way a terminal's grid grows when you enlarge its font, not by changing
+     any *text* size in the UI. Cells stay exactly `1ch` square, so the
+     64x48 field stays 4:3 and stays on the character grid.
+
+     The two divisors are the field in `ch`: 64 across, and 48 rows at
+     `line-height: 1ch` each. A monospace `ch` is about 0.6em, so the box
+     is ~38.4em by ~28.8em, and this picks the largest font size whose box
+     still fits beside the readouts and the controls. Roughly, on purpose:
+     `ch` varies a little by font, and `.arena`'s `overflow: hidden` takes
+     up the slack rather than letting a wide font push the controls off
+     the bottom of the window — which is exactly what a fixed size did. */
+  font-size: min(calc((100vw - 3rem) / 38.4), calc((100vh - 9rem) / 28.8));
+  line-height: 1ch;
+  background: var(--seam);
+  /* A full block glyph is taller than the 1ch line box it sits in, which
+     is what makes vertical trails join up with no seam. The overflow is
+     only ever the row above or below, so clipping it at the arena's edge
+     is enough. */
+  overflow: hidden;
+}
+
+.board__row {
+  height: 1ch;
+  white-space: pre;
+}
+
+.board__trail {
+  text-shadow: 0 0 6px currentcolor;
+}
+
+.board__rule {
+  color: var(--grid-line);
+}
+
+/* Attract mode: over the arena, not in the layout, so it cannot resize it. */
+.attract {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5em;
+  text-align: center;
+  pointer-events: none;
+}
+
+.attract__headline {
+  margin: 0;
+  text-transform: uppercase;
+  letter-spacing: 0.5ch;
+  color: var(--info);
+  text-shadow: 0 0 24px var(--neon);
+  animation: pulse 1.6s ease-in-out infinite;
+}
+
+.attract__hint {
+  margin: 0;
+  color: var(--fg-subtle);
+  text-transform: uppercase;
+  letter-spacing: 0.2ch;
+}
+
+/* The one thing on this screen worth selecting, so it opts back out of
+   the overlay's `pointer-events: none`. */
+.attract__link {
+  margin: 0;
+  padding: 0.25em 1ch;
+  border: 1px solid var(--info);
+  color: var(--fg);
+  pointer-events: auto;
+  user-select: all;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+@keyframes pulse {
+  50% {
+    opacity: 0.45;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .attract__headline {
+    animation: none;
+  }
+}
+
+.controls {
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 2ch;
+  color: var(--fg-subtle);
+  text-transform: uppercase;
+  letter-spacing: 0.2ch;
+}
+
+.controls p {
+  margin: 0;
+}
+
+.keys {
+  display: flex;
+  align-items: center;
+  gap: 0.5ch;
+}
+
+.room {
+  color: var(--fg-muted);
+}
+
+kbd {
+  border: 1px solid var(--bg-raised);
+  border-radius: 2px;
+  padding: 0 0.5ch;
+  font-family: inherit;
+  color: var(--fg-muted);
+}

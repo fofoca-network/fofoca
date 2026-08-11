@@ -25,6 +25,7 @@ fofoca-util          host helpers, no deps of consequence   (13 crates resolved)
         ├── fofoca-logging      tracing sink + filter
         └── fofoca         the engine, + iroh, iroh-gossip (436 crates)
               ├── fofoca-ffi                    the C ABI
+              ├── fofoca-netplay                rollback netcode for p2p games
               ├── fofoca-iroh-webrtc-transport  QUIC over a WebRTC data channel
               └── fofoca-iroh-multihop-transport  QUIC relayed through peers
 
@@ -46,6 +47,15 @@ through `fofoca::iroh` so the graph can never hold two copies.
 metadata — outboards, root bindings, which ranges are held — for bytes that live
 wherever the caller already keeps them, so a peer can serve verified ranges of a
 file it did not have to copy first.
+
+[`fofoca-netplay`](crates/fofoca-netplay) is GGPO-style rollback netcode for
+peer-to-peer games on a mesh: peers agree a roster in a lobby, then each
+simulates immediately against *predicted* remote inputs and rolls back to
+re-simulate whenever a real input contradicts the guess. Only inputs cross the
+wire, so bandwidth is O(players) and independent of world size, and no peer is
+authoritative. The price is strict determinism — integer arithmetic, no hashed
+iteration, no clocks in the simulation — which `SyncTestSession` checks locally
+rather than leaving to fail as a desync mid-match.
 
 [`fofoca-iroh-webrtc-transport`](crates/fofoca-iroh-webrtc-transport) carries
 QUIC datagrams over a WebRTC data channel as an iroh custom transport. It is how
