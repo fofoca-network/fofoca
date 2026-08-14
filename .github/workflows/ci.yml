@@ -71,11 +71,12 @@ jobs:
       - name: Clippy (webrtc, native backend)
         run: cargo clippy -p fofoca-iroh-webrtc-transport --features native --all-targets -- -D warnings
 
-      # Two crates are reachable on wasm32 and nowhere else, and between them
+      # Four crates are reachable on wasm32 and nowhere else, and between them
       # that is a substantial amount of code no other job compiles: roughly a
       # third of `fofoca-blobs` (`src/opfs.rs`, `src/idb.rs`,
-      # `tests/opfs_browser.rs`) and the whole `web` backend of the WebRTC
-      # transport. Without these steps that code rots silently, and the
+      # `tests/opfs_browser.rs`), the whole `web` backend of the WebRTC
+      # transport, the portable half of the engine, and `fofoca-netplay`'s
+      # simulation. Without these steps that code rots silently, and the
       # `#[expect(...)]` attributes inside it are never lint-checked either.
       #
       # Clippy, not just check. The `web` backend had never been linted before
