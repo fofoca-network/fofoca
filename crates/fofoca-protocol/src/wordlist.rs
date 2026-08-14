@@ -120,3 +120,54 @@ pub(super) fn random_pair() -> String {
     let second = WORDS.choose(&mut rng).expect("wordlist is non-empty");
     format!("{first}-{second}")
 }
+
+/// Holds the TypeScript transcription of [`WORDS`] to this one.
+///
+/// `packages/fofoca-api` has a copy because neither of its backends can reach
+/// [`random_pair`]: the C ABI exports no nickname generator, and adding one is a
+/// wire-visible change to a header mallorca already links against. Two lists
+/// that must agree and cannot see each other would drift, so this is where they
+/// are made to see each other.
+#[cfg(test)]
+mod js_copy {
+    use super::WORDS;
+
+    const SOURCE: &str = include_str!("../../../packages/fofoca-api/src/wordlist.ts");
+
+    /// The words in the TypeScript array, bounded by the array's own delimiters
+    /// rather than scanned for quotes — the prose above it contains
+    /// apostrophes, which a quote scanner would read as entries.
+    fn transcribed() -> Vec<&'static str> {
+        SOURCE
+            .lines()
+            .skip_while(|line| !line.ends_with("= ["))
+            .skip(1)
+            .take_while(|line| *line != "]")
+            .flat_map(|line| line.split(','))
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .map(|entry| entry.trim_matches('\''))
+            .collect()
+    }
+
+    /// Reports the first divergence rather than asserting the two lists are
+    /// equal: `assert_eq!` on 1024 words prints both of them, which buries the
+    /// one word that moved under two screens of the ones that did not.
+    #[test]
+    fn the_typescript_copy_is_word_for_word_the_same() {
+        let copy = transcribed();
+        for (index, (mine, theirs)) in WORDS.iter().zip(&copy).enumerate() {
+            assert_eq!(
+                mine, theirs,
+                "wordlist.ts diverges at index {index}: expected {mine:?}, found {theirs:?}"
+            );
+        }
+        assert_eq!(
+            WORDS.len(),
+            copy.len(),
+            "wordlist.ts has {} words, the Rust list has {}",
+            copy.len(),
+            WORDS.len()
+        );
+    }
+}

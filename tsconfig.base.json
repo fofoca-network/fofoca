@@ -1,0 +1,34 @@
+// Shared compiler options for the root Bun workspace: `packages/*` and
+// `examples/chat/*`.
+//
+// Adapted from `examples/light-cycles/web/tsconfig.base.json`, minus the JSX
+// block (nothing here uses it) and minus `dom` from `lib`. The DOM is added
+// back by the two packages that run in a browser, so a package meant for a
+// terminal cannot reach for `window` and have it type-check.
+//
+// `esnext.disposable` is what types `AsyncDisposable`, which `Mesh` extends.
+//
+// Deliberately no `references` and no `composite`. Project references would
+// force `declaration: true`, and cross-package imports would then resolve
+// through emitted .d.ts files rather than source.
+{
+  "compilerOptions": {
+    "target": "esnext",
+    "module": "preserve",
+    "moduleResolution": "bundler",
+    "lib": ["esnext", "esnext.disposable"],
+
+    "strict": true,
+    "exactOptionalPropertyTypes": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "verbatimModuleSyntax": true,
+
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "skipLibCheck": true,
+    "allowJs": false,
+    "isolatedModules": true
+  }
+}

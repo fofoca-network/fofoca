@@ -1,2 +1,6 @@
 /target
 /lib
+
+# Unanchored, so it also covers the per-package installs the root Bun workspace
+# hoists into. `bun.lock` is committed — CI installs `--frozen-lockfile`.
+node_modules/

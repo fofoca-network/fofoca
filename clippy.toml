@@ -36,4 +36,8 @@ doc-valid-idents = [
     "TopicId",
     "EndpointId",
     "JSON-RPC",
+    # The two host languages `packages/` targets. They are prose, not items, and
+    # backticking them would claim they name something in the code.
+    "JavaScript",
+    "TypeScript",
 ]
