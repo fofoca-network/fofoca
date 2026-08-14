@@ -261,6 +261,17 @@ strip = "debuginfo"
 [profile.release.build-override]
 opt-level = 3
 
+# `strip` above makes the macOS **cdylib** impossible to `dlopen`: dyld refuses
+# it with `mis-aligned LINKEDIT string pool`, which names no cause and no cure.
+# Nothing noticed until `packages/fofoca-ffi` existed, because mallorca links the
+# staticlib and CI only ever read the archive with `nm`.
+#
+# Scoped to this package rather than dropped workspace-wide, and it costs
+# nothing that matters: `strip` never applied to a `.a` in the first place, so
+# mallorca's artifact is byte-for-byte what it was. The cdylib grows ~1.7 MB.
+[profile.release.package.fofoca-ffi]
+strip = "none"
+
 # NOTE: there is deliberately **no `[patch.crates-io]` block** in this workspace,
 # and no consumer of it has one either. Every fork rides a dependency edge
 # instead -- see the iroh family in `[workspace.dependencies]` above for the rule
