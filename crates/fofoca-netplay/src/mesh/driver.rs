@@ -174,7 +174,7 @@ impl<T: Config> NodeDriver for RollbackDriver<T> {
 
     /// Our own public key exists only once the loop is running — nothing
     /// before `Node::spawn` has access to `HandlerCtx` — so this is the
-    /// first chance to record it. [`MeshTransport::local_pubkey`] surfaces
+    /// first chance to record it. [`super::MeshTransport::local_pubkey`] surfaces
     /// it to the frame loop, which needs it to build a [`super::Lobby`].
     async fn on_startup(&mut self, _state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
         if let Ok(mut slot) = self.mailboxes.local_pubkey.lock() {
