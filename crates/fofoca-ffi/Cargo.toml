@@ -30,10 +30,11 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [dependencies]
 # The ONLY mesh dependency — this crate never touches agent-gossip / a2a.
 fofoca = { path = "../fofoca", default-features = false }
+# The portable half of what used to be `src/pipe.rs`, shared with the browser
+# peer. Feature-less by design (see its manifest), so the `mdns` / `dht`
+# forwards above stay this crate's decision and cargo unifies them onto the one
+# `fofoca` build.
+fofoca-pipe = { path = "../fofoca-pipe" }
 tokio.workspace = true
 anyhow.workspace = true
 serde_json.workspace = true
-tracing.workspace = true
-# MessageBody is text-shaped (rejects control bytes), so a raw byte stream
-# rides base64-encoded in the frame body.
-base64 = "0.22"

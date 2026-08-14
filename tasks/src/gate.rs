@@ -20,7 +20,7 @@ pub(crate) enum Kind {
     Test,
     /// The same two, against `wasm32-unknown-unknown`. Separate kinds rather
     /// than a flag on the host ones because the wasm rows are not the host rows
-    /// with a target bolted on: four crates reach that target, each with its
+    /// with a target bolted on: five crates reach that target, each with its
     /// own feature position, and the check list carries one row the clippy list
     /// does not.
     WasmCheck,
@@ -132,13 +132,13 @@ pub(crate) const STEPS: &[Step] = &[
         scope: Scope::Crate("fofoca-iroh-webrtc-transport"),
         args: &["--features", "native", "--all-targets"],
     },
-    // Four crates are reachable on wasm32 and between them that is a
+    // Five crates are reachable on wasm32 and between them that is a
     // substantial amount of code nothing else compiles: roughly a third of
     // `fofoca-blobs` (`src/opfs.rs`, `src/idb.rs`, `tests/opfs_browser.rs`), the
     // whole `web` backend of the WebRTC transport, the portable half of the
-    // engine, and `fofoca-netplay`'s simulation. Without these rows that code
-    // rots silently, and the `#[expect(...)]` attributes inside it are never
-    // lint-checked either.
+    // engine, `fofoca-netplay`'s simulation, and `fofoca-pipe`'s wire contract.
+    // Without these rows that code rots silently, and the `#[expect(...)]`
+    // attributes inside it are never lint-checked either.
     Step {
         kind: Kind::WasmCheck,
         scope: Scope::Crate("fofoca-blobs"),
@@ -174,6 +174,17 @@ pub(crate) const STEPS: &[Step] = &[
         scope: Scope::Crate("fofoca-netplay"),
         args: &["--no-default-features"],
     },
+    // `fofoca-pipe` is the wire contract a tab and a terminal share. If it stops
+    // compiling for wasm32 the browser package cannot be built at all, and that
+    // package is its own cargo workspace, out of `-p`'s reach — so this row is
+    // the only place the breakage is caught from inside the workspace. No
+    // feature args: the crate deliberately has none, so there is nothing to
+    // turn off.
+    Step {
+        kind: Kind::WasmCheck,
+        scope: Scope::Crate("fofoca-pipe"),
+        args: &[],
+    },
     // Clippy, not just check. The `web` backend had never been linted before
     // these rows existed and carried 18 findings on its first pass.
     Step {
@@ -195,6 +206,11 @@ pub(crate) const STEPS: &[Step] = &[
         kind: Kind::WasmClippy,
         scope: Scope::Crate("fofoca-netplay"),
         args: &["--no-default-features"],
+    },
+    Step {
+        kind: Kind::WasmClippy,
+        scope: Scope::Crate("fofoca-pipe"),
+        args: &[],
     },
     Step {
         kind: Kind::Test,

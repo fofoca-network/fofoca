@@ -1547,11 +1547,10 @@ name = "fofoca-ffi"
 version = "0.5.0"
 dependencies = [
  "anyhow",
- "base64",
  "fofoca",
+ "fofoca-pipe",
  "serde_json",
  "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -1633,6 +1632,20 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "fofoca-pipe"
+version = "0.5.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "fofoca",
+ "n0-future",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
