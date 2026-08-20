@@ -1,10 +1,10 @@
 // Shared compiler options for the root Bun workspace: `packages/*` and
 // `examples/chat/*`.
 //
-// Adapted from `examples/light-cycles/web/tsconfig.base.json`, minus the JSX
-// block (nothing here uses it) and minus `dom` from `lib`. The DOM is added
-// back by the two packages that run in a browser, so a package meant for a
-// terminal cannot reach for `window` and have it type-check.
+// Adapted from light-cycles' `web/tsconfig.base.json`, minus the JSX block
+// (nothing here uses it) and minus `dom` from `lib`. The DOM is added back by
+// the two packages that run in a browser, so a package meant for a terminal
+// cannot reach for `window` and have it type-check.
 //
 // `esnext.disposable` is what types `AsyncDisposable`, which `Mesh` extends.
 //

@@ -1,4 +1,4 @@
-/** Production build into `dist/`. Adapted from `examples/chat-webrtc/web/build.ts`. */
+/** Production build into `dist/`. Adapted from chat-webrtc's `web/build.ts`. */
 import { wasmAsset, writeWasmPath } from './scripts/wasm-asset.ts'
 
 const asset = await wasmAsset()

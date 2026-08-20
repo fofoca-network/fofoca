@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
 # Build light-cycles-web for the browser: cargo to a .wasm, wasm-bindgen to
-# the glue. Adapted from examples/chat-webrtc/build-wasm.sh — same toolchain,
-# same shape.
+# the glue. Adapted from the chat-webrtc example's build-wasm.sh — same
+# toolchain, same shape.
 #
 # No wasm-pack and no bundler plugin, on purpose — this is the whole
 # toolchain, and it fits on a screen.

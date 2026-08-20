@@ -1,4 +1,6 @@
-/target
+# Unanchored, so it also covers the examples under `crates/*/examples/`, each of
+# which is a cargo workspace with a `target/` of its own.
+target/
 /lib
 
 # Unanchored, so it also covers the per-package installs the root Bun workspace

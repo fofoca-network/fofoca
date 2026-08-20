@@ -3,6 +3,10 @@
 # member is only what shares `Cargo.lock` and `target/` with the crates it
 # drives, and what puts it inside the workspace lint pass — a runner that
 # defines the quality gate should be held to it.
+#
+# `crates/*` matches one directory down and no further, so the examples under
+# `crates/*/examples/` are not members. Each says at its own root why it must
+# not be.
 members = ["crates/*", "tasks"]
 # Load-bearing on a *virtual* manifest: a root package on edition 2024 implies
 # `resolver = "3"`, but a virtual workspace inherits nothing from its members

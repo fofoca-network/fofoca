@@ -1,4 +1,5 @@
-# A workspace of its own, deliberately — not a member of the repo's `crates/*`.
+# A workspace of its own, deliberately — not a member of the repo's root
+# workspace, even though it sits inside the crate it demonstrates.
 #
 # Two reasons, in order of how much they'd hurt:
 #
@@ -35,7 +36,7 @@ publish = false
 # `fofoca_iroh_webrtc_transport::iroh` and `::iroh_base`. The backend feature is
 # chosen per crate — `native` for the CLI, `web` for the wasm client — because a
 # crate can only be one of those things.
-fofoca-iroh-webrtc-transport = { path = "../../crates/fofoca-iroh-webrtc-transport" }
+fofoca-iroh-webrtc-transport = { path = "../.." }
 chat-proto = { path = "chat-proto" }
 
 anyhow = "1"

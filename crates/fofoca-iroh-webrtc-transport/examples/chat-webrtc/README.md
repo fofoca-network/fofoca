@@ -6,8 +6,8 @@ connection is **QUIC over a `WebRTC` data channel** — one iroh `Connection`, o
 
 The iroh ecosystem has no `WebRTC` transport, so a tab cannot reach an iroh peer
 at all today except through a relay. This is a working one
-([`fofoca-iroh-webrtc-transport`](../../crates/fofoca-iroh-webrtc-transport)),
-and this example is the smallest thing that shows it doing its job.
+([`fofoca-iroh-webrtc-transport`](../..)), and this example is the smallest
+thing that shows it doing its job.
 
 ## What it demonstrates
 

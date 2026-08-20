@@ -1,6 +1,6 @@
 # A workspace of its own — an empty `[workspace]` table is what makes this a
-# root rather than a member of anything above it, same trick as
-# `examples/chat-webrtc/chat-web`: `web-sys` doesn't exist off wasm32, and
+# root rather than a member of anything above it, same trick as the
+# chat-webrtc example's `chat-web`: `web-sys` doesn't exist off wasm32, and
 # feature unification would otherwise hand `fofoca`'s WebRTC transport both
 # backends (native + web) at once.
 [workspace]
@@ -25,8 +25,8 @@ crate-type = ["cdylib", "rlib"]
 # turns on every `getrandom`/`uuid` backend this needs, so nothing about that
 # has to be repeated here (contrast `chat-web`, which doesn't depend on
 # `fofoca-protocol` and so must declare them itself).
-fofoca = { path = "../../../../crates/fofoca", default-features = false }
-fofoca-netplay = { path = "../../../../crates/fofoca-netplay", default-features = false }
+fofoca = { path = "../../../../../fofoca", default-features = false }
+fofoca-netplay = { path = "../../../..", default-features = false }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -41,13 +41,13 @@ surprising everywhere else. Pass `public: true`, or name the legs you want.
 ## The workspace
 
 The root `package.json` globs `packages/*` and `examples/chat/*`. It must never
-glob `examples/*`: `examples/light-cycles/web` is its own Bun workspace root,
-with `"workspaces": ["vendor/*"]`, and two overlapping workspaces make
+reach into `crates/*/examples/`: light-cycles' `web/` is a Bun workspace root of
+its own, with `"workspaces": ["vendor/*"]`, and two overlapping workspaces make
 `bun install` resolve the vendored packages twice. `package.json` cannot carry
 comments, which is why that rule is written down here.
 
 Every package is `private: true` and points its `exports` at `.ts` source rather
-than built output — the shape `examples/light-cycles/web/vendor/*` already uses.
+than built output — the shape light-cycles' own `web/vendor/*` already uses.
 Publishing needs a build step, for a reason worth knowing: Node refuses to strip
 types from a file whose real path is inside `node_modules`, and only the Bun
 workspace symlink is what keeps `fofoca-ffi`'s worker loadable under Node today.

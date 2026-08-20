@@ -537,7 +537,7 @@ A dedicated test guards the shims, because `tokio::time` compiles for wasm32 and
 
 ## 11. Evaluation and limits
 
-Measured numbers from the `examples/chat-webrtc` workspace:
+Measured numbers from the `chat-webrtc` example workspace:
 
 - Native-to-native over the WebRTC data channel moves about 6 times less throughput, at 36 times the latency, than the hole-punched iroh path.
 - Browser-to-native transfers measured 4 to 19 MB/s.
@@ -564,7 +564,7 @@ In this repository:
 - `crates/fofoca/README.md` — the subsystem table, the seam traits, and the tracing-target rules.
 - `FORKED.md` — fork provenance and the pin contract.
 - `docs/mesh-slimming.md` — the crate-split rules and their cost measurements.
-- `examples/chat-webrtc/README.md` — the browser-to-terminal chat and its two-endpoint workaround.
+- `crates/fofoca-iroh-webrtc-transport/examples/chat-webrtc/README.md` — the browser-to-terminal chat and its two-endpoint workaround.
 - Per-crate READMEs under `crates/*/README.md`.
 
 Referenced from code but kept upstream: `AGENTS.md` (concept glossary), `docs/mesh-hash.md`, and `docs/history-integrity.md`.

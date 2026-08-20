@@ -22,7 +22,7 @@ crate-type = ["cdylib", "rlib"]
 # envelope, the transport id and the address convention are shared code, which
 # is why a tab and a terminal can negotiate with each other without either
 # knowing which it is talking to.
-fofoca-iroh-webrtc-transport = { path = "../../../crates/fofoca-iroh-webrtc-transport", features = ["web"] }
+fofoca-iroh-webrtc-transport = { path = "../../..", features = ["web"] }
 chat-proto = { path = "../chat-proto" }
 
 anyhow = "1"

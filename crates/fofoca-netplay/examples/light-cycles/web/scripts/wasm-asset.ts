@@ -1,6 +1,6 @@
 /**
- * Content-addressed serving for the built `.wasm`. Adapted from
- * `examples/chat-webrtc/web/scripts/wasm-asset.ts` — same shape.
+ * Content-addressed serving for the built `.wasm`. Adapted from the
+ * chat-webrtc example's `web/scripts/wasm-asset.ts` — same shape.
  *
  * The binary is served at `/wasm/light_cycles_web_bg.<hash>.wasm`, never at
  * a stable name. Two failures this exists to prevent, both of which read

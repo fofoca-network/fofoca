@@ -2,7 +2,7 @@
  * Dev server. Serves the app, serves the wasm under its content hash, and
  * rewrites `src/wasm-path.ts` whenever the Rust is rebuilt so `--hot` picks
  * the new binary up without a manual reload. Adapted from
- * `examples/chat-webrtc/web/dev.ts` — same shape.
+ * the chat-webrtc example's `web/dev.ts` — same shape.
  */
 import { watch } from 'node:fs'
 

@@ -1,0 +1,12 @@
+# `getrandom` 0.3+ refuses to pick a wasm backend from a cargo feature alone —
+# it also wants this cfg, and says so in a `compile_error!`. Without it every
+# wasm32 build downstream of `rand` / `uuid` / `iroh-base` fails before it
+# reaches our code.
+#
+# A copy of the repo root's `.cargo/config.toml` (and of the chat-webrtc
+# example's). Redundant in-tree — config discovery walks the filesystem to the
+# root, not to the workspace boundary, so the root's copy already reaches here.
+# It is written out anyway because that is the point of an example: lifted out
+# of this repo, it still builds, and the root file says as much.
+[target.wasm32-unknown-unknown]
+rustflags = ["--cfg", 'getrandom_backend="wasm_js"']

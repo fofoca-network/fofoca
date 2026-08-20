@@ -1,6 +1,6 @@
 /**
  * Serve the production build, refusing to if it is stale. Adapted from
- * `examples/chat-webrtc/web/preview.ts`.
+ * the chat-webrtc example's `web/preview.ts`.
  *
  * A `dist/` whose wasm hash no longer matches the one on disk is the most
  * misleading thing this example could hand someone: it runs, and it runs

@@ -6,9 +6,9 @@ another chat log. A terminal and a browser tab can join the same room and
 race each other, with **no server and no authoritative peer**: every
 client runs the same deterministic simulation over the same inputs and
 arrives at the same result on its own. Nothing about who's alive or who
-won is ever announced — only one small input per player per tick is sent,
-over [`fofoca-netplay`](../../crates/fofoca-netplay), which is
-GGPO-style rollback netcode on a fofoca mesh.
+won is ever announced — only one small input per player per tick is sent, over
+[`fofoca-netplay`](../..), which is GGPO-style rollback netcode on a fofoca
+mesh.
 
 ## What it demonstrates
 
@@ -40,15 +40,15 @@ GGPO-style rollback netcode on a fofoca mesh.
 ## Workspace layout
 
 ```
-crates/fofoca-netplay/    # the rollback session, lobby and mesh transport — used by both clients
-examples/light-cycles/
-├── native/                # terminal client — own cargo workspace, pinned to nightly
-│   ├── game/              #   CLI (create/join), game logic, the fofoca embedding
-│   └── visage-rust-tui/   #   a first-draft Rust port of visage-dom + visage-tui's terminal diffing
-└── web/                   # browser client — own cargo workspace + Bun frontend
-    ├── wasm/               #   game logic (independent copy, wire-compatible with native/game's), the fofoca embedding, the wasm-bindgen JS API
-    ├── vendor/              #   vendored visage-dom/visage-canvas/visage-style
-    └── src/                 #   the Bun/TypeScript frontend
+crates/fofoca-netplay/          # the rollback session, lobby and mesh transport — used by both clients
+└── examples/light-cycles/
+    ├── native/                 # terminal client — own cargo workspace, pinned to nightly
+    │   ├── game/               #   CLI (create/join), game logic, the fofoca embedding
+    │   └── visage-rust-tui/    #   a first-draft Rust port of visage-dom + visage-tui's terminal diffing
+    └── web/                    # browser client — own cargo workspace + Bun frontend
+        ├── wasm/               #   game logic (independent copy, wire-compatible with native/game's), the fofoca embedding, the wasm-bindgen JS API
+        ├── vendor/             #   vendored visage-dom/visage-canvas/visage-style
+        └── src/                #   the Bun/TypeScript frontend
 ```
 
 ## Run it
@@ -63,7 +63,7 @@ for you to resize rather than drawing a screen with the room code cut off it.
 Two terminals on one machine, which is the usual case:
 
 ```sh
-cd examples/light-cycles/native
+cd crates/fofoca-netplay/examples/light-cycles/native
 cargo run -p light-cycles-native -- create --nick alice --local
 # prints a room code — type it into the other terminal exactly as shown
 cargo run -p light-cycles-native -- join <room-code> --nick bob --local
@@ -97,7 +97,7 @@ and on macOS `brew install llvm` (Apple's clang has no wasm backend, and
 `ring`'s C core needs one).
 
 ```sh
-cd examples/light-cycles/web
+cd crates/fofoca-netplay/examples/light-cycles/web
 ./build-wasm.sh
 bun install
 bun run dev

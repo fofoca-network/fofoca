@@ -16,8 +16,8 @@ use super::Profile;
 /// imports from a module called `env`, the browser refuses the module with
 /// `Failed to resolve module specifier "env"`, and the test runner reports only
 /// `Failed to detect test as having been run`. Four layers, none of which
-/// mentions clang. `examples/chat-webrtc/build-wasm.sh` says the same thing for
-/// the same reason.
+/// mentions clang. The chat-webrtc example's `build-wasm.sh` says the same
+/// thing for the same reason.
 pub(super) fn wasm_env() -> Result<BTreeMap<String, String>, String> {
     let clang = [
         "/opt/homebrew/opt/llvm/bin/clang",

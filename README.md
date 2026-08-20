@@ -169,12 +169,12 @@ Neither is the WebRTC transport's browser suite, which drives real browsers over
 a build-profile and main-thread-pressure sweep: `cargo task e2e`, or
 `cargo task e2e --quick` for the fast single-browser pass.
 
-[`examples/chat-webrtc`](examples/chat-webrtc) is a runnable demonstration of
-the browser leg on its own: a chat room a tab and a terminal both join, where
-the tab's connection is QUIC over a `WebRTC` data channel and there is no
-signalling server. It is a workspace of its own and depends on nothing here but
-`fofoca-iroh-webrtc-transport`, so it doubles as a check that a consumer of that
-crate restates no iroh pin.
+[`chat-webrtc`](crates/fofoca-iroh-webrtc-transport/examples/chat-webrtc) is a
+runnable demonstration of the browser leg on its own: a chat room a tab and a
+terminal both join, where the tab's connection is QUIC over a `WebRTC` data
+channel and there is no signalling server. It is a workspace of its own and
+depends on nothing here but `fofoca-iroh-webrtc-transport`, so it doubles as a
+check that a consumer of that crate restates no iroh pin.
 
 To build the C ABI as a static library:
 

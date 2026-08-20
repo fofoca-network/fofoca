@@ -14,7 +14,7 @@ type WasmModule = {
 
 /**
  * The *promise* is cached, not the resolved module — and that is load-
- * bearing. See `examples/chat-webrtc/web/src/wasm.ts`'s own note: two
+ * bearing. See the chat-webrtc example's `web/src/wasm.ts` note: two
  * overlapping calls each build a `WebAssembly.Instance` while sharing one
  * glue module, and the second instance wins the glue's internal state —
  * later surfacing as `FnOnce called more than once` or a memory access

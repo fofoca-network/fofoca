@@ -1,5 +1,3 @@
-target/
-
 # wasm-bindgen output: generated from chat-web on every build.
 chat-web/dist/
 

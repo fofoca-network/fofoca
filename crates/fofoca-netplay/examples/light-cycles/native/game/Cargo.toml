@@ -23,8 +23,8 @@ path = "src/main.rs"
 # pattern of depending on a sibling crate's default-features=false: this is
 # a binary, not a portable library, so there's no wasm32 build of this
 # crate to keep lean for.
-fofoca = { path = "../../../../crates/fofoca" }
-fofoca-netplay = { path = "../../../../crates/fofoca-netplay" }
+fofoca.workspace = true
+fofoca-netplay.workspace = true
 visage-rust-tui = { path = "../visage-rust-tui" }
 
 anyhow = "1"
