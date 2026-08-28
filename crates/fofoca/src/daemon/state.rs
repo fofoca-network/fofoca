@@ -750,6 +750,19 @@ impl EventLoopState {
         ))
     }
 
+    /// Whether a gossip broadcast can reach anyone right now. `meshed` is the
+    /// strict answer (a real-peer link), but it is stricter than the overlay:
+    /// a node whose only neighbor is the rendezvous relay already exchanges
+    /// presence over that link, and a peer behind the same relay (a browser
+    /// tab, say) may never form a direct link at all. Document plumbing —
+    /// heads digests, change frames — is small and reconciled by anti-entropy,
+    /// so it rides the relay link too. User content keeps waiting on `meshed`.
+    /// A degraded node is excluded: its overlay is suspected dead, and the
+    /// relay link alone is no proof it recovered.
+    pub(crate) fn overlay_reachable(&self) -> bool {
+        self.meshed || (self.rendezvous_linked && !self.degraded)
+    }
+
     /// Mark the mesh degraded: a fault path (starvation recovery, hard
     /// resume edge) cleared `meshed`, so outbound user content buffers in
     /// `pending_outbound` instead of broadcasting into a dead overlay.

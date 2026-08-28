@@ -227,9 +227,9 @@ async fn resend_one(msg: &Message, state: &EventLoopState, ctx: &HandlerCtx<'_>)
 /// Sweep both shared-state channels' anti-entropy digests (one tick).
 ///
 /// Each digest advertises the channel's automerge heads — see
-/// [`HeadsBody`] and [`handle_state_digest`]. Broadcast whenever meshed, even
-/// on an empty document, so a fresh joiner advertises its empty frontier and
-/// gets backfilled.
+/// [`HeadsBody`] and [`handle_state_digest`]. Broadcast whenever the overlay
+/// is reachable (see [`state_digest`]), even on an empty document, so a fresh
+/// joiner advertises its empty frontier and gets backfilled.
 pub(crate) async fn broadcast_state_digests(
     state: &mut EventLoopState,
     sender: &MeshSender,
@@ -253,20 +253,34 @@ async fn broadcast_state_digest(
     origin: DigestOrigin<'_>,
     channel: Channel,
 ) {
-    if !state.meshed {
-        return;
-    }
-    let heads = state.doc(channel).heads();
-    let Some(body) = super::json_body(&HeadsBody { heads }) else {
+    let Some(digest) = state_digest(state, origin, channel) else {
         return;
     };
     state.idle.broadcasts += 1;
-    broadcast_msg(
-        sender,
-        &Message::new_channel_digest(origin.mesh, origin.author, body, channel)
+    broadcast_msg(sender, &digest).await;
+}
+
+/// The signed heads digest for `channel`, or `None` while no gossip path can
+/// carry it. Unlike the chat digest this does not wait for `meshed`: a node
+/// whose only neighbor is the rendezvous relay still exchanges presence over
+/// that link, so its documents must travel the same way. Gating on `meshed`
+/// left two peers behind one relay with converged rosters and documents that
+/// never met — a card published before anyone joined sat unadvertised until a
+/// real-peer link happened to form, minutes later or never.
+fn state_digest(
+    state: &EventLoopState,
+    origin: DigestOrigin<'_>,
+    channel: Channel,
+) -> Option<Message> {
+    if !state.overlay_reachable() {
+        return None;
+    }
+    let heads = state.doc(channel).heads();
+    let body = super::json_body(&HeadsBody { heads })?;
+    Some(
+        Message::new_channel_digest(origin.mesh, origin.author, body, channel)
             .signed(&state.identity),
     )
-    .await;
 }
 
 /// Handle a received state digest: the sender advertised its automerge heads, so
@@ -282,13 +296,8 @@ pub(crate) async fn handle_state_digest(
     state: &EventLoopState,
     ctx: &HandlerCtx<'_>,
 ) {
-    let Ok(body) = serde_json::from_str::<HeadsBody>(message.body.as_str()) else {
-        return;
-    };
-    let budget = antientropy_max_resend();
-    let missing = state.doc(channel).changes_since(&body.heads, budget);
     let mut resent = 0usize;
-    for frame in missing {
+    for frame in missing_frames(channel, message, state) {
         if let Ok(bytes) = frame.serialize() {
             let _ = ctx.sender.broadcast(Bytes::from(bytes)).await;
             resent += 1;
@@ -299,13 +308,179 @@ pub(crate) async fn handle_state_digest(
     }
 }
 
+/// The signed change frames the author of `digest` lacks on `channel`, up to
+/// the resend budget. Empty for an undecodable digest body.
+fn missing_frames(channel: Channel, digest: &Message, state: &EventLoopState) -> Vec<Message> {
+    let Ok(body) = serde_json::from_str::<HeadsBody>(digest.body.as_str()) else {
+        return Vec::new();
+    };
+    state
+        .doc(channel)
+        .changes_since(&body.heads, antientropy_max_resend())
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
 
-    use super::{ANTIENTROPY_DIGEST_WINDOW_IDS, DigestBody, HeadsBody, WireWindow};
+    use super::{
+        ANTIENTROPY_DIGEST_WINDOW_IDS, DigestBody, DigestOrigin, HeadsBody, WireWindow,
+        missing_frames, state_digest,
+    };
     use crate::daemon::message_log::{DigestWindow, MessageLog};
-    use crate::protocol::{MeshId, Message, MessageBody, Nickname};
+    use crate::daemon::state::EventLoopState;
+    use crate::doc::Ingested;
+    use crate::protocol::{Channel, MeshId, Message, MessageBody, Nickname};
+    use crate::testing::{fresh_state, nick};
+
+    /// A node whose only gossip neighbor is the rendezvous relay: linked to it,
+    /// never to a real peer.
+    fn rendezvous_only() -> EventLoopState {
+        let mut state = fresh_state();
+        state.meshed = false;
+        state.rendezvous_linked = true;
+        state
+    }
+
+    /// Apply a meta merge locally the way `broadcast_state_merge` does, minus
+    /// the wire: build, sign, ingest. What the doc holds afterwards is exactly
+    /// what anti-entropy can re-serve.
+    fn publish_meta(
+        state: &mut EventLoopState,
+        mesh: &MeshId,
+        author: &Nickname,
+        merge: &serde_json::Value,
+    ) {
+        let seed = *state.identity.public().as_bytes();
+        let change = state
+            .doc(Channel::Meta)
+            .build_change(merge, &seed)
+            .expect("a JSON object merges")
+            .expect("a non-empty merge yields a change");
+        let (wire, _plain) = state
+            .doc(Channel::Meta)
+            .compose_wire_body(&change, None)
+            .expect("compose the wire body");
+        let frame =
+            Message::new_channel_event(mesh, author, wire, Channel::Meta).signed(&state.identity);
+        assert!(
+            matches!(
+                state.doc_mut(Channel::Meta).ingest(&frame),
+                Ingested::Applied { .. }
+            ),
+            "a locally-built change applies"
+        );
+    }
+
+    /// One anti-entropy round on the meta channel, from `joiner`'s side:
+    /// `joiner` advertises its heads, `holder` re-serves every change frame
+    /// the digest shows missing, `joiner` ingests them. Returns how many frames
+    /// travelled, or `None` when `joiner` sent no digest at all.
+    fn round(
+        joiner: &mut EventLoopState,
+        joiner_nick: &Nickname,
+        holder: &EventLoopState,
+        mesh: &MeshId,
+    ) -> Option<usize> {
+        let origin = DigestOrigin {
+            mesh,
+            author: joiner_nick,
+        };
+        let digest = state_digest(joiner, origin, Channel::Meta)?;
+        let frames = missing_frames(Channel::Meta, &digest, holder);
+        for frame in &frames {
+            joiner.doc_mut(Channel::Meta).ingest(frame);
+        }
+        Some(frames.len())
+    }
+
+    /// The scenario behind the fix: A publishes its meta card while alone on
+    /// the mesh, B joins later, and the two only ever share the rendezvous
+    /// relay as a gossip neighbor (`meshed` never flips on either side). B's
+    /// meta doc must converge to A's within two anti-entropy rounds.
+    #[test]
+    fn late_joiner_converges_meta_over_a_rendezvous_only_link() {
+        let mesh = MeshId::from("test");
+        let alice_nick = nick("alice");
+        let bob_nick = nick("bob");
+        let mut alice = rendezvous_only();
+        publish_meta(
+            &mut alice,
+            &mesh,
+            &alice_nick,
+            &serde_json::json!({"peers": {"alice": {"status": "idle", "model": "m"}}}),
+        );
+        let mut bob = rendezvous_only();
+        assert_ne!(
+            bob.doc(Channel::Meta).heads(),
+            alice.doc(Channel::Meta).heads(),
+            "bob joins knowing nothing"
+        );
+
+        // Round 1: bob's empty frontier pulls alice's change; alice's digest
+        // finds nothing bob holds that she lacks.
+        let served = round(&mut bob, &bob_nick, &alice, &mesh)
+            .expect("a rendezvous-only joiner still advertises its heads");
+        assert_eq!(served, 1, "bob lacked exactly alice's one change");
+        assert_eq!(
+            round(&mut alice, &alice_nick, &bob, &mesh),
+            Some(0),
+            "alice lacks nothing"
+        );
+        assert_eq!(
+            bob.doc(Channel::Meta).heads(),
+            alice.doc(Channel::Meta).heads(),
+            "converged within one round"
+        );
+        assert_eq!(
+            bob.doc(Channel::Meta).to_json(),
+            alice.doc(Channel::Meta).to_json()
+        );
+
+        // Round 2 is a no-op: nothing left to serve either way.
+        assert_eq!(round(&mut bob, &bob_nick, &alice, &mesh), Some(0));
+        assert_eq!(round(&mut alice, &alice_nick, &bob, &mesh), Some(0));
+    }
+
+    /// The gate itself: a digest goes out when a real peer *or* the rendezvous
+    /// relay is linked, and stays silent with no neighbor at all — or while
+    /// degraded, when the overlay is suspected dead.
+    #[test]
+    fn state_digest_needs_some_gossip_path() {
+        let mesh = MeshId::from("test");
+        let author = nick("alice");
+        let origin = DigestOrigin {
+            mesh: &mesh,
+            author: &author,
+        };
+        let mut state = fresh_state();
+        state.meshed = false;
+        state.rendezvous_linked = false;
+        assert!(
+            state_digest(&state, origin, Channel::Meta).is_none(),
+            "no neighbor: nobody to advertise to"
+        );
+
+        state.rendezvous_linked = true;
+        assert!(
+            state_digest(&state, origin, Channel::Meta).is_some(),
+            "a rendezvous-only link carries the digest"
+        );
+
+        state.note_degraded();
+        assert!(
+            state_digest(&state, origin, Channel::Meta).is_none(),
+            "degraded: the relay link is no proof the overlay is alive"
+        );
+
+        state.rendezvous_linked = false;
+        state.meshed = true;
+        state.degraded = false;
+        assert!(
+            state_digest(&state, origin, Channel::State).is_some(),
+            "meshed, as before"
+        );
+    }
 
     /// A full two-window digest must serialize within the gossip message
     /// cap — the regression guard for the former overflow (200 UUID

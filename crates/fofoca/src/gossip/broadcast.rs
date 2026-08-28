@@ -189,8 +189,9 @@ pub async fn broadcast_state_merge(
         Ingested::Ignored => unreachable!("a locally-built change body always decodes"),
     };
 
-    // 4. Surface our own change, and gossip it (or buffer when unmeshed — the
-    //    change is safe in the local doc for heads-based anti-entropy).
+    // 4. Surface our own change, and gossip it (or buffer while no gossip path
+    //    exists — the change is safe in the local doc for heads-based
+    //    anti-entropy).
     if surface {
         // Surface our own change from a plaintext-bodied view so the `m` delta
         // renders even when the wire body we signed is sealed.
@@ -204,15 +205,15 @@ pub async fn broadcast_state_merge(
         });
     }
     let bytes = Bytes::from(bytes);
-    if state.meshed {
+    if state.overlay_reachable() {
         sender
             .broadcast(bytes.clone())
             .await
             .map_err(|error| anyhow::anyhow!("{error}"))?;
     } else {
-        // Unmeshed: buffer until we mesh. (The change is already in the local
-        // doc, so heads anti-entropy still reconciles it if the buffer is
-        // full.)
+        // No gossip path yet: buffer until we mesh. (The change is already in
+        // the local doc, so heads anti-entropy still reconciles it if the
+        // buffer is full.)
         state.pending_outbound.push((signed, bytes.clone()));
     }
     Ok(Some(bytes))
