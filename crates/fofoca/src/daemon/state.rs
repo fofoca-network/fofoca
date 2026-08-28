@@ -79,27 +79,26 @@ pub(crate) enum DirectState {
     Direct,
     /// The relay is the only active path.
     RelayOnly,
-    /// No active path reported yet.
-    Unknown,
 }
 
 impl DirectState {
-    /// From the `conn_path` label (`direct` / `mixed` / `relay` / `unknown`).
-    pub(crate) fn from_conn_label(label: &str) -> Self {
-        match label {
-            "direct" | "mixed" => Self::Direct,
-            "relay" => Self::RelayOnly,
-            _ => Self::Unknown,
+    /// From a `conn_path` reading; `None` when it reported no path at all.
+    pub(crate) fn from_summary(summary: crate::gossip::PathSummary) -> Option<Self> {
+        use crate::gossip::PathSummary;
+        match summary {
+            PathSummary::Direct | PathSummary::Mixed => Some(Self::Direct),
+            PathSummary::Relay => Some(Self::RelayOnly),
+            PathSummary::Unknown => None,
         }
     }
 }
 
-/// Per-[`DirectState`] link counts, for the census line.
+/// Link counts by [`DirectState`], for the census line.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct DirectCounts {
     pub(crate) direct: usize,
     pub(crate) relay_only: usize,
-    pub(crate) unknown: usize,
+    pub(crate) pending: usize,
 }
 
 /// All mutable state owned by the event loop.
@@ -135,8 +134,7 @@ pub struct EventLoopState {
     /// and the roster; when the relay is lookup only it is also what the send
     /// lanes consult before carrying payload.
     pub(crate) direct: HashMap<EndpointId, DirectState>,
-    /// Whether the relay may carry payload. Mirrors the mesh config
-    /// (`TransportPolicy::relay`), set once at loop start.
+    /// Mirrors `TransportPolicy::relay`, set once at loop start.
     pub(crate) relay_transport: bool,
     /// Where a direct-path probe reports its verdict; the loop's receiver
     /// grafts on it (`transport::probe::on_outcome`). A detached sender until
@@ -803,6 +801,19 @@ impl EventLoopState {
         ))
     }
 
+    /// Record a `conn_path` reading for `peer`; a reading with no path at all
+    /// clears what was known.
+    pub(crate) fn observe_path(&mut self, peer: EndpointId, summary: crate::gossip::PathSummary) {
+        match DirectState::from_summary(summary) {
+            Some(state) => {
+                self.direct.insert(peer, state);
+            }
+            None => {
+                self.direct.remove(&peer);
+            }
+        }
+    }
+
     /// How many linked peers sit in each [`DirectState`], for the census.
     pub(crate) fn direct_counts(&self) -> DirectCounts {
         let mut counts = DirectCounts::default();
@@ -810,7 +821,7 @@ impl EventLoopState {
             match state {
                 DirectState::Direct => counts.direct += 1,
                 DirectState::RelayOnly => counts.relay_only += 1,
-                DirectState::Pending | DirectState::Unknown => counts.unknown += 1,
+                DirectState::Pending => counts.pending += 1,
             }
         }
         counts
@@ -1328,30 +1339,24 @@ mod tests {
     }
 
     #[test]
-    fn direct_state_reads_conn_path_labels_and_counts() {
-        assert_eq!(DirectState::from_conn_label("direct"), DirectState::Direct);
-        assert_eq!(DirectState::from_conn_label("mixed"), DirectState::Direct);
-        assert_eq!(
-            DirectState::from_conn_label("relay"),
-            DirectState::RelayOnly
-        );
-        assert_eq!(
-            DirectState::from_conn_label("unknown"),
-            DirectState::Unknown
-        );
-
+    fn direct_state_follows_conn_path_readings_and_counts() {
+        use crate::gossip::PathSummary;
         let mut state = fresh_state();
-        state.direct.insert(endpoint_id(1), DirectState::Direct);
-        state.direct.insert(endpoint_id(2), DirectState::Direct);
-        state.direct.insert(endpoint_id(3), DirectState::RelayOnly);
+        state.observe_path(endpoint_id(1), PathSummary::Direct);
+        state.observe_path(endpoint_id(2), PathSummary::Mixed);
+        state.observe_path(endpoint_id(3), PathSummary::Relay);
+        state.direct.insert(endpoint_id(4), DirectState::Pending);
         assert_eq!(
             state.direct_counts(),
             DirectCounts {
                 direct: 2,
                 relay_only: 1,
-                unknown: 0
+                pending: 1
             }
         );
+        // A reading with no path clears the entry rather than inventing one.
+        state.observe_path(endpoint_id(3), PathSummary::Unknown);
+        assert_eq!(state.direct.get(&endpoint_id(3)), None);
     }
 
     #[test]

@@ -220,14 +220,6 @@ pub struct TransportPolicy {
     pub relay: bool,
 }
 
-impl TransportPolicy {
-    /// Payload may fall back to the relay when no direct path exists.
-    #[must_use]
-    pub fn relay_as_transport() -> Self {
-        Self { relay: true }
-    }
-}
-
 /// Byte length of the Ed25519 issuer public key an invite-only mesh carries.
 const ISSUER_PUBKEY_LEN: usize = 32;
 
@@ -826,7 +818,7 @@ mod lookup_tests {
     #[test]
     fn config_round_trips_relay_as_transport() {
         let config = MeshConfig {
-            transport: TransportPolicy::relay_as_transport(),
+            transport: TransportPolicy { relay: true },
             ..MeshConfig::public_preset()
         };
         let bytes = config.to_bytes();
@@ -855,7 +847,7 @@ mod lookup_tests {
             lookups: LookupOpts::public_preset(),
             password: Some([0xA5u8; 16]),
             issuer_pubkey: None,
-            transport: TransportPolicy::relay_as_transport(),
+            transport: TransportPolicy { relay: true },
         };
         let decoded = MeshConfig::from_bytes(&config.to_bytes()).unwrap();
         assert_eq!(decoded, config);
@@ -864,7 +856,7 @@ mod lookup_tests {
     #[test]
     fn config_rejects_relay_transport_on_without_a_relay_lookup() {
         let config = MeshConfig {
-            transport: TransportPolicy::relay_as_transport(),
+            transport: TransportPolicy { relay: true },
             ..MeshConfig::loopback()
         };
         assert!(config.validate().is_err(), "no relay to carry payload");

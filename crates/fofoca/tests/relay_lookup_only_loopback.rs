@@ -65,7 +65,10 @@ impl NodeSink for Joined {
                 subtype: PresenceSubtype::Joined,
             } = msg.kind
         {
-            self.peers.lock().expect("no poison").push(msg.author.clone());
+            self.peers
+                .lock()
+                .expect("no poison")
+                .push(msg.author.clone());
             self.changed.notify_waiters();
         }
     }

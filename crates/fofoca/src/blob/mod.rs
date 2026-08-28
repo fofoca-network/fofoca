@@ -184,7 +184,7 @@ mod tests {
             .await
             .expect("register");
         assert!(!ticket.relay_transport);
-        let decoded = BlobTicket::decode(&ticket.encode()).expect("ticket round-trips");
+        let decoded = super::BlobTicket::decode(&ticket.encode()).expect("ticket round-trips");
         assert!(!decoded.relay_transport);
         let mut out = Vec::new();
         fetch(&decoded, &mut out, None)

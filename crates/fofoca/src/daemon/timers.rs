@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use iroh::Endpoint;
 
-use super::state::{DirectState, EventLoopState};
+use super::state::EventLoopState;
 use crate::gossip::event::{NodeEvent, NodeSink};
 use crate::util::clock::{Instant, millis_saturating};
 use crate::util::resident_memory;
@@ -128,7 +128,7 @@ pub(crate) async fn tick_state_refresh(state: &mut EventLoopState, endpoint: &En
         relay_transport = state.relay_transport,
         links_direct = links.direct,
         links_relay_only = links.relay_only,
-        links_unknown = links.unknown,
+        links_pending = links.pending,
         peak_resident_memory_mb = resident_memory::peak_resident_memory_mb().unwrap_or(0),
         idle_wakeups = idle.wakeups,
         idle_prune = idle.prune,
@@ -153,22 +153,21 @@ pub(crate) async fn tick_state_refresh(state: &mut EventLoopState, endpoint: &En
         return;
     }
     let (mut direct, mut relay, mut other) = (0usize, 0usize, 0usize);
-    for &peer_id in &state.linked_endpoints {
+    let linked: Vec<_> = state.linked_endpoints.iter().copied().collect();
+    for peer_id in linked {
         let (conn, relay_url) = crate::gossip::conn_path(endpoint, peer_id).await;
         match conn {
-            "direct" => direct += 1,
-            "relay" => relay += 1,
-            _ => other += 1,
+            crate::gossip::PathSummary::Direct => direct += 1,
+            crate::gossip::PathSummary::Relay => relay += 1,
+            crate::gossip::PathSummary::Mixed | crate::gossip::PathSummary::Unknown => other += 1,
         }
         // A link that was relayed at `NeighborUp` and has since punched a
         // direct path: refresh the reading the roster and lanes consult.
-        state
-            .direct
-            .insert(peer_id, DirectState::from_conn_label(conn));
+        state.observe_path(peer_id, conn);
         tracing::debug!(
             target: "fofoca::lifecycle",
             endpoint_id = %peer_id,
-            conn,
+            conn = conn.label(),
             relay = relay_url.as_ref().map_or("-", |url| url.as_str()),
             "peer conn path"
         );

@@ -13,7 +13,7 @@ use bytes::Bytes;
 use iroh_gossip::api::{ApiError, Event};
 
 use crate::daemon::ctx::HandlerCtx;
-use crate::daemon::state::{DirectState, EventLoopState};
+use crate::daemon::state::EventLoopState;
 use crate::gossip::event::NodeEvent;
 use crate::lifecycle;
 use crate::lookup::add_peer_addr;
@@ -50,7 +50,7 @@ pub(crate) async fn handle_gossip_event(
             tracing::info!(target: "fofoca::gossip",
                 endpoint_id = %node_id,
                 is_rendezvous = node_id == ctx.rendezvous_id,
-                conn,
+                conn = conn.label(),
                 relay = relay.as_ref().map_or("-", |url| url.as_str()),
                 "gossip neighbor up"
             );
@@ -96,9 +96,7 @@ pub(crate) async fn handle_gossip_event(
                 // formed — leaving permanent ghosts that suppressed
                 // both; see the 2026-06-12 roster-collapse review.)
                 state.linked_endpoints.insert(node_id);
-                state
-                    .direct
-                    .insert(node_id, DirectState::from_conn_label(conn));
+                state.observe_path(node_id, conn);
                 // First link to a *real* peer: now (and only now) can
                 // user content actually be delivered. Flush anything
                 // buffered while we were unmeshed, in order.
@@ -1235,8 +1233,7 @@ async fn handle_peer_info(
         let _ = add_peer_addr(ctx.endpoint, peer_addr.clone());
         // With the relay lookup only, the graft waits for a proven direct
         // path (`transport::probe`); the loop grafts on the probe's verdict.
-        let graft = crate::transport::probe::ensure_direct(state, ctx, peer_id, &peer_addr);
-        if graft == crate::transport::probe::Gate::Graft {
+        if crate::transport::probe::ensure_direct(state, ctx, peer_id, &peer_addr) {
             if let Err(error) = ctx.sender.join_peers(vec![peer_id]).await {
                 tracing::warn!(target: "fofoca::gossip", endpoint_id = %peer_id, %error, "PeerInfo graft request failed");
             }

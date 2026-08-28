@@ -1,9 +1,9 @@
 //! Probe, then graft: on a mesh whose relay is lookup only, a peer joins our
 //! gossip overlay only once a direct path to it is proven.
 //!
-//! iroh opens the first connection to a peer behind NAT over the relay and punches
-//! a direct path *inside* it; a gossip link opened on that connection would
-//! carry every frame relayed until the punch lands — and, for a `WebRTC`
+//! iroh opens the first connection to a peer behind NAT over the relay and
+//! punches a direct path *inside* it; a gossip link opened on that connection
+//! would carry every frame relayed until the punch lands — and, for a `WebRTC`
 //! peer, for the life of the link, since a custom-transport path is never
 //! added to a live connection. So the graft waits: an IP peer is probed with
 //! the unicast pool's own connection until iroh selects a non-relay path, a
@@ -15,9 +15,9 @@ use std::time::Duration;
 
 use futures_util::StreamExt as _;
 use iroh::EndpointId;
-use iroh::endpoint::{Connection, PathEvent};
+use iroh::endpoint::Connection;
 
-use super::path::{PathKind, payload_allowed_on};
+use super::path::selected_is_direct;
 use super::webrtc::needs_webrtc_lane;
 use crate::daemon::ctx::HandlerCtx;
 use crate::daemon::state::{DirectState, EventLoopState};
@@ -29,54 +29,34 @@ use crate::util::clock::Instant;
 /// retried on the alive tick rather than waited on.
 pub(crate) const PROBE_DEADLINE: Duration = Duration::from_secs(15);
 
-/// What a probe reports back to the event loop.
+/// A probe's verdict, reported back to the event loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct DirectOutcome {
     pub(crate) peer: EndpointId,
-    /// A non-relay path is selected (or a `WebRTC` session attached).
     pub(crate) direct: bool,
 }
 
-/// The graft decision for one peer, from what is known right now.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Gate {
-    /// Graft now.
-    Graft,
-    /// Not yet: keep the peer off the overlay until a direct path is proven.
-    Hold,
-}
-
-/// Pure: may `peer` be grafted? With the relay allowed as a transport, always.
-/// Otherwise a `WebRTC` pair needs its session attached, and an IP pair needs
-/// a selected non-relay path.
-pub(crate) fn gate(
-    selected: Option<PathKind>,
-    has_session: bool,
-    needs_webrtc: bool,
-    relay_transport: bool,
-) -> Gate {
-    if relay_transport {
-        return Gate::Graft;
-    }
-    let proven = if needs_webrtc {
+/// Pure: may a peer be grafted, from what is known right now? A `WebRTC`
+/// pair needs its session attached; an IP pair needs a proven direct path.
+pub(crate) fn may_graft(known_direct: bool, has_session: bool, needs_webrtc: bool) -> bool {
+    if needs_webrtc {
         has_session
     } else {
-        matches!(selected, Some(PathKind::Ip | PathKind::Custom))
-    };
-    if proven { Gate::Graft } else { Gate::Hold }
+        known_direct
+    }
 }
 
-/// Whether `peer` may be grafted right now. `Hold` means a probe is in flight
-/// or a `WebRTC` session is still being negotiated; the loop grafts on the
-/// [`DirectOutcome`] that follows, or the alive tick retries.
+/// Whether `peer` may be grafted right now. `false` means a probe is in
+/// flight or a `WebRTC` session is still being negotiated; the loop grafts on
+/// the [`DirectOutcome`] that follows, or the alive tick retries.
 pub(crate) fn ensure_direct(
     state: &mut EventLoopState,
     ctx: &HandlerCtx<'_>,
     peer: EndpointId,
     peer_addr: &iroh::EndpointAddr,
-) -> Gate {
+) -> bool {
     if state.relay_transport {
-        return Gate::Graft;
+        return true;
     }
     let needs_webrtc = needs_webrtc_lane(peer_addr) || needs_webrtc_lane(&ctx.endpoint.addr());
     let has_session = state
@@ -84,20 +64,19 @@ pub(crate) fn ensure_direct(
         .as_ref()
         .is_some_and(|handle| handle.has_session(&peer));
     let known = state.direct.get(&peer).copied();
-    let selected = match known {
-        Some(DirectState::Direct) => Some(PathKind::Ip),
-        _ => None,
-    };
-    let decision = gate(selected, has_session, needs_webrtc, false);
-    if decision == Gate::Graft {
+    if may_graft(
+        known == Some(DirectState::Direct),
+        has_session,
+        needs_webrtc,
+    ) {
         state.direct.insert(peer, DirectState::Direct);
-        return Gate::Graft;
+        return true;
     }
     if needs_webrtc || known == Some(DirectState::Pending) {
         // A browser peer proves itself through `negotiate_session`; an IP
         // peer's probe is already running.
         state.direct.entry(peer).or_insert(DirectState::Pending);
-        return Gate::Hold;
+        return false;
     }
     state.direct.insert(peer, DirectState::Pending);
     let pool = state.unicast_pool.clone();
@@ -112,53 +91,57 @@ pub(crate) fn ensure_direct(
         };
         let _ = tx.send(DirectOutcome { peer, direct });
     });
-    Gate::Hold
+    false
 }
 
 /// Wait until `conn`'s selected path is not the relay, or `deadline` passes.
+/// Every path event is a reason to re-read the path list: the event's own
+/// address may be stale by the time it is handled.
 async fn wait_direct(conn: &Connection, deadline: Duration) -> bool {
-    if payload_allowed_on(conn, false) {
-        return true;
-    }
     let mut events = conn.path_events();
     let proven = async {
-        while let Some(event) = events.next().await {
-            // Any selection change is a reason to re-read the path list; the
-            // event's own address is not enough, since a later event may have
-            // moved selection again by the time this one is handled.
-            if matches!(event, PathEvent::Selected { .. }) && payload_allowed_on(conn, false) {
+        loop {
+            if selected_is_direct(conn) {
                 return true;
             }
+            if events.next().await.is_none() {
+                return false;
+            }
         }
-        false
     };
     n0_future::time::timeout(deadline, proven)
         .await
         .unwrap_or(false)
 }
 
-/// Apply a probe's verdict: a proven peer is recorded `Direct` and grafted
-/// (if it is not linked already and there is room), and any frame parked
-/// for it is flushed; an unproven one is recorded `RelayOnly` for the alive
-/// tick to retry.
+/// Apply a probe's verdict: a proven peer is grafted, an unproven one is
+/// recorded `RelayOnly` for the alive tick to retry.
 pub(crate) async fn on_outcome(
     outcome: DirectOutcome,
     state: &mut EventLoopState,
     ctx: &HandlerCtx<'_>,
 ) {
     let DirectOutcome { peer, direct } = outcome;
-    if !direct {
+    if direct {
+        graft_proven(state, ctx, peer).await;
+    } else {
         state.direct.insert(peer, DirectState::RelayOnly);
         tracing::info!(target: super::LOG_TARGET, %peer, "no direct path within the probe deadline; peer stays relay-only");
-        return;
     }
+}
+
+/// Record `peer` as `Direct`, graft it if it is not linked already and there
+/// is room, and flush any frame parked for it.
+pub(crate) async fn graft_proven(
+    state: &mut EventLoopState,
+    ctx: &HandlerCtx<'_>,
+    peer: EndpointId,
+) {
     state.direct.insert(peer, DirectState::Direct);
     if !state.linked_endpoints.contains(&peer) && state.linked_endpoints.len() < ctx.max_peers {
         state.note_relink(peer, Instant::now());
         if let Err(error) = ctx.sender.join_peers(vec![peer]).await {
-            tracing::warn!(target: super::LOG_TARGET, %peer, %error, "graft after a proven direct path failed");
-        } else {
-            tracing::info!(target: super::LOG_TARGET, %peer, "direct path proven; grafting");
+            tracing::warn!(target: super::LOG_TARGET, %peer, %error, "graft request failed");
         }
     }
     if state.meshed && !state.pending_outbound.is_empty() {
@@ -166,10 +149,10 @@ pub(crate) async fn on_outcome(
     }
 }
 
-/// The alive-tick retry: every known peer that is neither linked nor proven
-/// direct gets another `ensure_direct`, subject to the relink cooldown. A
-/// no-op while the relay may carry payload.
-pub(crate) fn retry_direct(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
+/// The alive-tick retry: every known peer that is neither linked nor mid-probe
+/// gets another `ensure_direct`, subject to the relink cooldown. A no-op while
+/// the relay may carry payload.
+pub(crate) async fn retry_direct(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
     if state.relay_transport {
         return;
     }
@@ -185,43 +168,25 @@ pub(crate) fn retry_direct(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
         .collect();
     peers.sort_unstable_by_key(|addr| addr.id);
     for addr in peers {
-        state.note_relink(addr.id, now);
-        if ensure_direct(state, ctx, addr.id, &addr) == Gate::Graft {
-            // Already proven (a `WebRTC` session attached since): graft on the
-            // next outcome path, which needs no probe.
-            let _ = state.direct_proven.send(DirectOutcome {
-                peer: addr.id,
-                direct: true,
-            });
+        if ensure_direct(state, ctx, addr.id, &addr) {
+            graft_proven(state, ctx, addr.id).await;
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Gate, gate};
-    use crate::transport::path::PathKind;
+    use super::may_graft;
 
     #[test]
-    fn relay_as_transport_grafts_unconditionally() {
-        assert_eq!(gate(None, false, false, true), Gate::Graft);
-        assert_eq!(gate(Some(PathKind::Relay), false, true, true), Gate::Graft);
-    }
-
-    #[test]
-    fn ip_peer_needs_a_selected_non_relay_path() {
-        assert_eq!(gate(Some(PathKind::Ip), false, false, false), Gate::Graft);
-        assert_eq!(
-            gate(Some(PathKind::Custom), false, false, false),
-            Gate::Graft
-        );
-        assert_eq!(gate(Some(PathKind::Relay), false, false, false), Gate::Hold);
-        assert_eq!(gate(None, false, false, false), Gate::Hold);
+    fn ip_peer_needs_a_proven_direct_path() {
+        assert!(may_graft(true, false, false));
+        assert!(!may_graft(false, true, false));
     }
 
     #[test]
     fn webrtc_peer_needs_its_session_not_a_path() {
-        assert_eq!(gate(None, true, true, false), Gate::Graft);
-        assert_eq!(gate(Some(PathKind::Ip), false, true, false), Gate::Hold);
+        assert!(may_graft(false, true, true));
+        assert!(!may_graft(true, false, true));
     }
 }

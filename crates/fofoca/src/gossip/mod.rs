@@ -54,19 +54,41 @@ pub(crate) use recv::{
     drain_dead_receiver, flush_pending, handle_gossip_event, ingest, retain_own_broadcast,
 };
 
-/// Snapshot the active transport path to `node_id`: a short label
-/// (`direct` / `relay` / `mixed` / `unknown`) plus the relay URL when
-/// one is in use. Point-in-time, not a watcher — iroh starts a fresh
-/// link relayed and upgrades to direct after hole-punching, so a label
-/// taken right at `NeighborUp` skews toward `relay`; the periodic
-/// census reading is the representative one. Diagnostics only; other
-/// iroh apps wanted this too (sendme #67/#112, psyche #586).
+/// Which transport paths to a peer are active: direct (IP or a custom
+/// transport), the relay, both, or none reported.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathSummary {
+    Direct,
+    Relay,
+    Mixed,
+    Unknown,
+}
+
+impl PathSummary {
+    /// The log label.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::Relay => "relay",
+            Self::Mixed => "mixed",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// Snapshot the active transport paths to `node_id`, plus the relay URL
+/// when one is in use. Point-in-time, not a watcher — iroh starts a fresh
+/// link relayed and upgrades to direct after hole-punching, so a reading
+/// taken right at `NeighborUp` skews toward `relay`; the periodic census
+/// reading is the representative one. Diagnostics only; other iroh apps
+/// wanted this too (sendme #67/#112, psyche #586).
 pub async fn conn_path(
     endpoint: &Endpoint,
     node_id: EndpointId,
-) -> (&'static str, Option<RelayUrl>) {
+) -> (PathSummary, Option<RelayUrl>) {
     let Some(info) = endpoint.remote_info(node_id).await else {
-        return ("unknown", None);
+        return (PathSummary::Unknown, None);
     };
     let mut has_direct = false;
     let mut has_relay = false;
@@ -89,11 +111,11 @@ pub async fn conn_path(
             _ => {}
         }
     }
-    let label = match (has_direct, has_relay) {
-        (true, true) => "mixed",
-        (true, false) => "direct",
-        (false, true) => "relay",
-        (false, false) => "unknown",
+    let summary = match (has_direct, has_relay) {
+        (true, true) => PathSummary::Mixed,
+        (true, false) => PathSummary::Direct,
+        (false, true) => PathSummary::Relay,
+        (false, false) => PathSummary::Unknown,
     };
-    (label, relay_url)
+    (summary, relay_url)
 }

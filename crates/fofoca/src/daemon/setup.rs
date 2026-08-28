@@ -444,14 +444,12 @@ pub async fn setup_mesh(kind: SetupKind, params: SetupParams) -> Result<EventLoo
     // caller-side and passed back in here as the real port.
     // Create mints the config from the caller's choices; join decodes it
     // from the id — one source of truth either way.
-    let lookups = match &kind {
-        SetupKind::Create { config, .. } => config.lookups.clone(),
-        SetupKind::Join { mesh, .. } | SetupKind::Topic { mesh, .. } => mesh.lookups().clone(),
+    let mesh_config = match &kind {
+        SetupKind::Create { config, .. } => config,
+        SetupKind::Join { mesh, .. } | SetupKind::Topic { mesh, .. } => &mesh.config,
     };
-    let relay_transport = match &kind {
-        SetupKind::Create { config, .. } => config.transport.relay,
-        SetupKind::Join { mesh, .. } | SetupKind::Topic { mesh, .. } => mesh.transport().relay,
-    };
+    let lookups = mesh_config.lookups.clone();
+    let relay_transport = mesh_config.transport.relay;
 
     // The off-loop rung channel: the backgrounded startup probe and the
     // beacon's liveness self-monitor publish a chosen rung here; the

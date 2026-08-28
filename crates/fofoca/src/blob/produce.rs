@@ -69,8 +69,8 @@ pub struct BlobServer {
     /// ticket inherits it, so a scraped ticket can't be redeemed without the
     /// password. `None` ⇒ bare bearer-secret tickets (status quo).
     password: Option<Password>,
-    /// Whether the relay may carry a transfer (`TransportPolicy::relay`). Off,
-    /// a fetch whose selected path is the relay is refused before any byte.
+    /// `TransportPolicy::relay`. Off, a fetch whose selected path is the
+    /// relay is refused before any byte.
     relay_transport: bool,
     /// Serves currently in flight. The accept loop holds the counter it
     /// actually reads; this handle exists so a test can observe that a peer
@@ -299,10 +299,7 @@ async fn serve_connection(
         let conn = incoming.await?;
         // Before the request is read, so a refused fetch costs no spool read
         // and the consumer sees the coded close instead of a size.
-        if !crate::transport::payload_allowed_on(&conn, relay_transport) {
-            conn.close(RELAY_REFUSED_CODE.into(), b"relay path refused");
-            bail!("{}", crate::transport::RELAY_REFUSED);
-        }
+        crate::transport::refuse_relayed(&conn, relay_transport, RELAY_REFUSED_CODE)?;
         let (send, recv) = conn.accept_bi().await?;
         anyhow::Ok((conn, send, recv))
     })

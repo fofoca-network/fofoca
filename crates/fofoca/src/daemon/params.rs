@@ -215,10 +215,7 @@ pub fn derive_topic_mesh(string: &str) -> Result<Mesh> {
 /// # Errors
 /// The string is empty or whitespace.
 pub fn derive_topic_mesh_with(string: &str, lookups: LookupOpts) -> Result<Mesh> {
-    if string.trim().is_empty() {
-        anyhow::bail!("topic string must not be empty");
-    }
-    Ok(Mesh::from_topic(
+    derive_topic_mesh_config(
         string,
         MeshConfig {
             lookups,
@@ -226,7 +223,7 @@ pub fn derive_topic_mesh_with(string: &str, lookups: LookupOpts) -> Result<Mesh>
             issuer_pubkey: None,
             transport: TransportPolicy::default(),
         },
-    ))
+    )
 }
 
 /// [`derive_topic_mesh_with`] for a caller with a whole [`MeshConfig`] to bake

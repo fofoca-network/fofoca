@@ -60,11 +60,22 @@ struct PoolInner {
     /// before dialing, and a warm hit inside never dials, but both mean the
     /// caller was willing to.
     dial_attempts: AtomicU64,
-    /// Whether the relay may carry payload on this mesh
-    /// (`TransportPolicy::relay`). When it may not, a send on a connection
-    /// whose selected path is the relay is refused; the connection stays
-    /// pooled, since iroh may still punch a direct path on it.
+    /// `TransportPolicy::relay`. Off, a send on a connection whose selected
+    /// path is the relay is refused; the connection stays pooled, since iroh
+    /// may still punch a direct path on it.
     relay_transport: bool,
+}
+
+/// What [`UnicastPool::send_if_warm`] did with the frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WarmSend {
+    /// Handed to a warm connection.
+    Sent,
+    /// No warm connection: the caller dials inline.
+    Cold,
+    /// A warm connection exists, but its selected path is the relay and the
+    /// relay is lookup only. Dialing would find the same connection.
+    Refused,
 }
 
 impl UnicastPool {
@@ -108,17 +119,12 @@ impl UnicastPool {
     /// silently losing the frame; a path that dies *after* buffering remains
     /// at-most-once (an app-level concern: waiter timeouts, and anti-entropy,
     /// which re-sends a directed frame point-to-point to its addressee).
-    pub(crate) async fn send_if_warm(&self, eid: EndpointId, bytes: Bytes) -> bool {
-        let conn = {
-            let conns = self.inner.conns.lock().await;
-            match conns.get(&eid) {
-                Some(conn) if conn.close_reason().is_none() => conn.clone(),
-                _ => return false,
-            }
+    pub(crate) async fn send_if_warm(&self, eid: EndpointId, bytes: Bytes) -> WarmSend {
+        let Some(conn) = self.warm(eid).await else {
+            return WarmSend::Cold;
         };
-        // Not "warm" for payload purposes: the inline path reports the refusal.
         if !payload_allowed_on(&conn, self.inner.relay_transport) {
-            return false;
+            return WarmSend::Refused;
         }
         let pool = self.clone();
         n0_future::task::spawn(async move {
@@ -131,7 +137,16 @@ impl UnicastPool {
                 tracing::debug!(target: LOG_TARGET, %redial_error, "redial after a failed warm send also failed; frame dropped");
             }
         });
-        true
+        WarmSend::Sent
+    }
+
+    /// The pooled connection to `eid`, if one is open.
+    async fn warm(&self, eid: EndpointId) -> Option<Connection> {
+        let conns = self.inner.conns.lock().await;
+        conns
+            .get(&eid)
+            .filter(|conn| conn.close_reason().is_none())
+            .cloned()
     }
 
     /// How many times the inline-dial path was entered, for tests asserting a
@@ -166,20 +181,12 @@ impl UnicastPool {
     /// unicast rides — one handshake, and a punch landed here serves both.
     ///
     /// # Errors
-    /// A detached pool, an endpoint on failed-dial cooldown, or a dial that
-    /// fails/times out.
+    /// See [`Self::dial_and_send`].
     pub(crate) async fn warm_or_dial(&self, eid: EndpointId) -> Result<Connection> {
         let Some(endpoint) = self.inner.endpoint.clone() else {
             bail!("unicast pool has no endpoint");
         };
-        let warm = {
-            let conns = self.inner.conns.lock().await;
-            conns
-                .get(&eid)
-                .filter(|conn| conn.close_reason().is_none())
-                .cloned()
-        };
-        if let Some(conn) = warm {
+        if let Some(conn) = self.warm(eid).await {
             return Ok(conn);
         }
         if self

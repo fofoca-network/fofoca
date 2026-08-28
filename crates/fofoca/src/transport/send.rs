@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 use bytes::Bytes;
 use iroh::EndpointId;
 
+use super::pool::WarmSend;
 use crate::daemon::state::EventLoopState;
 use crate::protocol::message::sole_addressee;
 use crate::protocol::{Message, Nickname};
@@ -32,12 +33,7 @@ pub async fn deliver(
     match route(msg, state) {
         Route::Broadcast => broadcast(sender, bytes).await,
         Route::Unicast(eid) => send_unicast(eid, bytes, state).await,
-        Route::Held(eid) => {
-            let name = sole_addressee(&msg.kind).map_or("<none>", Nickname::as_str);
-            Err(anyhow::anyhow!(
-                "directed message to {name} held: {eid}'s only path is the relay, which is lookup only on this mesh"
-            ))
-        }
+        Route::Held(eid) => Err(HeldForDirect { eid }.into()),
         Route::Undeliverable => {
             let addressee = sole_addressee(&msg.kind);
             let name = addressee.map_or("<none>", Nickname::as_str);
@@ -81,17 +77,37 @@ fn route(msg: &Message, state: &EventLoopState) -> Route {
         return Route::Broadcast;
     };
     match directed_endpoint(nick, state) {
-        Some(eid) if !state.relay_transport && relay_only(nick, state) => Route::Held(eid),
+        Some(eid) if held(eid, state) => Route::Held(eid),
         Some(eid) => Route::Unicast(eid),
         None => Route::Undeliverable,
     }
 }
 
-/// Whether `msg` would be parked rather than sent right now — a directed
-/// frame to a relay-only peer while the relay is lookup only. The app send
-/// path buffers such a frame in `pending_outbound` instead of failing it.
-pub(crate) fn held_for_direct(msg: &Message, state: &EventLoopState) -> bool {
-    matches!(route(msg, state), Route::Held(_))
+/// The error [`deliver`] returns for a [`Route::Held`] frame. Typed, so a
+/// caller that would rather park the frame than fail it (`send_app`) can tell
+/// it from a real send failure with a downcast.
+#[derive(Debug)]
+pub(crate) struct HeldForDirect {
+    eid: EndpointId,
+}
+
+impl std::fmt::Display for HeldForDirect {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "directed message held: {}'s only path is the relay, which is lookup only on this mesh",
+            self.eid
+        )
+    }
+}
+
+impl std::error::Error for HeldForDirect {}
+
+/// Whether a directed frame to `eid` is parked right now: the relay is lookup
+/// only and the peer's link, as last observed, has the relay as its only path.
+fn held(eid: EndpointId, state: &EventLoopState) -> bool {
+    !state.relay_transport
+        && state.direct.get(&eid) == Some(&crate::daemon::state::DirectState::RelayOnly)
 }
 
 /// The lane a directed frame to `nick` would take right now — [`Route`]
@@ -116,10 +132,10 @@ pub enum Lane {
 /// peer is in our gossip mesh) and `multihop` otherwise — a best-effort hint,
 /// since the actual path is chosen by iroh at connect time.
 pub(crate) fn lane_for(nick: &Nickname, state: &EventLoopState) -> Lane {
-    if directed_endpoint(nick, state).is_none() {
+    let Some(eid) = directed_endpoint(nick, state) else {
         return Lane::Unreachable;
-    }
-    if !state.relay_transport && relay_only(nick, state) {
+    };
+    if held(eid, state) {
         return Lane::RelayOnly;
     }
     if directly_meshed(nick, state) {
@@ -127,13 +143,6 @@ pub(crate) fn lane_for(nick: &Nickname, state: &EventLoopState) -> Lane {
     } else {
         Lane::Multihop
     }
-}
-
-/// Whether `nick`'s link, as last observed, has the relay as its only path.
-fn relay_only(nick: &Nickname, state: &EventLoopState) -> bool {
-    directed_endpoint(nick, state).is_some_and(|eid| {
-        state.direct.get(&eid) == Some(&crate::daemon::state::DirectState::RelayOnly)
-    })
 }
 
 /// The endpoint a directed message to `nick` can be sent to, or `None` for an
@@ -159,12 +168,14 @@ fn directly_meshed(nick: &Nickname, state: &EventLoopState) -> bool {
 /// dial error is the send's outcome — there is no fallback.
 async fn send_unicast(eid: EndpointId, bytes: Bytes, state: &EventLoopState) -> Result<()> {
     let pool = state.unicast_pool.clone();
-    if pool.send_if_warm(eid, bytes.clone()).await {
-        return Ok(());
+    match pool.send_if_warm(eid, bytes.clone()).await {
+        WarmSend::Sent => Ok(()),
+        WarmSend::Refused => Err(anyhow::anyhow!("{}", super::RELAY_REFUSED)),
+        WarmSend::Cold => pool
+            .dial_and_send(eid, bytes)
+            .await
+            .with_context(|| format!("unicast dial to {eid} failed")),
     }
-    pool.dial_and_send(eid, bytes)
-        .await
-        .with_context(|| format!("unicast dial to {eid} failed"))
 }
 
 /// Send a courtesy reply from the receive path, where a stall is not this
@@ -180,7 +191,7 @@ pub(crate) async fn send_best_effort(
 ) -> bool {
     // Warm connections only. Dialing here would let anyone who can be pinged
     // back choose how long this daemon stops answering, once per identity.
-    state.unicast_pool.send_if_warm(eid, bytes).await
+    state.unicast_pool.send_if_warm(eid, bytes).await == WarmSend::Sent
 }
 
 async fn broadcast(sender: &MeshSender, bytes: Bytes) -> Result<()> {
@@ -198,7 +209,7 @@ mod tests {
 
     use iroh::EndpointId;
 
-    use super::{Lane, Route, held_for_direct, lane_for, route};
+    use super::{Lane, Route, lane_for, route};
     use crate::daemon::state::EventLoopState;
     use crate::protocol::message::AppFrameParams;
     use crate::protocol::{AppTag, CorrId, MeshId, Message, MessageBody};
@@ -340,10 +351,8 @@ mod tests {
         assert_eq!(route(&directed_msg(), &state), Route::Unicast(bob));
         state.relay_transport = false;
         assert_eq!(route(&directed_msg(), &state), Route::Held(bob));
-        assert!(held_for_direct(&directed_msg(), &state));
         state.direct.insert(bob, DirectState::Direct);
         assert_eq!(route(&directed_msg(), &state), Route::Unicast(bob));
-        assert!(!held_for_direct(&directed_msg(), &state));
     }
 
     // ── the roster lane ───────────────────────────────────────────────
