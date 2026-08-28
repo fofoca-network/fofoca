@@ -72,6 +72,9 @@ pub struct RosterSnapshot {
 /// census.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DirectState {
+    /// A probe (or a `WebRTC` negotiation) is in flight; the peer is held off
+    /// the overlay until it reports.
+    Pending,
     /// A hole-punched IP path or a custom transport (`WebRTC`, multihop).
     Direct,
     /// The relay is the only active path.
@@ -135,6 +138,11 @@ pub struct EventLoopState {
     /// Whether the relay may carry payload. Mirrors the mesh config
     /// (`TransportPolicy::relay`), set once at loop start.
     pub(crate) relay_transport: bool,
+    /// Where a direct-path probe reports its verdict; the loop's receiver
+    /// grafts on it (`transport::probe::on_outcome`). A detached sender until
+    /// the real loop installs its channel.
+    pub(crate) direct_proven:
+        tokio::sync::mpsc::UnboundedSender<crate::transport::probe::DirectOutcome>,
     /// Re-bridge memory: every peer `EndpointId` we've ever linked to,
     /// kept *across* `NeighborDown` (unlike `linked_endpoints`). When a
     /// node loses all links because the rendezvous/relay is unreachable,
@@ -558,7 +566,8 @@ impl EventLoopState {
         Self {
             linked_endpoints: HashSet::new(),
             direct: HashMap::new(),
-            relay_transport: true,
+            relay_transport: false,
+            direct_proven: tokio::sync::mpsc::unbounded_channel().0,
             known_endpoints: BoundedFifoSet::new(KNOWN_ENDPOINTS_CAP),
             relink: Cooldown::new(RELINK_COOLDOWN),
             peerinfo: Cooldown::new(RELINK_COOLDOWN),
@@ -801,7 +810,7 @@ impl EventLoopState {
             match state {
                 DirectState::Direct => counts.direct += 1,
                 DirectState::RelayOnly => counts.relay_only += 1,
-                DirectState::Unknown => counts.unknown += 1,
+                DirectState::Pending | DirectState::Unknown => counts.unknown += 1,
             }
         }
         counts

@@ -178,6 +178,9 @@ pub async fn run<A: NodeDriver>(
     // Before the first write, so the initial advertisement carries a real count.
     state.live_count = live_count;
     state.relay_transport = relay_transport;
+    // Direct-path probes report here; the loop grafts on the verdict.
+    let (direct_tx, direct_rx) = mpsc::unbounded_channel();
+    state.direct_proven = direct_tx;
     state.rendezvous_id = Some(rendezvous_params.id);
     state.write_peer_count();
 
@@ -331,6 +334,7 @@ pub async fn run<A: NodeDriver>(
         exit_on_quit,
         http_rx,
         unicast_rx: Some(unicast_rx),
+        direct_rx,
     }))
     .await
 }
@@ -482,6 +486,9 @@ struct EventLoop<A: NodeDriver> {
     /// `gossip::ingest` (same validation + dedup path as gossip). `Option` so
     /// the `select!` arm can disable itself if the channel ever closes.
     unicast_rx: Option<mpsc::Receiver<bytes::Bytes>>,
+    /// Direct-path probe verdicts (`transport::probe`). Never closes: `state`
+    /// holds a sender for the loop's lifetime.
+    direct_rx: mpsc::UnboundedReceiver<crate::transport::probe::DirectOutcome>,
 }
 
 /// The daemon's `select!` loop. Never returns normally on the CLI
@@ -533,6 +540,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
         exit_on_quit,
         mut http_rx,
         mut unicast_rx,
+        mut direct_rx,
     } = loop_state;
 
     log_daemon_start(&author);
@@ -619,6 +627,11 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
                 let ctx = parts.ctx(&sender);
                 gossip::handle_gossip_event(event, &mut state, &mut app, &ctx).await;
             }
+            Some(outcome) = direct_rx.recv() => {
+                state.idle.external += 1;
+                let ctx = parts.ctx(&sender);
+                crate::transport::probe::on_outcome(outcome, &mut state, &ctx).await;
+            }
             // Inbound unicast rides the *same* validate + dedup path as gossip (`ingest`).
             frame = recv_opt(&mut unicast_rx) => match frame {
                 Some(bytes) => {
@@ -643,6 +656,10 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
                 // hiccup) is never retried, and the pair stays relay-only for
                 // the life of the link. Observed exactly that, CLI↔browser.
                 crate::transport::webrtc::retry_sessions(&mut state, &ctx);
+                // Same cadence for the direct-path probes a lookup-only relay
+                // holds grafts on: a peer whose punch missed the deadline, or
+                // whose session attached since, gets another look.
+                crate::transport::probe::retry_direct(&mut state, &ctx);
             }
             _ = intervals.sweep.tick() => {
                 state.idle.sweep += 1;

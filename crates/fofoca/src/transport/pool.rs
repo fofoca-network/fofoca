@@ -92,7 +92,7 @@ impl UnicastPool {
                 conns: Mutex::new(HashMap::new()),
                 dial_failures: Mutex::new(Cooldown::new(DIAL_FAILURE_COOLDOWN)),
                 dial_attempts: AtomicU64::new(0),
-                relay_transport: true,
+                relay_transport: false,
             }),
         }
     }
@@ -150,6 +150,25 @@ impl UnicastPool {
     /// fails/times out, or a stream write error.
     pub(crate) async fn dial_and_send(&self, eid: EndpointId, bytes: Bytes) -> Result<()> {
         self.inner.dial_attempts.fetch_add(1, Ordering::Relaxed);
+        let conn = self.warm_or_dial(eid).await?;
+        if !payload_allowed_on(&conn, self.inner.relay_transport) {
+            bail!("{RELAY_REFUSED}");
+        }
+        if let Err(error) = send_one(&conn, &bytes).await {
+            self.inner.conns.lock().await.remove(&eid);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// The pooled connection to `eid`, dialing one if none is warm. The
+    /// direct-path probe uses this so its connection *is* the one later
+    /// unicast rides — one handshake, and a punch landed here serves both.
+    ///
+    /// # Errors
+    /// A detached pool, an endpoint on failed-dial cooldown, or a dial that
+    /// fails/times out.
+    pub(crate) async fn warm_or_dial(&self, eid: EndpointId) -> Result<Connection> {
         let Some(endpoint) = self.inner.endpoint.clone() else {
             bail!("unicast pool has no endpoint");
         };
@@ -160,42 +179,33 @@ impl UnicastPool {
                 .filter(|conn| conn.close_reason().is_none())
                 .cloned()
         };
-        let conn = if let Some(conn) = warm {
-            conn
-        } else {
-            if self
-                .inner
-                .dial_failures
-                .lock()
-                .await
-                .on_cooldown(&eid, Instant::now())
-            {
-                bail!("unicast dial on cooldown after a recent failure");
-            }
-            match dial(&endpoint, eid).await {
-                Ok(conn) => {
-                    self.inner.dial_failures.lock().await.forget(&eid);
-                    self.inner.conns.lock().await.insert(eid, conn.clone());
-                    conn
-                }
-                Err(error) => {
-                    self.inner
-                        .dial_failures
-                        .lock()
-                        .await
-                        .note(eid, Instant::now());
-                    return Err(error);
-                }
-            }
-        };
-        if !payload_allowed_on(&conn, self.inner.relay_transport) {
-            bail!("{RELAY_REFUSED}");
+        if let Some(conn) = warm {
+            return Ok(conn);
         }
-        if let Err(error) = send_one(&conn, &bytes).await {
-            self.inner.conns.lock().await.remove(&eid);
-            return Err(error);
+        if self
+            .inner
+            .dial_failures
+            .lock()
+            .await
+            .on_cooldown(&eid, Instant::now())
+        {
+            bail!("unicast dial on cooldown after a recent failure");
         }
-        Ok(())
+        match dial(&endpoint, eid).await {
+            Ok(conn) => {
+                self.inner.dial_failures.lock().await.forget(&eid);
+                self.inner.conns.lock().await.insert(eid, conn.clone());
+                Ok(conn)
+            }
+            Err(error) => {
+                self.inner
+                    .dial_failures
+                    .lock()
+                    .await
+                    .note(eid, Instant::now());
+                Err(error)
+            }
+        }
     }
 
     /// Drop `eid`'s pooled connection and dial-failure cooldown: the peer left

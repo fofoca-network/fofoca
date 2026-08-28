@@ -4,7 +4,7 @@
 //! cargo run -p fofoca --example mesh_peer              # create, print the id
 //! cargo run -p fofoca --example mesh_peer -- <id>    # join that mesh
 //! MESH_TRANSPORT=webrtc cargo run … --example mesh_peer -- <id>  # WebRTC-only data plane
-//! MESH_RELAY_TRANSPORT=off cargo run -p fofoca --example mesh_peer  # create: relay is lookup only
+//! MESH_RELAY_TRANSPORT=on cargo run -p fofoca --example mesh_peer   # create: relay may carry payload
 //! ```
 //!
 //! `MESH_TRANSPORT=webrtc` clears IP transports, so any data path that is not
@@ -107,7 +107,7 @@ async fn main() -> anyhow::Result<()> {
                 // creator reads the env var.
                 transport: TransportPolicy {
                     relay: std::env::var_os("MESH_RELAY_TRANSPORT")
-                        .is_none_or(|value| value != "off"),
+                        .is_some_and(|value| value == "on"),
                 },
             },
             advertise: DirectorySelection::Unset,

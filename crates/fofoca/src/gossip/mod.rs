@@ -50,7 +50,9 @@ pub(crate) fn json_body<T: serde::Serialize>(value: &T) -> Option<crate::protoco
     let json = serde_json::to_string(value).ok()?;
     crate::protocol::MessageBody::new(json).ok()
 }
-pub(crate) use recv::{drain_dead_receiver, handle_gossip_event, ingest, retain_own_broadcast};
+pub(crate) use recv::{
+    drain_dead_receiver, flush_pending, handle_gossip_event, ingest, retain_own_broadcast,
+};
 
 /// Snapshot the active transport path to `node_id`: a short label
 /// (`direct` / `relay` / `mixed` / `unknown`) plus the relay URL when

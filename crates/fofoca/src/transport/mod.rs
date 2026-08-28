@@ -24,6 +24,7 @@ mod admission;
 pub(crate) mod ipc;
 mod path;
 mod pool;
+pub(crate) mod probe;
 // The JSEP exchange that fills `lookup::TransportHandles::webrtc`. Portable:
 // a browser peer negotiates with a CLI peer over the same envelope, and only
 // the backend behind it differs.

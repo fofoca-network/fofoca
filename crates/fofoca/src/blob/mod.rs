@@ -171,8 +171,8 @@ mod tests {
     }
 
     /// A loopback fetch runs on a direct path, so a producer whose mesh keeps
-    /// the relay for lookup only still serves it — and the ticket carries the
-    /// policy to the consumer.
+    /// the relay for lookup only (the default) serves it — and the ticket
+    /// carries the policy to the consumer.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn relay_lookup_only_still_serves_a_direct_fetch() {
         let server = BlobServer::start(LookupOpts::loopback(), temp_spool(), None, false)

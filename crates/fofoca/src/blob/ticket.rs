@@ -29,9 +29,10 @@ const KIND: u8 = 1;
 
 /// Bit 0 of the flags byte: the password flag.
 const PASSWORD_BIT: u8 = 0b0000_0001;
-/// The producer's mesh keeps the relay for lookup only: the fetch must run on
-/// a direct path, and both ends refuse a relayed one.
-const RELAY_LOOKUP_ONLY_BIT: u8 = 0b0000_0010;
+/// The producer's mesh lets the relay carry payload. Absent — every ticket
+/// minted before the policy existed — the fetch must run on a direct path,
+/// and both ends refuse a relayed one.
+const RELAY_TRANSPORT_BIT: u8 = 0b0000_0010;
 
 /// A decoded blob ticket.
 #[derive(Debug)]
@@ -63,8 +64,8 @@ impl BlobTicket {
         if self.password {
             flags |= PASSWORD_BIT;
         }
-        if !self.relay_transport {
-            flags |= RELAY_LOOKUP_ONLY_BIT;
+        if self.relay_transport {
+            flags |= RELAY_TRANSPORT_BIT;
         }
         payload.push(flags);
         payload.extend_from_slice(&self.sha256);
@@ -115,7 +116,7 @@ impl BlobTicket {
         let flags = *payload.get(pos).context("ticket missing flags")?;
         pos += 1;
         let password = flags & PASSWORD_BIT != 0;
-        let relay_transport = flags & RELAY_LOOKUP_ONLY_BIT == 0;
+        let relay_transport = flags & RELAY_TRANSPORT_BIT != 0;
         let sha256 = take_array::<HASH_LEN>(payload, &mut pos).context("ticket missing hash")?;
         let size_bytes = take_array::<8>(payload, &mut pos).context("ticket missing size")?;
         let size = u64::from_le_bytes(size_bytes);
@@ -185,7 +186,7 @@ mod tests {
     }
 
     #[test]
-    fn relay_lookup_only_flag_round_trips() {
+    fn relay_transport_flag_round_trips_and_is_off_by_default() {
         let ticket = BlobTicket {
             relay_transport: false,
             ..sample(true)
@@ -193,6 +194,11 @@ mod tests {
         let decoded = BlobTicket::decode(&ticket.encode()).expect("decode");
         assert!(!decoded.relay_transport);
         assert!(decoded.password, "the two flags share a byte");
+        let on = BlobTicket {
+            relay_transport: true,
+            ..sample(false)
+        };
+        assert!(BlobTicket::decode(&on.encode()).unwrap().relay_transport);
     }
 
     #[test]

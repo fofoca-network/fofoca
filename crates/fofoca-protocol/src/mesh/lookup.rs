@@ -189,47 +189,42 @@ const FEATURE_PASSWORD: u8 = 0b0001;
 /// password verifier when both bits are set.
 const FEATURE_INVITE_ONLY: u8 = 0b0010;
 
-/// Feature bit marking a mesh whose relay is **lookup only**
-/// ([`TransportPolicy::relay`] is `false`): members carry payload (gossip,
-/// unicast, blobs) only over a direct path — hole-punched IP or a `WebRTC`
-/// session — and never over the iroh relay, which is kept for the bootstrap
-/// dial, JSEP signalling and NAT-traversal frames. No field follows the bit.
-/// In the mesh id rather than per node, because one relaying member would undo
-/// the saving for everyone it links; in the feature byte rather than a
-/// lookup-flag bit, so an older build refuses the id instead of joining and
-/// relaying anyway.
-const FEATURE_NO_RELAY_TRANSPORT: u8 = 0b0100;
+/// Feature bit marking a mesh whose relay may carry **payload**
+/// ([`TransportPolicy::relay`] is `true`). Absent — the default, and every id
+/// minted before the policy existed — the relay is lookup only: members carry
+/// payload (gossip, unicast, blobs) over a direct path alone, hole-punched IP
+/// or a `WebRTC` session, and the relay serves the bootstrap dial, JSEP
+/// signalling and NAT-traversal frames. No field follows the bit. In the mesh
+/// id rather than per node, because one relaying member would undo the saving
+/// for everyone it links. The bit spells the *permissive* case so that
+/// existing ids keep their bytes and topic and read as lookup only.
+const FEATURE_RELAY_TRANSPORT: u8 = 0b0100;
 
-const KNOWN_FEATURES: u8 = FEATURE_PASSWORD | FEATURE_INVITE_ONLY | FEATURE_NO_RELAY_TRANSPORT;
+const KNOWN_FEATURES: u8 = FEATURE_PASSWORD | FEATURE_INVITE_ONLY | FEATURE_RELAY_TRANSPORT;
 
 /// Which transports may carry mesh **payload**, baked into the mesh id beside
 /// [`LookupOpts`]. Lookups say how members find each other; this says what
 /// their traffic may ride once they have. Only mesh-wide policy lives here —
 /// what a given node *can* do (`ip`, `webrtc`, `multihop`) is per node, in the
 /// engine's `TransportOpts`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct TransportPolicy {
-    /// Whether the iroh relay may carry payload. `false` keeps the relay for
-    /// lookup alone — the bootstrap dial, JSEP signalling and the
+    /// Whether the iroh relay may carry payload. Off by default: the relay is
+    /// kept for lookup alone — the bootstrap dial, JSEP signalling and the
     /// NAT-traversal frames of a freshly opened connection still cross it —
     /// and every payload lane refuses to send while the relay is the only
     /// path to a peer. A pair that cannot hole-punch and has no `WebRTC`
-    /// session stays unlinked for payload rather than relayed. Meaningless
-    /// without a relay: rejected together with [`RelayChoice::Disabled`].
+    /// session stays unlinked for payload rather than relayed. `true` lets
+    /// payload fall back to the relay; meaningless without a relay lookup, so
+    /// rejected together with [`RelayChoice::Disabled`].
     pub relay: bool,
 }
 
-impl Default for TransportPolicy {
-    fn default() -> Self {
-        Self { relay: true }
-    }
-}
-
 impl TransportPolicy {
-    /// Relay kept for lookup only; payload goes peer to peer or not at all.
+    /// Payload may fall back to the relay when no direct path exists.
     #[must_use]
-    pub fn relay_lookup_only() -> Self {
-        Self { relay: false }
+    pub fn relay_as_transport() -> Self {
+        Self { relay: true }
     }
 }
 
@@ -284,15 +279,15 @@ impl MeshConfig {
         }
     }
 
-    /// The one cross-field rule: disabling the relay as a transport needs a
+    /// The one cross-field rule: letting the relay carry payload needs a
     /// relay to exist as a lookup. Checked on decode and by minting callers.
     ///
     /// # Errors
-    /// `transport.relay` is `false` while `lookups.relay` is `Disabled`.
+    /// `transport.relay` is `true` while `lookups.relay` is `Disabled`.
     pub fn validate(&self) -> Result<()> {
-        if !self.transport.relay && self.lookups.relay == RelayChoice::Disabled {
+        if self.transport.relay && self.lookups.relay == RelayChoice::Disabled {
             bail!(
-                "transport.relay=off needs a relay lookup: with the relay disabled there is nothing to keep payload off"
+                "transport.relay=on needs a relay lookup: with the relay disabled there is none to carry payload"
             );
         }
         Ok(())
@@ -314,8 +309,8 @@ impl MeshConfig {
         if self.issuer_pubkey.is_some() {
             features |= FEATURE_INVITE_ONLY;
         }
-        if !self.transport.relay {
-            features |= FEATURE_NO_RELAY_TRANSPORT;
+        if self.transport.relay {
+            features |= FEATURE_RELAY_TRANSPORT;
         }
         if features != 0 {
             buf.push(features);
@@ -340,7 +335,7 @@ impl MeshConfig {
         let mut pos = 0;
         let lookups = LookupOpts::decode_from(bytes, &mut pos)?;
         let (password, issuer_pubkey, relay_transport) = if pos == bytes.len() {
-            (None, None, true)
+            (None, None, false)
         } else {
             let features = bytes[pos];
             pos += 1;
@@ -380,7 +375,7 @@ impl MeshConfig {
             (
                 password,
                 issuer_pubkey,
-                features & FEATURE_NO_RELAY_TRANSPORT == 0,
+                features & FEATURE_RELAY_TRANSPORT != 0,
             )
         };
         if pos != bytes.len() {
@@ -819,7 +814,7 @@ mod lookup_tests {
     #[test]
     fn config_rejects_unknown_feature_flags() {
         let mut bytes = MeshConfig::public_preset().to_bytes();
-        bytes.push(0b1000); // an undefined feature bit (password=1, invite=2, no-relay-transport=4 are taken)
+        bytes.push(0b1000); // an undefined feature bit (password=1, invite=2, relay-transport=4 are taken)
         bytes.extend_from_slice(&[0u8; 16]);
         let error = MeshConfig::from_bytes(&bytes).unwrap_err();
         assert!(
@@ -829,44 +824,52 @@ mod lookup_tests {
     }
 
     #[test]
-    fn config_round_trips_relay_lookup_only() {
+    fn config_round_trips_relay_as_transport() {
         let config = MeshConfig {
-            transport: TransportPolicy::relay_lookup_only(),
+            transport: TransportPolicy::relay_as_transport(),
             ..MeshConfig::public_preset()
         };
         let bytes = config.to_bytes();
         // Lookups byte, then the feature byte with only this bit: the feature
         // carries no field of its own.
-        assert_eq!(bytes, vec![0b0111, super::FEATURE_NO_RELAY_TRANSPORT]);
+        assert_eq!(bytes, vec![0b0111, super::FEATURE_RELAY_TRANSPORT]);
         assert_eq!(MeshConfig::from_bytes(&bytes).unwrap(), config);
         assert_ne!(
             bytes,
             MeshConfig::public_preset().to_bytes(),
-            "a relay-lookup-only mesh derives a different topic"
+            "letting the relay carry payload derives a different topic"
         );
     }
 
     #[test]
-    fn config_round_trips_relay_lookup_only_with_password() {
+    fn relay_is_lookup_only_by_default_and_on_every_pre_policy_id() {
+        // An id minted before the policy existed has no feature byte; it now
+        // reads as lookup only, the default, with its bytes and topic intact.
+        assert!(!MeshConfig::public_preset().transport.relay);
+        assert!(!MeshConfig::from_bytes(&[0b0111]).unwrap().transport.relay);
+    }
+
+    #[test]
+    fn config_round_trips_relay_as_transport_with_password() {
         let config = MeshConfig {
             lookups: LookupOpts::public_preset(),
             password: Some([0xA5u8; 16]),
             issuer_pubkey: None,
-            transport: TransportPolicy::relay_lookup_only(),
+            transport: TransportPolicy::relay_as_transport(),
         };
         let decoded = MeshConfig::from_bytes(&config.to_bytes()).unwrap();
         assert_eq!(decoded, config);
     }
 
     #[test]
-    fn config_rejects_relay_transport_off_without_a_relay_lookup() {
+    fn config_rejects_relay_transport_on_without_a_relay_lookup() {
         let config = MeshConfig {
-            transport: TransportPolicy::relay_lookup_only(),
+            transport: TransportPolicy::relay_as_transport(),
             ..MeshConfig::loopback()
         };
-        assert!(config.validate().is_err(), "nothing to keep payload off");
+        assert!(config.validate().is_err(), "no relay to carry payload");
         // The same shape on the wire is refused on decode too.
-        let bytes = vec![0b0000, super::FEATURE_NO_RELAY_TRANSPORT];
+        let bytes = vec![0b0000, super::FEATURE_RELAY_TRANSPORT];
         assert!(MeshConfig::from_bytes(&bytes).is_err());
     }
 

@@ -243,7 +243,11 @@ pub(crate) async fn drain_dead_receiver(
 /// fails to deliver (typically a directed frame whose addressee's endpoint
 /// isn't known yet at the first flush) is re-buffered for that retry, not
 /// dropped.
-async fn flush_pending(state: &mut EventLoopState, ctx: &HandlerCtx<'_>, edge: &'static str) {
+pub(crate) async fn flush_pending(
+    state: &mut EventLoopState,
+    ctx: &HandlerCtx<'_>,
+    edge: &'static str,
+) {
     let mut delivered = 0usize;
     let mut requeued = 0usize;
     for (msg, bytes) in state.pending_outbound.take() {
@@ -1228,9 +1232,16 @@ async fn handle_peer_info(
         && !state.relink_on_cooldown(peer_id, now)
     {
         state.note_relink(peer_id, now);
-        let _ = add_peer_addr(ctx.endpoint, peer_addr);
-        if let Err(error) = ctx.sender.join_peers(vec![peer_id]).await {
-            tracing::warn!(target: "fofoca::gossip", endpoint_id = %peer_id, %error, "PeerInfo graft request failed");
+        let _ = add_peer_addr(ctx.endpoint, peer_addr.clone());
+        // With the relay lookup only, the graft waits for a proven direct
+        // path (`transport::probe`); the loop grafts on the probe's verdict.
+        let graft = crate::transport::probe::ensure_direct(state, ctx, peer_id, &peer_addr);
+        if graft == crate::transport::probe::Gate::Graft {
+            if let Err(error) = ctx.sender.join_peers(vec![peer_id]).await {
+                tracing::warn!(target: "fofoca::gossip", endpoint_id = %peer_id, %error, "PeerInfo graft request failed");
+            }
+        } else {
+            tracing::debug!(target: "fofoca::gossip", endpoint_id = %peer_id, "graft held until a direct path is proven");
         }
         let _ = ctx.sender.broadcast(content).await;
         state.last_sent_at = Instant::now();

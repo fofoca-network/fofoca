@@ -336,6 +336,7 @@ mod tests {
         use crate::daemon::state::DirectState;
         let (mut state, bob) = state_knowing_bob();
         state.direct.insert(bob, DirectState::RelayOnly);
+        state.relay_transport = true;
         assert_eq!(route(&directed_msg(), &state), Route::Unicast(bob));
         state.relay_transport = false;
         assert_eq!(route(&directed_msg(), &state), Route::Held(bob));
@@ -368,6 +369,7 @@ mod tests {
         use crate::daemon::state::DirectState;
         let (mut state, bob) = state_knowing_bob();
         state.direct.insert(bob, DirectState::RelayOnly);
+        state.relay_transport = true;
         assert_eq!(lane_for(&nick("bob"), &state), Lane::Unicast);
         state.relay_transport = false;
         assert_eq!(lane_for(&nick("bob"), &state), Lane::RelayOnly);
