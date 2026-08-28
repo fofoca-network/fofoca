@@ -413,11 +413,21 @@ Changes that arrive before their causal dependencies wait in a pending buffer an
 ### 9.1 The base
 
 iroh QUIC is the base transport: direct paths, hole punching, and relay fallback.
-Transport choice is deliberately **not** part of the mesh id.
+Transport *capability* is deliberately **not** part of the mesh id.
 The lookup options are mixed into the topic id, so members provably agree on where to rendezvous.
-Transports stay local and per-peer, and each pair reconciles through ICE and iroh path selection.
+Which transports a node can use stays local and per-peer, and each pair reconciles through ICE and iroh path selection.
 A browser can therefore join a mesh a CLI created.
 Two custom transports extend the reach of the base.
+
+Transport *policy* is part of the mesh id, beside the lookups.
+`MeshConfig::transport` says what the relay may carry.
+By default the relay is lookup only: it carries the bootstrap dial, JSEP signalling, and the NAT-traversal frames of a new connection, and no payload.
+A payload lane (gossip graft, unicast, blob) sends to a peer only after iroh selected a non-relay path to it, or a WebRTC session is attached.
+A gossip graft waits for that proof (`transport::probe`), so a pair never links through the relay.
+A pair that cannot hole-punch and has no WebRTC session stays unlinked for payload.
+`transport.relay = true` lets payload fall back to the relay, as before the policy existed.
+The policy is in the id so that every member enforces the same rule; one relaying member would undo the saving for everyone it links.
+An id minted before the policy existed keeps its bytes and topic and reads as lookup only.
 
 ### 9.2 WebRTC transport
 
