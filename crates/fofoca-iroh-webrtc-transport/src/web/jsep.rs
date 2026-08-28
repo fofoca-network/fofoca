@@ -757,13 +757,31 @@ async fn wait_channel_open(
     }
 }
 
+/// Sleep, off the global's `setTimeout` rather than the `Window`'s.
+///
+/// Identical inside a page. It matters everywhere else: `web_sys::window()` is
+/// `None` under Node and in a worker, and the previous fallback resolved the
+/// promise *immediately* rather than hang. That silently collapsed every
+/// deadline built on this future to zero — `wait_ice_complete` returned before
+/// a single candidate was gathered, so `require_candidates` rejected the answer
+/// ~55 ms in, and the 60 s `ondatachannel` guard lost its race on the first
+/// tick and reported "timed out waiting for ondatachannel". A Node peer could
+/// therefore never complete a WebRTC handshake, in either role.
+///
+/// Resolving immediately is kept only for a global with no `setTimeout` at all,
+/// where hanging really would be worse.
 async fn sleep_ms(millis: i32) {
     let promise = js_sys::Promise::new(&mut |resolve, _reject| {
-        if let Some(window) = web_sys::window() {
-            let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, millis);
-        } else {
-            // Avoid hanging forever outside a Window (e.g. some worker contexts).
-            let _ = resolve.call0(&JsValue::NULL);
+        use wasm_bindgen::JsCast as _;
+        let global = js_sys::global();
+        match js_sys::Reflect::get(&global, &JsValue::from_str("setTimeout")) {
+            Ok(set_timeout) if set_timeout.is_function() => {
+                let set_timeout: js_sys::Function = set_timeout.unchecked_into();
+                let _ = set_timeout.call2(&global, &resolve, &JsValue::from(millis));
+            }
+            _ => {
+                let _ = resolve.call0(&JsValue::NULL);
+            }
         }
     });
     let _ = JsFuture::from(promise).await;
