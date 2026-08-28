@@ -71,6 +71,7 @@ pub fn directory_config(lookups: LookupOpts) -> MeshConfig {
         lookups,
         password: None,
         issuer_pubkey: None,
+        p2p_only: false,
         // The directory rendezvous always uses gossip — it is how advertisers
         // and discoverers meet.
     }

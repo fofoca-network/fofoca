@@ -189,6 +189,18 @@ const FEATURE_PASSWORD: u8 = 0b0001;
 /// password verifier when both bits are set.
 const FEATURE_INVITE_ONLY: u8 = 0b0010;
 
+/// Feature bit marking a **p2p-only** mesh: members carry payload (gossip,
+/// unicast, blobs) only over a direct path — hole-punched IP or a `WebRTC`
+/// session — and never over the iroh relay, which is kept for rendezvous alone
+/// (the bootstrap dial, JSEP signalling, NAT-traversal frames). No field
+/// follows the bit. In the mesh id rather than per node, because one relaying
+/// member would undo the saving for everyone it links; in the feature byte
+/// rather than a lookup-flag bit, so an older build refuses the id instead of
+/// joining and relaying anyway.
+const FEATURE_P2P_ONLY: u8 = 0b0100;
+
+const KNOWN_FEATURES: u8 = FEATURE_PASSWORD | FEATURE_INVITE_ONLY | FEATURE_P2P_ONLY;
+
 /// Byte length of the Ed25519 issuer public key an invite-only mesh carries.
 const ISSUER_PUBKEY_LEN: usize = 32;
 
@@ -208,6 +220,9 @@ pub struct MeshConfig {
     /// derivation secret lives only in creator-minted invites), and a redeemer
     /// verifies each invite's signature against this key. `None` ⇒ open join.
     pub issuer_pubkey: Option<[u8; ISSUER_PUBKEY_LEN]>,
+    /// Payload goes peer to peer or not at all; the relay is rendezvous only.
+    /// See [`FEATURE_P2P_ONLY`].
+    pub p2p_only: bool,
 }
 
 impl MeshConfig {
@@ -221,6 +236,7 @@ impl MeshConfig {
             lookups: LookupOpts::loopback(),
             password: None,
             issuer_pubkey: None,
+            p2p_only: false,
         }
     }
 
@@ -233,6 +249,7 @@ impl MeshConfig {
             lookups: LookupOpts::public_preset(),
             password: None,
             issuer_pubkey: None,
+            p2p_only: false,
         }
     }
 
@@ -251,6 +268,9 @@ impl MeshConfig {
         }
         if self.issuer_pubkey.is_some() {
             features |= FEATURE_INVITE_ONLY;
+        }
+        if self.p2p_only {
+            features |= FEATURE_P2P_ONLY;
         }
         if features != 0 {
             buf.push(features);
@@ -274,12 +294,12 @@ impl MeshConfig {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         let mut pos = 0;
         let lookups = LookupOpts::decode_from(bytes, &mut pos)?;
-        let (password, issuer_pubkey) = if pos == bytes.len() {
-            (None, None)
+        let (password, issuer_pubkey, p2p_only) = if pos == bytes.len() {
+            (None, None, false)
         } else {
             let features = bytes[pos];
             pos += 1;
-            if features & !(FEATURE_PASSWORD | FEATURE_INVITE_ONLY) != 0 {
+            if features & !KNOWN_FEATURES != 0 {
                 bail!("unsupported mesh feature flags {features:#04x} — upgrade to a newer build");
             }
             if features == 0 {
@@ -312,7 +332,7 @@ impl MeshConfig {
             } else {
                 None
             };
-            (password, issuer_pubkey)
+            (password, issuer_pubkey, features & FEATURE_P2P_ONLY != 0)
         };
         if pos != bytes.len() {
             bail!("trailing bytes in mesh config");
@@ -321,6 +341,7 @@ impl MeshConfig {
             lookups,
             password,
             issuer_pubkey,
+            p2p_only,
         })
     }
 }
@@ -700,6 +721,7 @@ mod lookup_tests {
             },
             password: None,
             issuer_pubkey: None,
+            p2p_only: false,
         };
         let decoded = MeshConfig::from_bytes(&config.to_bytes()).unwrap();
         assert_eq!(decoded, config);
@@ -727,6 +749,7 @@ mod lookup_tests {
             lookups: LookupOpts::public_preset(),
             password: Some([0xA5u8; 16]),
             issuer_pubkey: None,
+            p2p_only: false,
         };
         let decoded = MeshConfig::from_bytes(&config.to_bytes()).unwrap();
         assert_eq!(decoded, config);
@@ -743,7 +766,7 @@ mod lookup_tests {
     #[test]
     fn config_rejects_unknown_feature_flags() {
         let mut bytes = MeshConfig::public_preset().to_bytes();
-        bytes.push(0b0100); // an undefined feature bit (password=1, invite=2 are taken)
+        bytes.push(0b1000); // an undefined feature bit (password=1, invite=2, p2p-only=4 are taken)
         bytes.extend_from_slice(&[0u8; 16]);
         let error = MeshConfig::from_bytes(&bytes).unwrap_err();
         assert!(
@@ -753,11 +776,42 @@ mod lookup_tests {
     }
 
     #[test]
+    fn config_round_trips_p2p_only() {
+        let config = MeshConfig {
+            p2p_only: true,
+            ..MeshConfig::public_preset()
+        };
+        let bytes = config.to_bytes();
+        // Lookups byte, then the feature byte with only the p2p-only bit: the
+        // feature carries no field of its own.
+        assert_eq!(bytes, vec![0b0111, super::FEATURE_P2P_ONLY]);
+        assert_eq!(MeshConfig::from_bytes(&bytes).unwrap(), config);
+        assert_ne!(
+            bytes,
+            MeshConfig::public_preset().to_bytes(),
+            "a p2p-only mesh derives a different topic"
+        );
+    }
+
+    #[test]
+    fn config_round_trips_p2p_only_with_password() {
+        let config = MeshConfig {
+            lookups: LookupOpts::loopback(),
+            password: Some([0xA5u8; 16]),
+            issuer_pubkey: None,
+            p2p_only: true,
+        };
+        let decoded = MeshConfig::from_bytes(&config.to_bytes()).unwrap();
+        assert_eq!(decoded, config);
+    }
+
+    #[test]
     fn config_round_trips_issuer_pubkey() {
         let config = MeshConfig {
             lookups: LookupOpts::public_preset(),
             password: None,
             issuer_pubkey: Some([0x3Cu8; 32]),
+            p2p_only: false,
         };
         let decoded = MeshConfig::from_bytes(&config.to_bytes()).unwrap();
         assert_eq!(decoded, config);
@@ -771,6 +825,7 @@ mod lookup_tests {
             lookups: LookupOpts::loopback(),
             password: Some([0xA5u8; 16]),
             issuer_pubkey: Some([0x3Cu8; 32]),
+            p2p_only: false,
         };
         let decoded = MeshConfig::from_bytes(&config.to_bytes()).unwrap();
         assert_eq!(decoded, config);

@@ -327,6 +327,13 @@ impl Mesh {
         &self.config.lookups
     }
 
+    /// Whether payload must stay off the relay on this mesh (see
+    /// [`MeshConfig::p2p_only`]).
+    #[must_use]
+    pub fn p2p_only(&self) -> bool {
+        self.config.p2p_only
+    }
+
     /// True when the mesh is loopback-only (no off-machine lookups).
     #[must_use]
     pub fn is_loopback(&self) -> bool {

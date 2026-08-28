@@ -74,18 +74,16 @@ pub async fn conn_path(
             continue;
         }
         // `TransportAddr` is `#[non_exhaustive]`, so a wildcard is
-        // mandatory and the match can't be made exhaustive; only relay
-        // vs direct matters here.
-        #[expect(
-            clippy::wildcard_enum_match_arm,
-            reason = "TransportAddr is #[non_exhaustive]"
-        )]
+        // mandatory and the match can't be made exhaustive.
         match addr.addr() {
             TransportAddr::Relay(url) => {
                 has_relay = true;
                 relay_url = Some(url.clone());
             }
-            TransportAddr::Ip(_) => has_direct = true,
+            // A custom transport (`WebRTC`, multihop) is a peer-to-peer path
+            // as far as the relay is concerned: nothing on it crosses the
+            // relay server.
+            TransportAddr::Ip(_) | TransportAddr::Custom(_) => has_direct = true,
             _ => {}
         }
     }

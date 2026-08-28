@@ -13,7 +13,7 @@ use bytes::Bytes;
 use iroh_gossip::api::{ApiError, Event};
 
 use crate::daemon::ctx::HandlerCtx;
-use crate::daemon::state::EventLoopState;
+use crate::daemon::state::{DirectState, EventLoopState};
 use crate::gossip::event::NodeEvent;
 use crate::lifecycle;
 use crate::lookup::add_peer_addr;
@@ -96,6 +96,9 @@ pub(crate) async fn handle_gossip_event(
                 // formed — leaving permanent ghosts that suppressed
                 // both; see the 2026-06-12 roster-collapse review.)
                 state.linked_endpoints.insert(node_id);
+                state
+                    .direct
+                    .insert(node_id, DirectState::from_conn_label(conn));
                 // First link to a *real* peer: now (and only now) can
                 // user content actually be delivered. Flush anything
                 // buffered while we were unmeshed, in order.
@@ -116,6 +119,7 @@ pub(crate) async fn handle_gossip_event(
                 state.rendezvous_linked = false;
             } else {
                 state.linked_endpoints.remove(&node_id);
+                state.direct.remove(&node_id);
             }
             if arms_reclaim(
                 is_rendezvous,

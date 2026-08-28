@@ -10,7 +10,8 @@ pub use crate::daemon::config::{
 pub use crate::daemon::event_loop::run;
 pub use crate::daemon::node::Node;
 pub use crate::daemon::params::{
-    CreateParams, JoinParams, Resolved, TopicParams, derive_topic_mesh, derive_topic_mesh_with,
+    CreateParams, JoinParams, Resolved, TopicParams, derive_topic_mesh, derive_topic_mesh_config,
+    derive_topic_mesh_with,
 };
 pub use crate::daemon::setup::{InjectedEndpoint, SetupKind, SetupParams, setup_mesh};
 

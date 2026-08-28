@@ -4,6 +4,7 @@
 //! cargo run -p fofoca --example mesh_peer              # create, print the id
 //! cargo run -p fofoca --example mesh_peer -- <id>    # join that mesh
 //! MESH_TRANSPORT=webrtc cargo run … --example mesh_peer -- <id>  # WebRTC-only data plane
+//! MESH_P2P_ONLY=1 cargo run -p fofoca --example mesh_peer          # create a p2p-only mesh
 //! ```
 //!
 //! `MESH_TRANSPORT=webrtc` clears IP transports, so any data path that is not
@@ -100,6 +101,9 @@ async fn main() -> anyhow::Result<()> {
                 lookups: LookupOpts::public_preset(),
                 password: None,
                 issuer_pubkey: None,
+                // Baked into the id, so a joiner inherits it: only the
+                // creator reads the env var.
+                p2p_only: std::env::var_os("MESH_P2P_ONLY").is_some_and(|value| value == "1"),
             },
             advertise: DirectorySelection::Unset,
             password: None,

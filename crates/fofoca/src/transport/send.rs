@@ -85,6 +85,10 @@ fn route(msg: &Message, state: &EventLoopState) -> Route {
 pub enum Lane {
     Unicast,
     Multihop,
+    /// The peer's only path is the relay. Only reported on a p2p-only mesh,
+    /// where that path carries no payload; elsewhere it reads `unicast`.
+    #[serde(rename = "relay-only")]
+    RelayOnly,
     Unreachable,
 }
 
@@ -96,11 +100,21 @@ pub(crate) fn lane_for(nick: &Nickname, state: &EventLoopState) -> Lane {
     if directed_endpoint(nick, state).is_none() {
         return Lane::Unreachable;
     }
+    if state.p2p_only && relay_only(nick, state) {
+        return Lane::RelayOnly;
+    }
     if directly_meshed(nick, state) {
         Lane::Unicast
     } else {
         Lane::Multihop
     }
+}
+
+/// Whether `nick`'s link, as last observed, has the relay as its only path.
+fn relay_only(nick: &Nickname, state: &EventLoopState) -> bool {
+    directed_endpoint(nick, state).is_some_and(|eid| {
+        state.direct.get(&eid) == Some(&crate::daemon::state::DirectState::RelayOnly)
+    })
 }
 
 /// The endpoint a directed message to `nick` can be sent to, or `None` for an
@@ -308,6 +322,21 @@ mod tests {
         let (mut state, _) = state_knowing_bob();
         state.meshed = false;
         assert_eq!(lane_for(&nick("bob"), &state), Lane::Multihop);
+    }
+
+    /// On a p2p-only mesh a link whose only path is the relay carries no
+    /// payload, and the roster says so. Off such a mesh the same reading is
+    /// just a relayed unicast.
+    #[test]
+    fn lane_is_relay_only_on_a_p2p_only_mesh() {
+        use crate::daemon::state::DirectState;
+        let (mut state, bob) = state_knowing_bob();
+        state.direct.insert(bob, DirectState::RelayOnly);
+        assert_eq!(lane_for(&nick("bob"), &state), Lane::Unicast);
+        state.p2p_only = true;
+        assert_eq!(lane_for(&nick("bob"), &state), Lane::RelayOnly);
+        state.direct.insert(bob, DirectState::Direct);
+        assert_eq!(lane_for(&nick("bob"), &state), Lane::Unicast);
     }
 
     #[test]

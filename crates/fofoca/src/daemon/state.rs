@@ -66,6 +66,39 @@ pub struct RosterSnapshot {
     pub count: usize,
 }
 
+/// What a linked peer's selected data path is, as last observed. A link
+/// starts on the relay and migrates to a direct path once iroh punches one,
+/// so a value taken at `NeighborUp` is a first reading, refreshed by the
+/// census.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DirectState {
+    /// A hole-punched IP path or a custom transport (`WebRTC`, multihop).
+    Direct,
+    /// The relay is the only active path.
+    RelayOnly,
+    /// No active path reported yet.
+    Unknown,
+}
+
+impl DirectState {
+    /// From the `conn_path` label (`direct` / `mixed` / `relay` / `unknown`).
+    pub(crate) fn from_conn_label(label: &str) -> Self {
+        match label {
+            "direct" | "mixed" => Self::Direct,
+            "relay" => Self::RelayOnly,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+/// Per-[`DirectState`] link counts, for the census line.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DirectCounts {
+    pub(crate) direct: usize,
+    pub(crate) relay_only: usize,
+    pub(crate) unknown: usize,
+}
+
 /// All mutable state owned by the event loop.
 ///
 /// Grouped into a single struct so handlers and timer ticks can take
@@ -93,6 +126,15 @@ pub struct EventLoopState {
     /// Distinct from `peers` — links are asymmetric and node-id
     /// keyed; the roster is symmetric and nickname keyed.
     pub(crate) linked_endpoints: HashSet<EndpointId>,
+    /// Whether each linked peer's data path is direct or relay-only, taken
+    /// from the same `conn_path` snapshot `NeighborUp` logs. Written by
+    /// `NeighborUp`/`NeighborDown` like `linked_endpoints`. Feeds the census
+    /// and the roster; on a p2p-only mesh it is also what the send lanes
+    /// consult before carrying payload.
+    pub(crate) direct: HashMap<EndpointId, DirectState>,
+    /// The mesh is p2p-only: payload stays off the relay. Mirrors the mesh
+    /// config (`MeshConfig::p2p_only`), set once at loop start.
+    pub(crate) p2p_only: bool,
     /// Re-bridge memory: every peer `EndpointId` we've ever linked to,
     /// kept *across* `NeighborDown` (unlike `linked_endpoints`). When a
     /// node loses all links because the rendezvous/relay is unreachable,
@@ -515,6 +557,8 @@ impl EventLoopState {
         });
         Self {
             linked_endpoints: HashSet::new(),
+            direct: HashMap::new(),
+            p2p_only: false,
             known_endpoints: BoundedFifoSet::new(KNOWN_ENDPOINTS_CAP),
             relink: Cooldown::new(RELINK_COOLDOWN),
             peerinfo: Cooldown::new(RELINK_COOLDOWN),
@@ -748,6 +792,19 @@ impl EventLoopState {
             body,
             &shard.group,
         ))
+    }
+
+    /// How many linked peers sit in each [`DirectState`], for the census.
+    pub(crate) fn direct_counts(&self) -> DirectCounts {
+        let mut counts = DirectCounts::default();
+        for state in self.direct.values() {
+            match state {
+                DirectState::Direct => counts.direct += 1,
+                DirectState::RelayOnly => counts.relay_only += 1,
+                DirectState::Unknown => counts.unknown += 1,
+            }
+        }
+        counts
     }
 
     /// Whether a gossip broadcast can reach anyone right now. `meshed` is the
@@ -1076,8 +1133,8 @@ impl EventLoopState {
 #[cfg(test)]
 mod tests {
     use super::{
-        Duration, EndpointId, EventLoopState, Instant, KNOWN_ENDPOINTS_CAP, Message, QUIET_CAP,
-        RELINK_COOLDOWN_SECS, Reach,
+        DirectCounts, DirectState, Duration, EndpointId, EventLoopState, Instant,
+        KNOWN_ENDPOINTS_CAP, Message, QUIET_CAP, RELINK_COOLDOWN_SECS, Reach,
     };
     use crate::protocol::{AppFrameParams, MeshId, MessageBody, MessageId};
     use crate::testing::{endpoint_id, fresh_state, nick};
@@ -1259,6 +1316,33 @@ mod tests {
         assert_eq!(reach("unlinked"), Reach::Gossip);
         assert_eq!(reach("unknown"), Reach::Gossip);
         assert_eq!(reach("quiet"), Reach::Gossip);
+    }
+
+    #[test]
+    fn direct_state_reads_conn_path_labels_and_counts() {
+        assert_eq!(DirectState::from_conn_label("direct"), DirectState::Direct);
+        assert_eq!(DirectState::from_conn_label("mixed"), DirectState::Direct);
+        assert_eq!(
+            DirectState::from_conn_label("relay"),
+            DirectState::RelayOnly
+        );
+        assert_eq!(
+            DirectState::from_conn_label("unknown"),
+            DirectState::Unknown
+        );
+
+        let mut state = fresh_state();
+        state.direct.insert(endpoint_id(1), DirectState::Direct);
+        state.direct.insert(endpoint_id(2), DirectState::Direct);
+        state.direct.insert(endpoint_id(3), DirectState::RelayOnly);
+        assert_eq!(
+            state.direct_counts(),
+            DirectCounts {
+                direct: 2,
+                relay_only: 1,
+                unknown: 0
+            }
+        );
     }
 
     #[test]

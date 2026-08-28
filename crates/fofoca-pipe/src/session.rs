@@ -223,6 +223,7 @@ pub fn resolve_kind(opts: &Opts, nickname: Option<Nickname>) -> Result<(SetupKin
                 lookups: resolve_lookups(opts.public, lookups),
                 password: None,
                 issuer_pubkey: None,
+                p2p_only: false,
             };
             let name = MeshName::new(opts.name.clone().unwrap_or_else(|| "fofoca".to_string()))
                 .map_err(|error| anyhow::anyhow!("{error}"))?;

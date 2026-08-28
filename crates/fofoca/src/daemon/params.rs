@@ -224,6 +224,28 @@ pub fn derive_topic_mesh_with(string: &str, lookups: LookupOpts) -> Result<Mesh>
             lookups,
             password: None,
             issuer_pubkey: None,
+            p2p_only: false,
+        },
+    ))
+}
+
+/// [`derive_topic_mesh_with`] for a caller with a whole [`MeshConfig`] to bake
+/// in — a p2p-only topic mesh, say. Password and invite fields are meaningless
+/// on a topic mesh (its secret is the string) and are dropped.
+///
+/// # Errors
+/// The string is empty or whitespace.
+pub fn derive_topic_mesh_config(string: &str, config: MeshConfig) -> Result<Mesh> {
+    if string.trim().is_empty() {
+        anyhow::bail!("topic string must not be empty");
+    }
+    Ok(Mesh::from_topic(
+        string,
+        MeshConfig {
+            lookups: config.lookups,
+            password: None,
+            issuer_pubkey: None,
+            p2p_only: config.p2p_only,
         },
     ))
 }

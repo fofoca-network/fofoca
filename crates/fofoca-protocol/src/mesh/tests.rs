@@ -20,6 +20,7 @@ fn custom_config() -> MeshConfig {
         },
         password: None,
         issuer_pubkey: None,
+        p2p_only: false,
     }
 }
 
@@ -87,6 +88,7 @@ fn password_verifier_yields_different_id_and_round_trips() {
         lookups: LookupOpts::public_preset(),
         password: Some([0x5Au8; 16]),
         issuer_pubkey: None,
+        p2p_only: false,
     };
     let one = Mesh::new(dummy_seed(), dummy_name(), MeshConfig::public_preset());
     let two = Mesh::new(dummy_seed(), dummy_name(), passworded.clone());

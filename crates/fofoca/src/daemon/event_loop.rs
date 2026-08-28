@@ -96,6 +96,7 @@ pub async fn run<A: NodeDriver>(
         webrtc_ice,
         unicast_rx,
         live_count,
+        p2p_only,
         driver,
         per_peer_gate,
     } = cfg;
@@ -176,6 +177,7 @@ pub async fn run<A: NodeDriver>(
     state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone());
     // Before the first write, so the initial advertisement carries a real count.
     state.live_count = live_count;
+    state.p2p_only = p2p_only;
     state.rendezvous_id = Some(rendezvous_params.id);
     state.write_peer_count();
 
