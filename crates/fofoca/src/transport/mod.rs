@@ -22,6 +22,7 @@ mod accept;
 mod admission;
 #[cfg(feature = "host")]
 pub(crate) mod ipc;
+mod path;
 mod pool;
 // The JSEP exchange that fills `lookup::TransportHandles::webrtc`. Portable:
 // a browser peer negotiates with a CLI peer over the same envelope, and only
@@ -43,9 +44,11 @@ pub(crate) mod sender;
 
 pub(crate) use accept::UnicastAcceptor;
 pub(crate) use admission::SignalAdmission;
+pub(crate) use path::{RELAY_REFUSED, payload_allowed_on};
 pub(crate) use pool::UnicastPool;
 pub use send::Lane;
 pub use send::deliver;
+pub(crate) use send::held_for_direct;
 pub(crate) use send::lane_for;
 pub(crate) use send::send_best_effort;
 pub use sender::MeshSender;

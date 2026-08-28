@@ -29,6 +29,9 @@ const KIND: u8 = 1;
 
 /// Bit 0 of the flags byte: the password flag.
 const PASSWORD_BIT: u8 = 0b0000_0001;
+/// The producer's mesh keeps the relay for lookup only: the fetch must run on
+/// a direct path, and both ends refuse a relayed one.
+const RELAY_LOOKUP_ONLY_BIT: u8 = 0b0000_0010;
 
 /// A decoded blob ticket.
 #[derive(Debug)]
@@ -42,6 +45,10 @@ pub struct BlobTicket {
     /// password (salted by `secret`) in the stream header instead of the raw
     /// secret, so the ticket no longer redeems alone.
     pub password: bool,
+    /// Whether the relay may carry the transfer (the producer mesh's
+    /// `TransportPolicy::relay`). `false` ⇒ the consumer refuses to fetch over
+    /// a relayed path, as the producer refuses to serve one.
+    pub relay_transport: bool,
 }
 
 impl BlobTicket {
@@ -52,7 +59,14 @@ impl BlobTicket {
     pub fn encode(&self) -> String {
         let mut payload = Vec::with_capacity(SECRET_LEN + 1 + HASH_LEN + 8 + 64);
         payload.extend_from_slice(&self.secret);
-        payload.push(if self.password { PASSWORD_BIT } else { 0 });
+        let mut flags = 0u8;
+        if self.password {
+            flags |= PASSWORD_BIT;
+        }
+        if !self.relay_transport {
+            flags |= RELAY_LOOKUP_ONLY_BIT;
+        }
+        payload.push(flags);
         payload.extend_from_slice(&self.sha256);
         payload.extend_from_slice(&self.size.to_le_bytes());
         self.lookups.encode_into(&mut payload);
@@ -101,6 +115,7 @@ impl BlobTicket {
         let flags = *payload.get(pos).context("ticket missing flags")?;
         pos += 1;
         let password = flags & PASSWORD_BIT != 0;
+        let relay_transport = flags & RELAY_LOOKUP_ONLY_BIT == 0;
         let sha256 = take_array::<HASH_LEN>(payload, &mut pos).context("ticket missing hash")?;
         let size_bytes = take_array::<8>(payload, &mut pos).context("ticket missing size")?;
         let size = u64::from_le_bytes(size_bytes);
@@ -116,6 +131,7 @@ impl BlobTicket {
             size,
             lookups,
             password,
+            relay_transport,
         })
     }
 }
@@ -142,6 +158,7 @@ mod tests {
             size: 1_234_567,
             lookups: LookupOpts::public_preset(),
             password,
+            relay_transport: true,
         }
     }
 
@@ -164,6 +181,18 @@ mod tests {
     fn password_flag_round_trips() {
         let decoded = BlobTicket::decode(&sample(true).encode()).expect("decode");
         assert!(decoded.password);
+        assert!(decoded.relay_transport);
+    }
+
+    #[test]
+    fn relay_lookup_only_flag_round_trips() {
+        let ticket = BlobTicket {
+            relay_transport: false,
+            ..sample(true)
+        };
+        let decoded = BlobTicket::decode(&ticket.encode()).expect("decode");
+        assert!(!decoded.relay_transport);
+        assert!(decoded.password, "the two flags share a byte");
     }
 
     #[test]

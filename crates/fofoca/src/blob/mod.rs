@@ -81,6 +81,7 @@ pub struct OffloadRequest {
 pub async fn offload(
     server: &mut Option<BlobServer>,
     lookups: &LookupOpts,
+    relay_transport: bool,
     request: OffloadRequest,
 ) -> Result<BlobTicket> {
     let OffloadRequest {
@@ -90,7 +91,8 @@ pub async fn offload(
         password,
     } = request;
     if server.is_none() {
-        *server = Some(BlobServer::start(lookups.clone(), spool_dir, password).await?);
+        *server =
+            Some(BlobServer::start(lookups.clone(), spool_dir, password, relay_transport).await?);
     }
     server
         .as_ref()
@@ -117,6 +119,9 @@ pub(crate) const BAD_SECRET: u32 = 1;
 
 /// Fetch stream close code: the requested content hash is not in the store.
 pub(crate) const UNKNOWN_BLOB: u32 = 2;
+/// The connection's selected path is the relay and the producer's mesh keeps
+/// the relay for lookup only.
+pub(crate) const RELAY_REFUSED_CODE: u32 = 3;
 
 /// Fetch stream close code: an orderly done from the producer.
 pub(crate) const DONE: u32 = 0;
@@ -150,7 +155,7 @@ mod tests {
     /// Start a loopback producer serving `payload`, fetch it back over a second
     /// loopback endpoint, and return the fetched bytes.
     async fn round_trip(payload: &[u8]) -> Vec<u8> {
-        let server = BlobServer::start(LookupOpts::loopback(), temp_spool(), None)
+        let server = BlobServer::start(LookupOpts::loopback(), temp_spool(), None, true)
             .await
             .expect("start producer");
         let src = temp_file(payload);
@@ -163,6 +168,31 @@ mod tests {
         fs::remove_file(&src).ok();
         server.shutdown().await;
         out
+    }
+
+    /// A loopback fetch runs on a direct path, so a producer whose mesh keeps
+    /// the relay for lookup only still serves it — and the ticket carries the
+    /// policy to the consumer.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn relay_lookup_only_still_serves_a_direct_fetch() {
+        let server = BlobServer::start(LookupOpts::loopback(), temp_spool(), None, false)
+            .await
+            .expect("start producer");
+        let src = temp_file(b"direct bytes");
+        let ticket = server
+            .register(&src, ContentId::new("blob-test-direct"))
+            .await
+            .expect("register");
+        assert!(!ticket.relay_transport);
+        let decoded = BlobTicket::decode(&ticket.encode()).expect("ticket round-trips");
+        assert!(!decoded.relay_transport);
+        let mut out = Vec::new();
+        fetch(&decoded, &mut out, None)
+            .await
+            .expect("fetch over a direct path");
+        assert_eq!(out, b"direct bytes");
+        fs::remove_file(&src).ok();
+        server.shutdown().await;
     }
 
     /// **A peer that connects and goes quiet must not accumulate serve tasks.**
@@ -182,7 +212,7 @@ mod tests {
             max_inflight: 4,
         };
         let server =
-            BlobServer::start_with_limits(LookupOpts::loopback(), temp_spool(), None, limits)
+            BlobServer::start_with_limits(LookupOpts::loopback(), temp_spool(), None, true, limits)
                 .await
                 .expect("start producer");
 
@@ -243,6 +273,7 @@ mod tests {
         let ticket = super::offload(
             &mut server,
             &LookupOpts::loopback(),
+            true,
             super::OffloadRequest {
                 path: src.clone(),
                 spool_dir: temp_spool(),
@@ -267,6 +298,7 @@ mod tests {
         let again = super::offload(
             &mut server,
             &LookupOpts::loopback(),
+            true,
             super::OffloadRequest {
                 path: src.clone(),
                 spool_dir: temp_spool(),
@@ -288,10 +320,14 @@ mod tests {
     async fn passworded_blob_requires_the_password() {
         use crate::protocol::crypto::Password;
         let password = Password::new("hunter2".to_owned());
-        let server =
-            BlobServer::start(LookupOpts::loopback(), temp_spool(), Some(password.clone()))
-                .await
-                .unwrap();
+        let server = BlobServer::start(
+            LookupOpts::loopback(),
+            temp_spool(),
+            Some(password.clone()),
+            true,
+        )
+        .await
+        .unwrap();
         let src = temp_file(b"secret bytes");
         let ticket = server
             .register(&src, ContentId::new("blob-test-content"))
@@ -325,7 +361,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_bad_secret_is_refused() {
-        let server = BlobServer::start(LookupOpts::loopback(), temp_spool(), None)
+        let server = BlobServer::start(LookupOpts::loopback(), temp_spool(), None, true)
             .await
             .unwrap();
         let src = temp_file(b"secret payload");
@@ -345,7 +381,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_unknown_hash_is_refused() {
-        let server = BlobServer::start(LookupOpts::loopback(), temp_spool(), None)
+        let server = BlobServer::start(LookupOpts::loopback(), temp_spool(), None, true)
             .await
             .unwrap();
         let src = temp_file(b"real content");
@@ -365,7 +401,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_size_disagreement_is_rejected() {
-        let server = BlobServer::start(LookupOpts::loopback(), temp_spool(), None)
+        let server = BlobServer::start(LookupOpts::loopback(), temp_spool(), None, true)
             .await
             .unwrap();
         let src = temp_file(b"exactly this many bytes");

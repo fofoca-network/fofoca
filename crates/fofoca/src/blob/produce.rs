@@ -26,7 +26,10 @@ use crate::util::consts::MAX_BLOB_BYTES;
 
 use super::store::BlobStore;
 use super::ticket::BlobTicket;
-use super::{BAD_SECRET, ContentId, DONE, HASH_LEN, SECRET_LEN, UNKNOWN_BLOB, wait_online};
+use super::{
+    BAD_SECRET, ContentId, DONE, HASH_LEN, RELAY_REFUSED_CODE, SECRET_LEN, UNKNOWN_BLOB,
+    wait_online,
+};
 
 /// What one fetch may cost before the requester has proved anything.
 ///
@@ -66,6 +69,9 @@ pub struct BlobServer {
     /// ticket inherits it, so a scraped ticket can't be redeemed without the
     /// password. `None` ⇒ bare bearer-secret tickets (status quo).
     password: Option<Password>,
+    /// Whether the relay may carry a transfer (`TransportPolicy::relay`). Off,
+    /// a fetch whose selected path is the relay is refused before any byte.
+    relay_transport: bool,
     /// Serves currently in flight. The accept loop holds the counter it
     /// actually reads; this handle exists so a test can observe that a peer
     /// which connects and then goes quiet cannot accumulate them.
@@ -93,8 +99,16 @@ impl BlobServer {
         lookups: LookupOpts,
         spool_dir: PathBuf,
         password: Option<Password>,
+        relay_transport: bool,
     ) -> Result<Self> {
-        Self::start_with_limits(lookups, spool_dir, password, ServeLimits::DEFAULT).await
+        Self::start_with_limits(
+            lookups,
+            spool_dir,
+            password,
+            relay_transport,
+            ServeLimits::DEFAULT,
+        )
+        .await
     }
 
     /// [`Self::start`] with the serving bounds spelled out, so tests need not
@@ -103,6 +117,7 @@ impl BlobServer {
         lookups: LookupOpts,
         spool_dir: PathBuf,
         password: Option<Password>,
+        relay_transport: bool,
         limits: ServeLimits,
     ) -> Result<Self> {
         let endpoint =
@@ -127,12 +142,14 @@ impl BlobServer {
             Arc::clone(&store),
             limits,
             Arc::clone(&inflight),
+            relay_transport,
         );
         Ok(Self {
             endpoint,
             store,
             lookups,
             password,
+            relay_transport,
             inflight,
         })
     }
@@ -171,6 +188,7 @@ impl BlobServer {
             size,
             lookups: self.lookups.clone(),
             password: registered.password,
+            relay_transport: self.relay_transport,
         };
         // Content-addressed dedup: reuse an already-spooled blob's ticket without
         // paying the ~100ms Argon2 stretch again. (A benign race with a
@@ -226,6 +244,7 @@ fn spawn_accept_loop(
     store: Arc<Mutex<BlobStore>>,
     limits: ServeLimits,
     inflight: Arc<AtomicUsize>,
+    relay_transport: bool,
 ) {
     tokio::spawn(async move {
         while let Some(incoming) = endpoint.accept().await {
@@ -243,6 +262,7 @@ fn spawn_accept_loop(
                 store,
                 limits,
                 Arc::clone(&inflight),
+                relay_transport,
             ));
         }
     });
@@ -256,8 +276,9 @@ async fn handle_incoming(
     store: Arc<Mutex<BlobStore>>,
     limits: ServeLimits,
     inflight: Arc<AtomicUsize>,
+    relay_transport: bool,
 ) {
-    if let Err(error) = serve_connection(incoming, &store, limits).await {
+    if let Err(error) = serve_connection(incoming, &store, limits, relay_transport).await {
         tracing::debug!(%error, "blob serve connection ended");
     }
     inflight.fetch_sub(1, Ordering::Relaxed);
@@ -268,6 +289,7 @@ async fn serve_connection(
     incoming: Incoming,
     store: &Mutex<BlobStore>,
     limits: ServeLimits,
+    relay_transport: bool,
 ) -> Result<()> {
     // One deadline across everything the requester controls. The secret that
     // authorizes this fetch is inside the request we are waiting for, so none
@@ -275,6 +297,12 @@ async fn serve_connection(
     let deadline = tokio::time::Instant::now() + limits.pre_auth;
     let (conn, send, recv) = tokio::time::timeout_at(deadline, async {
         let conn = incoming.await?;
+        // Before the request is read, so a refused fetch costs no spool read
+        // and the consumer sees the coded close instead of a size.
+        if !crate::transport::payload_allowed_on(&conn, relay_transport) {
+            conn.close(RELAY_REFUSED_CODE.into(), b"relay path refused");
+            bail!("{}", crate::transport::RELAY_REFUSED);
+        }
         let (send, recv) = conn.accept_bi().await?;
         anyhow::Ok((conn, send, recv))
     })

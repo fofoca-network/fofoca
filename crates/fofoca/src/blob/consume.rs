@@ -56,6 +56,12 @@ where
     W: AsyncWrite + Unpin,
 {
     let conn = dial(endpoint, ticket).await?;
+    // The producer refuses a relayed fetch too; refusing here first spares
+    // the round trip and names the cause.
+    if !crate::transport::payload_allowed_on(&conn, ticket.relay_transport) {
+        conn.close(0u32.into(), b"relay path refused");
+        bail!("{}", crate::transport::RELAY_REFUSED);
+    }
     let (mut send, mut recv) = conn.open_bi().await?;
 
     // Request: sha256 ‖ secret, then done sending.

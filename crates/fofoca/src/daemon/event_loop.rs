@@ -174,7 +174,7 @@ pub async fn run<A: NodeDriver>(
         state.multihop = multihop; // `--multihop`: the registered transport's handle
     }
     state.webrtc = Some(webrtc); // the direct-path transport the session manager fills
-    state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone());
+    state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), relay_transport);
     // Before the first write, so the initial advertisement carries a real count.
     state.live_count = live_count;
     state.relay_transport = relay_transport;

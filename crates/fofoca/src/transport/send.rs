@@ -32,6 +32,12 @@ pub async fn deliver(
     match route(msg, state) {
         Route::Broadcast => broadcast(sender, bytes).await,
         Route::Unicast(eid) => send_unicast(eid, bytes, state).await,
+        Route::Held(eid) => {
+            let name = sole_addressee(&msg.kind).map_or("<none>", Nickname::as_str);
+            Err(anyhow::anyhow!(
+                "directed message to {name} held: {eid}'s only path is the relay, which is lookup only on this mesh"
+            ))
+        }
         Route::Undeliverable => {
             let addressee = sole_addressee(&msg.kind);
             let name = addressee.map_or("<none>", Nickname::as_str);
@@ -62,6 +68,10 @@ enum Route {
     /// connection uses a direct path when one exists, else the registered
     /// multihop transport — the send decision doesn't distinguish.
     Unicast(EndpointId),
+    /// Directed to a known endpoint whose only path is the relay, on a mesh
+    /// where the relay carries no payload: parked until a direct path is
+    /// proven, never sent relayed.
+    Held(EndpointId),
     /// Directed with no known endpoint: an error, never gossip.
     Undeliverable,
 }
@@ -71,9 +81,17 @@ fn route(msg: &Message, state: &EventLoopState) -> Route {
         return Route::Broadcast;
     };
     match directed_endpoint(nick, state) {
+        Some(eid) if !state.relay_transport && relay_only(nick, state) => Route::Held(eid),
         Some(eid) => Route::Unicast(eid),
         None => Route::Undeliverable,
     }
+}
+
+/// Whether `msg` would be parked rather than sent right now — a directed
+/// frame to a relay-only peer while the relay is lookup only. The app send
+/// path buffers such a frame in `pending_outbound` instead of failing it.
+pub(crate) fn held_for_direct(msg: &Message, state: &EventLoopState) -> bool {
+    matches!(route(msg, state), Route::Held(_))
 }
 
 /// The lane a directed frame to `nick` would take right now — [`Route`]
@@ -180,7 +198,7 @@ mod tests {
 
     use iroh::EndpointId;
 
-    use super::{Lane, Route, lane_for, route};
+    use super::{Lane, Route, held_for_direct, lane_for, route};
     use crate::daemon::state::EventLoopState;
     use crate::protocol::message::AppFrameParams;
     use crate::protocol::{AppTag, CorrId, MeshId, Message, MessageBody};
@@ -308,6 +326,23 @@ mod tests {
             .peer_endpoints
             .insert(nick("bob"), iroh::EndpointAddr::new(rendezvous));
         assert_eq!(route(&directed_msg(), &state), Route::Undeliverable);
+    }
+
+    /// With the relay lookup only, a directed frame to a peer whose only path
+    /// is the relay is parked, not sent relayed; once the link reads direct
+    /// it takes unicast like any other.
+    #[test]
+    fn directed_frame_is_held_off_a_relay_only_peer_when_the_relay_is_lookup_only() {
+        use crate::daemon::state::DirectState;
+        let (mut state, bob) = state_knowing_bob();
+        state.direct.insert(bob, DirectState::RelayOnly);
+        assert_eq!(route(&directed_msg(), &state), Route::Unicast(bob));
+        state.relay_transport = false;
+        assert_eq!(route(&directed_msg(), &state), Route::Held(bob));
+        assert!(held_for_direct(&directed_msg(), &state));
+        state.direct.insert(bob, DirectState::Direct);
+        assert_eq!(route(&directed_msg(), &state), Route::Unicast(bob));
+        assert!(!held_for_direct(&directed_msg(), &state));
     }
 
     // ── the roster lane ───────────────────────────────────────────────

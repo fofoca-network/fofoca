@@ -63,12 +63,13 @@ pub async fn send_app(
     }
     let bytes = Bytes::from(frame.serialize()?);
     crate::logging::messages::log_out(&frame);
-    if state.meshed {
+    if state.meshed && !crate::transport::held_for_direct(&frame, state) {
         // Directed vs. broadcast is decided inside `deliver` from the frame's
         // `to` — the same routing the application's send path rides.
         crate::transport::deliver(&frame, bytes, state, ctx.sender).await
     } else if state.pending_outbound.push((frame, bytes)) {
-        // Buffered until the meshed edge flushes it through the same send
+        // Buffered until the meshed edge — or, for a frame held off a
+        // relay-only peer, a direct path — flushes it through the same send
         // decision (see `gossip::recv::flush_pending`).
         Ok(())
     } else {

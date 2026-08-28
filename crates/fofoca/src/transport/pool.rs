@@ -15,7 +15,7 @@ use iroh::endpoint::Connection;
 use iroh::{Endpoint, EndpointAddr, EndpointId};
 use tokio::sync::Mutex;
 
-use super::{LOG_TARGET, UNICAST_ALPN};
+use super::{LOG_TARGET, RELAY_REFUSED, UNICAST_ALPN, payload_allowed_on};
 
 use crate::util::clock::Instant;
 use crate::util::cooldown::Cooldown;
@@ -60,17 +60,23 @@ struct PoolInner {
     /// before dialing, and a warm hit inside never dials, but both mean the
     /// caller was willing to.
     dial_attempts: AtomicU64,
+    /// Whether the relay may carry payload on this mesh
+    /// (`TransportPolicy::relay`). When it may not, a send on a connection
+    /// whose selected path is the relay is refused; the connection stays
+    /// pooled, since iroh may still punch a direct path on it.
+    relay_transport: bool,
 }
 
 impl UnicastPool {
     /// A pool wired to `endpoint`, able to dial and carry unicast traffic.
-    pub(crate) fn new(endpoint: Endpoint) -> Self {
+    pub(crate) fn new(endpoint: Endpoint, relay_transport: bool) -> Self {
         Self {
             inner: Arc::new(PoolInner {
                 endpoint: Some(endpoint),
                 conns: Mutex::new(HashMap::new()),
                 dial_failures: Mutex::new(Cooldown::new(DIAL_FAILURE_COOLDOWN)),
                 dial_attempts: AtomicU64::new(0),
+                relay_transport,
             }),
         }
     }
@@ -86,6 +92,7 @@ impl UnicastPool {
                 conns: Mutex::new(HashMap::new()),
                 dial_failures: Mutex::new(Cooldown::new(DIAL_FAILURE_COOLDOWN)),
                 dial_attempts: AtomicU64::new(0),
+                relay_transport: true,
             }),
         }
     }
@@ -109,6 +116,10 @@ impl UnicastPool {
                 _ => return false,
             }
         };
+        // Not "warm" for payload purposes: the inline path reports the refusal.
+        if !payload_allowed_on(&conn, self.inner.relay_transport) {
+            return false;
+        }
         let pool = self.clone();
         n0_future::task::spawn(async move {
             let Err(error) = send_one(&conn, &bytes).await else {
@@ -177,6 +188,9 @@ impl UnicastPool {
                 }
             }
         };
+        if !payload_allowed_on(&conn, self.inner.relay_transport) {
+            bail!("{RELAY_REFUSED}");
+        }
         if let Err(error) = send_one(&conn, &bytes).await {
             self.inner.conns.lock().await.remove(&eid);
             return Err(error);
