@@ -50,7 +50,7 @@ pub use identity::{Identity, encode_pubkey};
 pub use mesh::{
     AdvertiseRequiresReachable, DEFAULT_DIRECTORY, DirectorySelection, LookupOpts, LookupSet, Mesh,
     MeshConfig, MeshId, MeshIdError, MeshName, NameError, OptFlag, RelayChoice, RelayLadder,
-    RelayLadderError, RelaySelection, resolve_lookups, validate_advertise,
+    RelayLadderError, RelaySelection, TransportPolicy, resolve_lookups, validate_advertise,
 };
 pub use message::{
     AppFrameParams, AppTag, BodyError, Channel, CorrId, IdError, Message, MessageBody, MessageId,

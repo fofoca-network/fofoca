@@ -9,7 +9,8 @@ use fofoca::net::TransportOpts;
 use fofoca::protocol::JoinTarget;
 use fofoca::protocol::Nickname;
 use fofoca::protocol::{
-    DirectorySelection, LookupSet, MeshConfig, MeshName, RelaySelection, resolve_lookups,
+    DirectorySelection, LookupSet, MeshConfig, MeshName, RelaySelection, TransportPolicy,
+    resolve_lookups,
 };
 use fofoca::runtime::{CreateParams, JoinParams, Node, Resolved, TopicParams};
 use fofoca::runtime::{SetupKind, SetupParams, setup_mesh};
@@ -223,7 +224,7 @@ pub fn resolve_kind(opts: &Opts, nickname: Option<Nickname>) -> Result<(SetupKin
                 lookups: resolve_lookups(opts.public, lookups),
                 password: None,
                 issuer_pubkey: None,
-                p2p_only: false,
+                transport: TransportPolicy::default(),
             };
             let name = MeshName::new(opts.name.clone().unwrap_or_else(|| "fofoca".to_string()))
                 .map_err(|error| anyhow::anyhow!("{error}"))?;

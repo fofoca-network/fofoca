@@ -448,9 +448,9 @@ pub async fn setup_mesh(kind: SetupKind, params: SetupParams) -> Result<EventLoo
         SetupKind::Create { config, .. } => config.lookups.clone(),
         SetupKind::Join { mesh, .. } | SetupKind::Topic { mesh, .. } => mesh.lookups().clone(),
     };
-    let p2p_only = match &kind {
-        SetupKind::Create { config, .. } => config.p2p_only,
-        SetupKind::Join { mesh, .. } | SetupKind::Topic { mesh, .. } => mesh.p2p_only(),
+    let relay_transport = match &kind {
+        SetupKind::Create { config, .. } => config.transport.relay,
+        SetupKind::Join { mesh, .. } | SetupKind::Topic { mesh, .. } => mesh.transport().relay,
     };
 
     // The off-loop rung channel: the backgrounded startup probe and the
@@ -558,7 +558,7 @@ pub async fn setup_mesh(kind: SetupKind, params: SetupParams) -> Result<EventLoo
         webrtc_ice,
         unicast_rx,
         live_count,
-        p2p_only,
+        relay_transport,
         // Default to the CLI driver; the in-process sessions
         // overwrite `cfg.driver` before handing it to `daemon::run`.
         driver: DriverMode::Cli,

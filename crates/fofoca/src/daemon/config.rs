@@ -190,10 +190,10 @@ pub struct EventLoopConfig {
     /// from. `setup_mesh` leaves this `None`; the advertise path sets
     /// it before `run` (same late-assignment pattern as `driver`).
     pub(crate) live_count: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
-    /// The mesh is p2p-only: payload stays off the relay (see
-    /// `fofoca_protocol::mesh::MeshConfig::p2p_only`). Read from the mesh
+    /// Whether the relay may carry payload on this mesh
+    /// (`fofoca_protocol::mesh::TransportPolicy::relay`). Read from the mesh
     /// config, never from a per-node option, so every member agrees.
-    pub(crate) p2p_only: bool,
+    pub(crate) relay_transport: bool,
     /// Who drives the loop (CLI / in-process) and the channels that driver
     /// needs. Assigned by [`Node::spawn`](super::node::Node::spawn) for an in-process
     /// consumer; a config handed straight to [`run`](super::run) keeps the CLI

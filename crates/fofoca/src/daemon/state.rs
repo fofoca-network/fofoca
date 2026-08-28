@@ -129,12 +129,12 @@ pub struct EventLoopState {
     /// Whether each linked peer's data path is direct or relay-only, taken
     /// from the same `conn_path` snapshot `NeighborUp` logs. Written by
     /// `NeighborUp`/`NeighborDown` like `linked_endpoints`. Feeds the census
-    /// and the roster; on a p2p-only mesh it is also what the send lanes
-    /// consult before carrying payload.
+    /// and the roster; when the relay is lookup only it is also what the send
+    /// lanes consult before carrying payload.
     pub(crate) direct: HashMap<EndpointId, DirectState>,
-    /// The mesh is p2p-only: payload stays off the relay. Mirrors the mesh
-    /// config (`MeshConfig::p2p_only`), set once at loop start.
-    pub(crate) p2p_only: bool,
+    /// Whether the relay may carry payload. Mirrors the mesh config
+    /// (`TransportPolicy::relay`), set once at loop start.
+    pub(crate) relay_transport: bool,
     /// Re-bridge memory: every peer `EndpointId` we've ever linked to,
     /// kept *across* `NeighborDown` (unlike `linked_endpoints`). When a
     /// node loses all links because the rendezvous/relay is unreachable,
@@ -558,7 +558,7 @@ impl EventLoopState {
         Self {
             linked_endpoints: HashSet::new(),
             direct: HashMap::new(),
-            p2p_only: false,
+            relay_transport: true,
             known_endpoints: BoundedFifoSet::new(KNOWN_ENDPOINTS_CAP),
             relink: Cooldown::new(RELINK_COOLDOWN),
             peerinfo: Cooldown::new(RELINK_COOLDOWN),

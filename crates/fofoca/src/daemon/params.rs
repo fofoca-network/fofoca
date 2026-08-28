@@ -17,7 +17,7 @@ use crate::protocol::Nickname;
 use crate::protocol::crypto::Password;
 use crate::protocol::mesh::{
     AdvertiseRequiresReachable, DirectorySelection, LookupOpts, Mesh, MeshConfig, MeshName,
-    validate_advertise,
+    TransportPolicy, validate_advertise,
 };
 use crate::resolver::{self, JoinTarget};
 
@@ -224,14 +224,15 @@ pub fn derive_topic_mesh_with(string: &str, lookups: LookupOpts) -> Result<Mesh>
             lookups,
             password: None,
             issuer_pubkey: None,
-            p2p_only: false,
+            transport: TransportPolicy::default(),
         },
     ))
 }
 
 /// [`derive_topic_mesh_with`] for a caller with a whole [`MeshConfig`] to bake
-/// in — a p2p-only topic mesh, say. Password and invite fields are meaningless
-/// on a topic mesh (its secret is the string) and are dropped.
+/// in — a topic mesh whose relay is lookup only, say. Password and invite
+/// fields are meaningless on a topic mesh (its secret is the string) and are
+/// dropped.
 ///
 /// # Errors
 /// The string is empty or whitespace.
@@ -245,7 +246,7 @@ pub fn derive_topic_mesh_config(string: &str, config: MeshConfig) -> Result<Mesh
             lookups: config.lookups,
             password: None,
             issuer_pubkey: None,
-            p2p_only: config.p2p_only,
+            transport: config.transport,
         },
     ))
 }

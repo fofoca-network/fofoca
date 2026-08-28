@@ -85,8 +85,9 @@ fn route(msg: &Message, state: &EventLoopState) -> Route {
 pub enum Lane {
     Unicast,
     Multihop,
-    /// The peer's only path is the relay. Only reported on a p2p-only mesh,
-    /// where that path carries no payload; elsewhere it reads `unicast`.
+    /// The peer's only path is the relay. Only reported on a mesh whose relay
+    /// is lookup only, where that path carries no payload; elsewhere it reads
+    /// `unicast`.
     #[serde(rename = "relay-only")]
     RelayOnly,
     Unreachable,
@@ -100,7 +101,7 @@ pub(crate) fn lane_for(nick: &Nickname, state: &EventLoopState) -> Lane {
     if directed_endpoint(nick, state).is_none() {
         return Lane::Unreachable;
     }
-    if state.p2p_only && relay_only(nick, state) {
+    if !state.relay_transport && relay_only(nick, state) {
         return Lane::RelayOnly;
     }
     if directly_meshed(nick, state) {
@@ -324,16 +325,16 @@ mod tests {
         assert_eq!(lane_for(&nick("bob"), &state), Lane::Multihop);
     }
 
-    /// On a p2p-only mesh a link whose only path is the relay carries no
-    /// payload, and the roster says so. Off such a mesh the same reading is
-    /// just a relayed unicast.
+    /// When the relay is lookup only, a link whose only path is the relay
+    /// carries no payload, and the roster says so. Elsewhere the same reading
+    /// is just a relayed unicast.
     #[test]
-    fn lane_is_relay_only_on_a_p2p_only_mesh() {
+    fn lane_is_relay_only_when_the_relay_is_lookup_only() {
         use crate::daemon::state::DirectState;
         let (mut state, bob) = state_knowing_bob();
         state.direct.insert(bob, DirectState::RelayOnly);
         assert_eq!(lane_for(&nick("bob"), &state), Lane::Unicast);
-        state.p2p_only = true;
+        state.relay_transport = false;
         assert_eq!(lane_for(&nick("bob"), &state), Lane::RelayOnly);
         state.direct.insert(bob, DirectState::Direct);
         assert_eq!(lane_for(&nick("bob"), &state), Lane::Unicast);

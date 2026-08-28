@@ -29,7 +29,7 @@ mod name;
 pub use id::{MeshId, MeshIdError};
 pub use lookup::{
     AdvertiseRequiresReachable, DEFAULT_DIRECTORY, DirectorySelection, LookupOpts, MeshConfig,
-    RelayChoice, resolve_lookups, validate_advertise,
+    RelayChoice, TransportPolicy, resolve_lookups, validate_advertise,
 };
 pub use lookup::{LookupSet, OptFlag, RelayLadder, RelayLadderError, RelaySelection};
 pub use name::{MeshName, NameError};
@@ -327,11 +327,10 @@ impl Mesh {
         &self.config.lookups
     }
 
-    /// Whether payload must stay off the relay on this mesh (see
-    /// [`MeshConfig::p2p_only`]).
+    /// Which transports may carry payload on this mesh.
     #[must_use]
-    pub fn p2p_only(&self) -> bool {
-        self.config.p2p_only
+    pub fn transport(&self) -> &TransportPolicy {
+        &self.config.transport
     }
 
     /// True when the mesh is loopback-only (no off-machine lookups).

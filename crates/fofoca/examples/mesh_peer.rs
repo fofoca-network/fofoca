@@ -4,7 +4,7 @@
 //! cargo run -p fofoca --example mesh_peer              # create, print the id
 //! cargo run -p fofoca --example mesh_peer -- <id>    # join that mesh
 //! MESH_TRANSPORT=webrtc cargo run … --example mesh_peer -- <id>  # WebRTC-only data plane
-//! MESH_P2P_ONLY=1 cargo run -p fofoca --example mesh_peer          # create a p2p-only mesh
+//! MESH_RELAY_TRANSPORT=off cargo run -p fofoca --example mesh_peer  # create: relay is lookup only
 //! ```
 //!
 //! `MESH_TRANSPORT=webrtc` clears IP transports, so any data path that is not
@@ -26,7 +26,9 @@ use fofoca::embed::{
     AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver, SilentSink,
 };
 use fofoca::net::TransportOpts;
-use fofoca::protocol::{DirectorySelection, JoinTarget, LookupOpts, MeshConfig, MeshName, Message};
+use fofoca::protocol::{
+    DirectorySelection, JoinTarget, LookupOpts, MeshConfig, MeshName, Message, TransportPolicy,
+};
 use fofoca::runtime::{CreateParams, JoinParams, Node, Resolved, SetupParams, setup_mesh};
 
 /// The do-nothing application. A peer that only carries presence still forms a
@@ -103,7 +105,10 @@ async fn main() -> anyhow::Result<()> {
                 issuer_pubkey: None,
                 // Baked into the id, so a joiner inherits it: only the
                 // creator reads the env var.
-                p2p_only: std::env::var_os("MESH_P2P_ONLY").is_some_and(|value| value == "1"),
+                transport: TransportPolicy {
+                    relay: std::env::var_os("MESH_RELAY_TRANSPORT")
+                        .is_none_or(|value| value != "off"),
+                },
             },
             advertise: DirectorySelection::Unset,
             password: None,

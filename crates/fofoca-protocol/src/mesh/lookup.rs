@@ -189,17 +189,49 @@ const FEATURE_PASSWORD: u8 = 0b0001;
 /// password verifier when both bits are set.
 const FEATURE_INVITE_ONLY: u8 = 0b0010;
 
-/// Feature bit marking a **p2p-only** mesh: members carry payload (gossip,
+/// Feature bit marking a mesh whose relay is **lookup only**
+/// ([`TransportPolicy::relay`] is `false`): members carry payload (gossip,
 /// unicast, blobs) only over a direct path — hole-punched IP or a `WebRTC`
-/// session — and never over the iroh relay, which is kept for rendezvous alone
-/// (the bootstrap dial, JSEP signalling, NAT-traversal frames). No field
-/// follows the bit. In the mesh id rather than per node, because one relaying
-/// member would undo the saving for everyone it links; in the feature byte
-/// rather than a lookup-flag bit, so an older build refuses the id instead of
-/// joining and relaying anyway.
-const FEATURE_P2P_ONLY: u8 = 0b0100;
+/// session — and never over the iroh relay, which is kept for the bootstrap
+/// dial, JSEP signalling and NAT-traversal frames. No field follows the bit.
+/// In the mesh id rather than per node, because one relaying member would undo
+/// the saving for everyone it links; in the feature byte rather than a
+/// lookup-flag bit, so an older build refuses the id instead of joining and
+/// relaying anyway.
+const FEATURE_NO_RELAY_TRANSPORT: u8 = 0b0100;
 
-const KNOWN_FEATURES: u8 = FEATURE_PASSWORD | FEATURE_INVITE_ONLY | FEATURE_P2P_ONLY;
+const KNOWN_FEATURES: u8 = FEATURE_PASSWORD | FEATURE_INVITE_ONLY | FEATURE_NO_RELAY_TRANSPORT;
+
+/// Which transports may carry mesh **payload**, baked into the mesh id beside
+/// [`LookupOpts`]. Lookups say how members find each other; this says what
+/// their traffic may ride once they have. Only mesh-wide policy lives here —
+/// what a given node *can* do (`ip`, `webrtc`, `multihop`) is per node, in the
+/// engine's `TransportOpts`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransportPolicy {
+    /// Whether the iroh relay may carry payload. `false` keeps the relay for
+    /// lookup alone — the bootstrap dial, JSEP signalling and the
+    /// NAT-traversal frames of a freshly opened connection still cross it —
+    /// and every payload lane refuses to send while the relay is the only
+    /// path to a peer. A pair that cannot hole-punch and has no `WebRTC`
+    /// session stays unlinked for payload rather than relayed. Meaningless
+    /// without a relay: rejected together with [`RelayChoice::Disabled`].
+    pub relay: bool,
+}
+
+impl Default for TransportPolicy {
+    fn default() -> Self {
+        Self { relay: true }
+    }
+}
+
+impl TransportPolicy {
+    /// Relay kept for lookup only; payload goes peer to peer or not at all.
+    #[must_use]
+    pub fn relay_lookup_only() -> Self {
+        Self { relay: false }
+    }
+}
 
 /// Byte length of the Ed25519 issuer public key an invite-only mesh carries.
 const ISSUER_PUBKEY_LEN: usize = 32;
@@ -220,9 +252,8 @@ pub struct MeshConfig {
     /// derivation secret lives only in creator-minted invites), and a redeemer
     /// verifies each invite's signature against this key. `None` ⇒ open join.
     pub issuer_pubkey: Option<[u8; ISSUER_PUBKEY_LEN]>,
-    /// Payload goes peer to peer or not at all; the relay is rendezvous only.
-    /// See [`FEATURE_P2P_ONLY`].
-    pub p2p_only: bool,
+    /// Which transports may carry payload. See [`TransportPolicy`].
+    pub transport: TransportPolicy,
 }
 
 impl MeshConfig {
@@ -236,7 +267,7 @@ impl MeshConfig {
             lookups: LookupOpts::loopback(),
             password: None,
             issuer_pubkey: None,
-            p2p_only: false,
+            transport: TransportPolicy::default(),
         }
     }
 
@@ -249,8 +280,22 @@ impl MeshConfig {
             lookups: LookupOpts::public_preset(),
             password: None,
             issuer_pubkey: None,
-            p2p_only: false,
+            transport: TransportPolicy::default(),
         }
+    }
+
+    /// The one cross-field rule: disabling the relay as a transport needs a
+    /// relay to exist as a lookup. Checked on decode and by minting callers.
+    ///
+    /// # Errors
+    /// `transport.relay` is `false` while `lookups.relay` is `Disabled`.
+    pub fn validate(&self) -> Result<()> {
+        if !self.transport.relay && self.lookups.relay == RelayChoice::Disabled {
+            bail!(
+                "transport.relay=off needs a relay lookup: with the relay disabled there is nothing to keep payload off"
+            );
+        }
+        Ok(())
     }
 
     /// Canonical wire bytes: `[lookups…][if password: feature-flags u8 ‖
@@ -269,8 +314,8 @@ impl MeshConfig {
         if self.issuer_pubkey.is_some() {
             features |= FEATURE_INVITE_ONLY;
         }
-        if self.p2p_only {
-            features |= FEATURE_P2P_ONLY;
+        if !self.transport.relay {
+            features |= FEATURE_NO_RELAY_TRANSPORT;
         }
         if features != 0 {
             buf.push(features);
@@ -294,8 +339,8 @@ impl MeshConfig {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         let mut pos = 0;
         let lookups = LookupOpts::decode_from(bytes, &mut pos)?;
-        let (password, issuer_pubkey, p2p_only) = if pos == bytes.len() {
-            (None, None, false)
+        let (password, issuer_pubkey, relay_transport) = if pos == bytes.len() {
+            (None, None, true)
         } else {
             let features = bytes[pos];
             pos += 1;
@@ -332,17 +377,25 @@ impl MeshConfig {
             } else {
                 None
             };
-            (password, issuer_pubkey, features & FEATURE_P2P_ONLY != 0)
+            (
+                password,
+                issuer_pubkey,
+                features & FEATURE_NO_RELAY_TRANSPORT == 0,
+            )
         };
         if pos != bytes.len() {
             bail!("trailing bytes in mesh config");
         }
-        Ok(MeshConfig {
+        let config = MeshConfig {
             lookups,
             password,
             issuer_pubkey,
-            p2p_only,
-        })
+            transport: TransportPolicy {
+                relay: relay_transport,
+            },
+        };
+        config.validate()?;
+        Ok(config)
     }
 }
 
@@ -605,7 +658,7 @@ impl fmt::Display for RelayLadder {
 mod lookup_tests {
     use super::{
         LookupOpts, LookupSet, MeshConfig, RelayChoice, RelayLadder, RelaySelection,
-        resolve_lookups,
+        TransportPolicy, resolve_lookups,
     };
 
     fn lookups(mdns: bool, dht: bool, relay: RelaySelection) -> LookupSet {
@@ -721,7 +774,7 @@ mod lookup_tests {
             },
             password: None,
             issuer_pubkey: None,
-            p2p_only: false,
+            transport: TransportPolicy::default(),
         };
         let decoded = MeshConfig::from_bytes(&config.to_bytes()).unwrap();
         assert_eq!(decoded, config);
@@ -749,7 +802,7 @@ mod lookup_tests {
             lookups: LookupOpts::public_preset(),
             password: Some([0xA5u8; 16]),
             issuer_pubkey: None,
-            p2p_only: false,
+            transport: TransportPolicy::default(),
         };
         let decoded = MeshConfig::from_bytes(&config.to_bytes()).unwrap();
         assert_eq!(decoded, config);
@@ -766,7 +819,7 @@ mod lookup_tests {
     #[test]
     fn config_rejects_unknown_feature_flags() {
         let mut bytes = MeshConfig::public_preset().to_bytes();
-        bytes.push(0b1000); // an undefined feature bit (password=1, invite=2, p2p-only=4 are taken)
+        bytes.push(0b1000); // an undefined feature bit (password=1, invite=2, no-relay-transport=4 are taken)
         bytes.extend_from_slice(&[0u8; 16]);
         let error = MeshConfig::from_bytes(&bytes).unwrap_err();
         assert!(
@@ -776,33 +829,45 @@ mod lookup_tests {
     }
 
     #[test]
-    fn config_round_trips_p2p_only() {
+    fn config_round_trips_relay_lookup_only() {
         let config = MeshConfig {
-            p2p_only: true,
+            transport: TransportPolicy::relay_lookup_only(),
             ..MeshConfig::public_preset()
         };
         let bytes = config.to_bytes();
-        // Lookups byte, then the feature byte with only the p2p-only bit: the
-        // feature carries no field of its own.
-        assert_eq!(bytes, vec![0b0111, super::FEATURE_P2P_ONLY]);
+        // Lookups byte, then the feature byte with only this bit: the feature
+        // carries no field of its own.
+        assert_eq!(bytes, vec![0b0111, super::FEATURE_NO_RELAY_TRANSPORT]);
         assert_eq!(MeshConfig::from_bytes(&bytes).unwrap(), config);
         assert_ne!(
             bytes,
             MeshConfig::public_preset().to_bytes(),
-            "a p2p-only mesh derives a different topic"
+            "a relay-lookup-only mesh derives a different topic"
         );
     }
 
     #[test]
-    fn config_round_trips_p2p_only_with_password() {
+    fn config_round_trips_relay_lookup_only_with_password() {
         let config = MeshConfig {
-            lookups: LookupOpts::loopback(),
+            lookups: LookupOpts::public_preset(),
             password: Some([0xA5u8; 16]),
             issuer_pubkey: None,
-            p2p_only: true,
+            transport: TransportPolicy::relay_lookup_only(),
         };
         let decoded = MeshConfig::from_bytes(&config.to_bytes()).unwrap();
         assert_eq!(decoded, config);
+    }
+
+    #[test]
+    fn config_rejects_relay_transport_off_without_a_relay_lookup() {
+        let config = MeshConfig {
+            transport: TransportPolicy::relay_lookup_only(),
+            ..MeshConfig::loopback()
+        };
+        assert!(config.validate().is_err(), "nothing to keep payload off");
+        // The same shape on the wire is refused on decode too.
+        let bytes = vec![0b0000, super::FEATURE_NO_RELAY_TRANSPORT];
+        assert!(MeshConfig::from_bytes(&bytes).is_err());
     }
 
     #[test]
@@ -811,7 +876,7 @@ mod lookup_tests {
             lookups: LookupOpts::public_preset(),
             password: None,
             issuer_pubkey: Some([0x3Cu8; 32]),
-            p2p_only: false,
+            transport: TransportPolicy::default(),
         };
         let decoded = MeshConfig::from_bytes(&config.to_bytes()).unwrap();
         assert_eq!(decoded, config);
@@ -825,7 +890,7 @@ mod lookup_tests {
             lookups: LookupOpts::loopback(),
             password: Some([0xA5u8; 16]),
             issuer_pubkey: Some([0x3Cu8; 32]),
-            p2p_only: false,
+            transport: TransportPolicy::default(),
         };
         let decoded = MeshConfig::from_bytes(&config.to_bytes()).unwrap();
         assert_eq!(decoded, config);

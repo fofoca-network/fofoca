@@ -28,7 +28,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::crypto::derive_secret;
-use crate::mesh::{LookupOpts, Mesh, MeshConfig, MeshName};
+use crate::mesh::{LookupOpts, Mesh, MeshConfig, MeshName, TransportPolicy};
 use crate::{MeshId, MessageBody};
 use fofoca_util::clock::Instant;
 
@@ -71,7 +71,7 @@ pub fn directory_config(lookups: LookupOpts) -> MeshConfig {
         lookups,
         password: None,
         issuer_pubkey: None,
-        p2p_only: false,
+        transport: TransportPolicy::default(),
         // The directory rendezvous always uses gossip — it is how advertisers
         // and discoverers meet.
     }
