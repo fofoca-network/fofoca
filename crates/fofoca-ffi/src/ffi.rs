@@ -43,7 +43,10 @@ pub struct FofocaOpts {
     pub is_public: c_int,
     pub mdns: c_int,
     pub dht: c_int,
+    /// The relay as a lookup.
     pub relay: c_int,
+    /// The relay as a transport; off keeps all data peer to peer.
+    pub relay_transport: c_int,
     pub max_peers: usize,
 }
 
@@ -242,6 +245,7 @@ pub unsafe extern "C" fn fofoca_open(opts: *const FofocaOpts) -> *mut FofocaPipe
             mdns: opts.mdns != 0,
             dht: opts.dht != 0,
             relay: opts.relay != 0,
+            relay_transport: opts.relay_transport != 0,
             max_peers: opts.max_peers,
         };
         match Pipe::open(&parsed) {

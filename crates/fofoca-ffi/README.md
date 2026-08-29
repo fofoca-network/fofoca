@@ -27,6 +27,12 @@ It depends on the engine and nothing else.
 declaration — the source of truth for a C caller, and the counterpart of
 [`src/ffi.rs`](src/ffi.rs). Change one, change the other.
 
+`fofoca_opts` names the relay's two roles apart: `relay` finds peers through
+it, `relay_transport` lets payload ride it. Leave `relay_transport` at 0 and
+every byte of data goes peer to peer; the relay is a meeting point only.
+Adding `relay_transport` moved `max_peers`, so a caller built against the
+older struct must be recompiled.
+
 ```c
 fofoca_pipe *pipe = fofoca_open(&(fofoca_opts){ .is_public = 1 });
 printf("joined %s as %s\n", fofoca_id(pipe), fofoca_nickname(pipe));

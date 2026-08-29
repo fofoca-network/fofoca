@@ -4,7 +4,7 @@
 //! cargo run -p fofoca --example mesh_peer              # create, print the id
 //! cargo run -p fofoca --example mesh_peer -- <id>    # join that mesh
 //! MESH_TRANSPORT=webrtc cargo run … --example mesh_peer -- <id>  # WebRTC-only data plane
-//! MESH_RELAY_TRANSPORT=on cargo run -p fofoca --example mesh_peer   # create: relay may carry payload
+//! MESH_RELAY_TRANSPORT=on cargo run -p fofoca --example mesh_peer   # create: relay may carry payload (the `relay_transport` create option)
 //! ```
 //!
 //! `MESH_TRANSPORT=webrtc` clears IP transports, so any data path that is not

@@ -32,7 +32,7 @@ use crate::wire::{DEPARTURE_GRACE, INBOUND_CAP};
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
 #[expect(
     clippy::struct_excessive_bools,
-    reason = "four independent discovery choices (public/mdns/dht/relay); they are flat inputs, not a state machine to model as an enum"
+    reason = "four independent discovery choices (public/mdns/dht/relay) plus the relay's transport role; they are flat inputs, not a state machine to model as an enum"
 )]
 pub struct Opts {
     /// A `mesh id` to join.
@@ -48,7 +48,13 @@ pub struct Opts {
     pub public: bool,
     pub mdns: bool,
     pub dht: bool,
+    /// The relay as a **lookup**: members find each other through it.
     pub relay: bool,
+    /// The relay as a **transport**: payload may fall back to it. Off by
+    /// default, so all data is peer to peer and the relay serves lookup
+    /// alone. Needs `relay` (or `public`); baked into the mesh id, so a
+    /// joiner inherits it. Ignored when joining.
+    pub relay_transport: bool,
     /// Active-view cap; `0` takes the engine default.
     pub max_peers: usize,
 }
@@ -224,8 +230,13 @@ pub fn resolve_kind(opts: &Opts, nickname: Option<Nickname>) -> Result<(SetupKin
                 lookups: resolve_lookups(opts.public, lookups),
                 password: None,
                 issuer_pubkey: None,
-                transport: TransportPolicy::default(),
+                transport: TransportPolicy {
+                    relay: opts.relay_transport,
+                },
             };
+            config
+                .validate()
+                .map_err(|error| anyhow::anyhow!("{error}"))?;
             let name = MeshName::new(opts.name.clone().unwrap_or_else(|| "fofoca".to_string()))
                 .map_err(|error| anyhow::anyhow!("{error}"))?;
             let Resolved { kind, author, .. } = CreateParams {
@@ -319,6 +330,55 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The relay's two roles are two options: `relay` finds peers through
+    /// it, `relay_transport` lets payload ride it. The second is off unless
+    /// named, and meaningless without the first.
+    #[test]
+    fn relay_transport_is_off_unless_named_and_needs_the_relay_lookup() {
+        let (kind, _) = resolve_kind(
+            &Opts {
+                public: true,
+                ..opts()
+            },
+            None,
+        )
+        .expect("a public create resolves");
+        let SetupKind::Create { config, .. } = kind else {
+            panic!("no selector must resolve to SetupKind::Create")
+        };
+        assert!(!config.transport.relay);
+
+        let (relayed, _) = resolve_kind(
+            &Opts {
+                relay: true,
+                relay_transport: true,
+                ..opts()
+            },
+            None,
+        )
+        .expect("a relay-transport create resolves");
+        let SetupKind::Create {
+            config: relayed_config,
+            ..
+        } = relayed
+        else {
+            panic!("no selector must resolve to SetupKind::Create")
+        };
+        assert!(relayed_config.transport.relay);
+
+        assert!(
+            resolve_kind(
+                &Opts {
+                    relay_transport: true,
+                    ..opts()
+                },
+                None,
+            )
+            .is_err(),
+            "relay transport without a relay lookup is an error, not a loopback mesh"
+        );
     }
 
     #[test]

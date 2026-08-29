@@ -327,6 +327,27 @@ mod topic_derivation_tests {
         assert!(derive_topic_mesh_with("   ", LookupOpts::loopback()).is_err());
     }
 
+    /// The relay's transport role is part of the id: two meshes that differ
+    /// only in it are different meshes, so members provably agree on it.
+    #[test]
+    fn relay_transport_changes_the_id() {
+        let lookup_only =
+            derive_topic_mesh_with("standup", LookupOpts::public_preset()).expect("derive");
+        let relayed = derive_topic_mesh_config(
+            "standup",
+            MeshConfig {
+                lookups: LookupOpts::public_preset(),
+                password: None,
+                issuer_pubkey: None,
+                transport: TransportPolicy { relay: true },
+            },
+        )
+        .expect("derive");
+        assert_ne!(lookup_only.to_string(), relayed.to_string());
+        assert!(!lookup_only.transport().relay);
+        assert!(relayed.transport().relay);
+    }
+
     /// A minted config gets the same cross-field check a decoded id gets;
     /// otherwise the creator would run a mesh whose id every joiner rejects.
     #[test]

@@ -31,6 +31,7 @@ fn create_opts(nick: &CStr) -> FofocaOpts {
         mdns: 0,
         dht: 0,
         relay: 0,
+        relay_transport: 0,
         max_peers: 0,
     }
 }
@@ -319,6 +320,7 @@ fn create_opts_for_join(id: &CStr, nick: &CStr) -> FofocaOpts {
         mdns: 0,
         dht: 0,
         relay: 0,
+        relay_transport: 0,
         max_peers: 0,
     }
 }

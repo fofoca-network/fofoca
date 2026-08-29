@@ -16,6 +16,7 @@ export interface WireOpts {
   readonly mdns: boolean
   readonly dht: boolean
   readonly relay: boolean
+  readonly relayTransport: boolean
   readonly maxPeers: number
 }
 
