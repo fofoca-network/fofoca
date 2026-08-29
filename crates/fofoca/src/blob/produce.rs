@@ -298,8 +298,10 @@ async fn serve_connection(
     let (conn, send, recv) = tokio::time::timeout_at(deadline, async {
         let conn = incoming.await?;
         // Before the request is read, so a refused fetch costs no spool read
-        // and the consumer sees the coded close instead of a size.
-        crate::transport::refuse_relayed(&conn, relay_transport, RELAY_REFUSED_CODE)?;
+        // and the consumer sees the coded close instead of a size. The wait
+        // for a punch shares the pre-auth deadline: the requester controls
+        // both, and neither is gated on it having proved anything.
+        crate::transport::refuse_relayed(&conn, relay_transport, RELAY_REFUSED_CODE).await?;
         let (send, recv) = conn.accept_bi().await?;
         anyhow::Ok((conn, send, recv))
     })

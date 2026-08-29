@@ -87,20 +87,21 @@ pub(crate) async fn refuse_unless_direct(
     false
 }
 
-/// [`payload_allowed_on`] as a guard: on refusal, close `conn` with
-/// `close_code` so the other end reads the cause, and return the error.
+/// [`refuse_unless_direct`] as a guard with the standard deadline: waits for
+/// the punch a fresh connection is still making, and on refusal returns the
+/// error after closing `conn` with `close_code`.
 ///
 /// # Errors
-/// The relay is lookup only and `conn`'s selected path is the relay.
+/// The relay is lookup only and no direct path was selected on `conn` within
+/// [`PROBE_DEADLINE`].
 #[cfg(feature = "blob")]
-pub(crate) fn refuse_relayed(
+pub(crate) async fn refuse_relayed(
     conn: &Connection,
     relay_transport: bool,
     close_code: u32,
 ) -> anyhow::Result<()> {
-    if payload_allowed_on(conn, relay_transport) {
+    if refuse_unless_direct(conn, relay_transport, PROBE_DEADLINE, close_code).await {
         return Ok(());
     }
-    conn.close(close_code.into(), b"relay path refused");
     anyhow::bail!("{RELAY_REFUSED}")
 }
