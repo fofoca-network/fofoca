@@ -1492,6 +1492,7 @@ dependencies = [
  "iroh-gossip",
  "iroh-mainline-address-lookup",
  "iroh-mdns-address-lookup",
+ "iroh-relay",
  "libc",
  "n0-future",
  "proptest",

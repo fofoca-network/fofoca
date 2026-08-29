@@ -5,6 +5,8 @@
 //! needs an `Endpoint` reaches in here and accepts the coupling.
 
 pub use crate::gossip::conn_path;
+#[cfg(feature = "iroh-test-utils")]
+pub use crate::lookup::trust_any_relay_cert;
 #[cfg(feature = "host")]
 pub use crate::lookup::{NetworkCapability, capability_probe};
 pub use crate::lookup::{

@@ -199,11 +199,8 @@ pub async fn probe_ladder(ladder: &[RelayUrl], per_rung: Duration) -> Vec<(Relay
 /// this relay and wait for `online()` within `timeout`. Closes the probe
 /// endpoint before returning.
 async fn relay_rung_reachable(rung: &RelayUrl, timeout: Duration) -> bool {
-    let Ok(endpoint) = Endpoint::builder(presets::Minimal)
-        .relay_mode(RelayMode::custom([rung.clone()]))
-        .bind()
-        .await
-    else {
+    let builder = Endpoint::builder(presets::Minimal).relay_mode(RelayMode::custom([rung.clone()]));
+    let Ok(endpoint) = super::relay_trust(builder).bind().await else {
         return false;
     };
     let reachable = n0_future::time::timeout(timeout, endpoint.online())

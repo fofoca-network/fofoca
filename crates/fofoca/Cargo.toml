@@ -43,7 +43,13 @@ dhat-heap = []
 #
 # A dev-dependency feature on the consumer's side, so resolver 3 keeps it out of
 # any shipped build.
-iroh-test-utils = ["iroh/test-utils"]
+#
+# Also pulls `iroh-relay` (same rev as `iroh`, host only) for
+# `CaTlsConfig::insecure_skip_verify`, which `net::trust_any_relay_cert` needs:
+# the local test relay serves a self-signed certificate, and the engine builds
+# its own endpoints — the beacon's included — so the trust switch has to live
+# in `build_endpoint`.
+iroh-test-utils = ["iroh/test-utils", "dep:iroh-relay", "iroh-relay/test-utils"]
 # Off by default. The blob-offload side-channel: a `habilis-mesh/blob/1` ALPN
 # server, a ticket, and fetch/offload, for handing a peer a payload too large to
 # ride a gossip frame. `agent-gossip` enables it for A2A payload offload; the
@@ -176,6 +182,9 @@ iroh = { workspace = true, features = [
     "unstable-net-report",
 ] }
 iroh-gossip.workspace = true
+# Only for `iroh-test-utils` (see the feature); pinned to `iroh`'s rev so it is
+# the copy already in the graph, not a second one.
+iroh-relay = { version = "=1.0.3", git = "https://github.com/fofoca-network/iroh", rev = "b7e07872a6d28a9b7971ecfaca8db69c4bddd2de", default-features = false, optional = true }
 
 # The browser needs the endpoint and the relay transport and nothing else:
 # iroh's defaults (portmapper, fast-apple-datapath, metrics) are host-only and
