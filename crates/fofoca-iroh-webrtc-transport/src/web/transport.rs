@@ -22,9 +22,11 @@ use n0_watcher::Watchable;
 use wasm_bindgen::JsCast as _;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
-use web_sys::{MessageEvent, RtcDataChannel, RtcPeerConnection};
+use web_sys::{MessageEvent, RtcDataChannel, RtcPeerConnection, RtcPeerConnectionState};
 
+use super::jsep::{now_ms, sleep_ms};
 use crate::custom_addr;
+use crate::liveness::{ConnectionPhase, DISCONNECT_GRACE_MS, Verdict, judge_state};
 use crate::registry::Registry;
 use crate::{IN_QUEUE, OUT_QUEUE};
 
@@ -132,12 +134,89 @@ impl Drop for SessionKeepalive {
         self.data_channel.set_onmessage(None);
         self.data_channel.set_onclose(None);
         self.data_channel.set_onerror(None);
+        self.peer_connection.set_onconnectionstatechange(None);
         self.data_channel.close();
         self.peer_connection.close();
     }
 }
 
 type SessionMap = Arc<Registry<SessionHandle>>;
+
+/// [`DISCONNECT_GRACE_MS`] for `sleep_ms`, which takes the browser's `i32`
+/// milliseconds. Written out rather than cast so the two cannot drift.
+const DISCONNECT_GRACE_MS_I32: i32 = 10_000;
+const _: () = assert!(DISCONNECT_GRACE_MS_I32 as f64 == DISCONNECT_GRACE_MS);
+
+fn phase_of(state: RtcPeerConnectionState) -> ConnectionPhase {
+    match state {
+        RtcPeerConnectionState::Failed | RtcPeerConnectionState::Closed => ConnectionPhase::Dead,
+        RtcPeerConnectionState::Disconnected => ConnectionPhase::Disconnected,
+        // `RtcPeerConnectionState` is a generated web-sys enum that can grow a
+        // variant without us touching anything; a state we have not heard of
+        // is not evidence of death.
+        RtcPeerConnectionState::New
+        | RtcPeerConnectionState::Connecting
+        | RtcPeerConnectionState::Connected
+        | _ => ConnectionPhase::Healthy,
+    }
+}
+
+/// The `connectionstatechange` hook for one session.
+///
+/// `failed`/`closed` evict at once. `disconnected` gets [`DISCONNECT_GRACE_MS`]
+/// to recover: the state is re-read after the grace rather than remembered,
+/// so a recovery cancels the eviction with no bookkeeping, and a second
+/// `disconnected` inside the window only re-reads again.
+fn watch_connection_state(
+    sessions: SessionMap,
+    remote: EndpointId,
+    generation: u64,
+    peer_connection: &RtcPeerConnection,
+) -> Closure<dyn FnMut()> {
+    let watched = peer_connection.clone();
+    Closure::<dyn FnMut()>::new(move || {
+        let now = watched.connection_state();
+        match judge_state(phase_of(now), None) {
+            Verdict::Keep => {}
+            Verdict::Remove => {
+                let sessions = Arc::clone(&sessions);
+                wasm_bindgen_futures::spawn_local(async move {
+                    evict_if_generation(&sessions, remote, generation, now, 0.0);
+                });
+            }
+            Verdict::Wait => {
+                let sessions = Arc::clone(&sessions);
+                let watched = watched.clone();
+                wasm_bindgen_futures::spawn_local(async move {
+                    let since = now_ms();
+                    sleep_ms(DISCONNECT_GRACE_MS_I32).await;
+                    let after = watched.connection_state();
+                    let elapsed = now_ms() - since;
+                    if judge_state(phase_of(after), Some(elapsed)) == Verdict::Remove {
+                        evict_if_generation(&sessions, remote, generation, after, elapsed);
+                    }
+                });
+            }
+        }
+    })
+}
+
+/// Drop `remote`'s slot if it is still the one stamped `generation`, and say
+/// why: the state that condemned it and how long it was given.
+fn evict_if_generation(
+    sessions: &SessionMap,
+    remote: EndpointId,
+    generation: u64,
+    state: RtcPeerConnectionState,
+    grace_ms: f64,
+) {
+    if sessions.remove_if_generation(&remote, generation) {
+        web_sys::console::log_1(&JsValue::from_str(&format!(
+            "[fofoca webrtc] session for {remote} detached (peer connection {state:?} \
+             after {grace_ms:.0} ms grace)"
+        )));
+    }
+}
 
 /// Why [`BrowserHubTransport::attach`] refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -298,6 +377,18 @@ impl BrowserHubTransport {
             }
             callbacks.push(hook.into_js_value());
         }
+
+        // The channel's own `close` is not enough: when ICE dies underneath it
+        // the channel keeps reading `open` and never fires. Watch the peer
+        // connection too, through the same generation-scoped removal path.
+        let hook = watch_connection_state(
+            Arc::clone(&self.sessions),
+            remote,
+            generation,
+            &peer_connection,
+        );
+        peer_connection.set_onconnectionstatechange(Some(hook.as_ref().unchecked_ref()));
+        callbacks.push(hook.into_js_value());
 
         {
             let mut inbound_tx = self.inbound_tx.clone();
@@ -573,6 +664,18 @@ impl BrowserHubTransport {
 
     /// The live session's `RTCPeerConnection`, if there is one.
     ///
+    /// `RTCPeerConnection.connectionState` for `remote`, if a live session
+    /// exists.
+    ///
+    /// What the hub's own watchdog judges; exposed so a roster can show it and
+    /// a consumer need not poll the connection itself.
+    #[must_use]
+    pub fn session_state(&self, remote: &EndpointId) -> Option<RtcPeerConnectionState> {
+        self.sessions.with_live(remote, |handle| {
+            handle.keepalive.peer_connection.connection_state()
+        })
+    }
+
     /// The escape hatch for diagnostics this hub does not wrap. The readers
     /// above answer the questions a roster needs — which candidate pair, how
     /// many bytes, what round trip — by picking one row out of `getStats` and
