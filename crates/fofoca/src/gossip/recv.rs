@@ -13,7 +13,7 @@ use bytes::Bytes;
 use iroh_gossip::api::{ApiError, Event};
 
 use crate::daemon::ctx::HandlerCtx;
-use crate::daemon::state::EventLoopState;
+use crate::daemon::state::{DirectState, EventLoopState};
 use crate::gossip::event::NodeEvent;
 use crate::lifecycle;
 use crate::lookup::add_peer_addr;
@@ -96,7 +96,14 @@ pub(crate) async fn handle_gossip_event(
                 // formed — leaving permanent ghosts that suppressed
                 // both; see the 2026-06-12 roster-collapse review.)
                 state.linked_endpoints.insert(node_id);
-                state.observe_path(node_id, conn);
+                if state.relay_transport {
+                    state.observe_path(node_id, conn);
+                } else {
+                    // The accept gate and the graft probe both admit a link
+                    // only on a selected non-relay path, so a link up is the
+                    // proof; `conn_path` cannot see which path is selected.
+                    state.direct.insert(node_id, DirectState::Direct);
+                }
                 // First link to a *real* peer: now (and only now) can
                 // user content actually be delivered. Flush anything
                 // buffered while we were unmeshed, in order.

@@ -82,13 +82,16 @@ pub(crate) enum DirectState {
 }
 
 impl DirectState {
-    /// From a `conn_path` reading; `None` when it reported no path at all.
+    /// From a `conn_path` reading; `None` when the reading proves nothing.
+    /// `Mixed` is such a reading: iroh keeps the relay path open beside a
+    /// punched one, and `conn_path` cannot tell which is selected, so a mixed
+    /// link is neither proven direct nor known relay-only.
     pub(crate) fn from_summary(summary: crate::gossip::PathSummary) -> Option<Self> {
         use crate::gossip::PathSummary;
         match summary {
-            PathSummary::Direct | PathSummary::Mixed => Some(Self::Direct),
+            PathSummary::Direct => Some(Self::Direct),
             PathSummary::Relay => Some(Self::RelayOnly),
-            PathSummary::Unknown => None,
+            PathSummary::Mixed | PathSummary::Unknown => None,
         }
     }
 }
@@ -801,16 +804,11 @@ impl EventLoopState {
         ))
     }
 
-    /// Record a `conn_path` reading for `peer`; a reading with no path at all
-    /// clears what was known.
+    /// Record a `conn_path` reading for `peer`; a reading that proves nothing
+    /// leaves what was known — a probe verdict or a gated link — in place.
     pub(crate) fn observe_path(&mut self, peer: EndpointId, summary: crate::gossip::PathSummary) {
-        match DirectState::from_summary(summary) {
-            Some(state) => {
-                self.direct.insert(peer, state);
-            }
-            None => {
-                self.direct.remove(&peer);
-            }
+        if let Some(state) = DirectState::from_summary(summary) {
+            self.direct.insert(peer, state);
         }
     }
 
@@ -1343,20 +1341,40 @@ mod tests {
         use crate::gossip::PathSummary;
         let mut state = fresh_state();
         state.observe_path(endpoint_id(1), PathSummary::Direct);
-        state.observe_path(endpoint_id(2), PathSummary::Mixed);
-        state.observe_path(endpoint_id(3), PathSummary::Relay);
-        state.direct.insert(endpoint_id(4), DirectState::Pending);
+        state.observe_path(endpoint_id(2), PathSummary::Relay);
+        state.direct.insert(endpoint_id(3), DirectState::Pending);
         assert_eq!(
             state.direct_counts(),
             DirectCounts {
-                direct: 2,
+                direct: 1,
                 relay_only: 1,
                 pending: 1
             }
         );
-        // A reading with no path clears the entry rather than inventing one.
+    }
+
+    /// A mixed or empty reading proves nothing about the selected path, so
+    /// it must neither promote an unproven peer nor demote a proven one.
+    #[test]
+    fn a_mixed_or_unknown_reading_never_changes_what_is_known() {
+        use crate::gossip::PathSummary;
+        let mut state = fresh_state();
+        state.observe_path(endpoint_id(1), PathSummary::Mixed);
+        state.observe_path(endpoint_id(2), PathSummary::Unknown);
+        assert!(state.direct.is_empty());
+        state.direct.insert(endpoint_id(3), DirectState::Direct);
+        state.observe_path(endpoint_id(3), PathSummary::Mixed);
         state.observe_path(endpoint_id(3), PathSummary::Unknown);
-        assert_eq!(state.direct.get(&endpoint_id(3)), None);
+        assert_eq!(
+            state.direct.get(&endpoint_id(3)),
+            Some(&DirectState::Direct)
+        );
+        state.direct.insert(endpoint_id(4), DirectState::RelayOnly);
+        state.observe_path(endpoint_id(4), PathSummary::Mixed);
+        assert_eq!(
+            state.direct.get(&endpoint_id(4)),
+            Some(&DirectState::RelayOnly)
+        );
     }
 
     #[test]
@@ -1400,6 +1418,7 @@ mod tests {
         state
             .peer_endpoints
             .insert(nick("dialable"), iroh::EndpointAddr::new(endpoint_id(1)));
+        state.direct.insert(endpoint_id(1), DirectState::Direct);
         // No PeerInfo yet → nothing to dial → unreachable for directed frames.
         state.peers.insert(nick("unknown"));
 

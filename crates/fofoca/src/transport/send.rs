@@ -104,10 +104,11 @@ impl std::fmt::Display for HeldForDirect {
 impl std::error::Error for HeldForDirect {}
 
 /// Whether a directed frame to `eid` is parked right now: the relay is lookup
-/// only and the peer's link, as last observed, has the relay as its only path.
+/// only and no direct path to the peer is proven yet. An unprobed peer is
+/// held too — the alive tick probes every known peer, so the hold is short.
 fn held(eid: EndpointId, state: &EventLoopState) -> bool {
     !state.relay_transport
-        && state.direct.get(&eid) == Some(&crate::daemon::state::DirectState::RelayOnly)
+        && state.direct.get(&eid) != Some(&crate::daemon::state::DirectState::Direct)
 }
 
 /// The lane a directed frame to `nick` would take right now — [`Route`]
@@ -223,6 +224,8 @@ mod tests {
     }
 
     /// A meshed state that knows `bob`'s endpoint — the happy path for unicast.
+    /// Bob is known and has a proven direct path: the state a peer is in
+    /// once linked on a lookup-only mesh, so a directed frame is sendable.
     fn state_knowing_bob() -> (EventLoopState, EndpointId) {
         let mut state = fresh_state();
         state.meshed = true;
@@ -230,6 +233,9 @@ mod tests {
         state
             .peer_endpoints
             .insert(nick("bob"), iroh::EndpointAddr::new(bob));
+        state
+            .direct
+            .insert(bob, crate::daemon::state::DirectState::Direct);
         (state, bob)
     }
 
@@ -339,18 +345,36 @@ mod tests {
         assert_eq!(route(&directed_msg(), &state), Route::Undeliverable);
     }
 
-    /// With the relay lookup only, a directed frame to a peer whose only path
-    /// is the relay is parked, not sent relayed; once the link reads direct
-    /// it takes unicast like any other.
+    /// With the relay lookup only, a directed frame is parked until a direct
+    /// path to the peer is proven — unprobed, pending and relay-only alike;
+    /// once proven it takes unicast like any other.
     #[test]
-    fn directed_frame_is_held_off_a_relay_only_peer_when_the_relay_is_lookup_only() {
+    fn directed_frame_is_held_until_a_direct_path_is_proven_when_the_relay_is_lookup_only() {
         use crate::daemon::state::DirectState;
         let (mut state, bob) = state_knowing_bob();
         state.direct.insert(bob, DirectState::RelayOnly);
         state.relay_transport = true;
         assert_eq!(route(&directed_msg(), &state), Route::Unicast(bob));
         state.relay_transport = false;
-        assert_eq!(route(&directed_msg(), &state), Route::Held(bob));
+        for unproven in [
+            None,
+            Some(DirectState::Pending),
+            Some(DirectState::RelayOnly),
+        ] {
+            match unproven {
+                Some(reading) => {
+                    state.direct.insert(bob, reading);
+                }
+                None => {
+                    state.direct.remove(&bob);
+                }
+            }
+            assert_eq!(
+                route(&directed_msg(), &state),
+                Route::Held(bob),
+                "{unproven:?}"
+            );
+        }
         state.direct.insert(bob, DirectState::Direct);
         assert_eq!(route(&directed_msg(), &state), Route::Unicast(bob));
     }
