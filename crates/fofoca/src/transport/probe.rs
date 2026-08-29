@@ -11,23 +11,13 @@
 //! peer that never proves a direct path stays `RelayOnly`, retried on the
 //! alive tick, and is never grafted through the relay.
 
-use std::time::Duration;
-
-use futures_util::StreamExt as _;
 use iroh::EndpointId;
-use iroh::endpoint::Connection;
 
-use super::path::selected_is_direct;
+use super::path::{PROBE_DEADLINE, wait_direct};
 use super::webrtc::needs_webrtc_lane;
 use crate::daemon::ctx::HandlerCtx;
 use crate::daemon::state::{DirectState, EventLoopState};
 use crate::util::clock::Instant;
-
-/// How long a probe waits for iroh to select a non-relay path. Hole punching
-/// starts as soon as the connection has both sides' candidates, and a first
-/// round lands within seconds; a punch that has not landed by now is
-/// retried on the alive tick rather than waited on.
-pub(crate) const PROBE_DEADLINE: Duration = Duration::from_secs(15);
 
 /// A probe's verdict, reported back to the event loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,26 +82,6 @@ pub(crate) fn ensure_direct(
         let _ = tx.send(DirectOutcome { peer, direct });
     });
     false
-}
-
-/// Wait until `conn`'s selected path is not the relay, or `deadline` passes.
-/// Every path event is a reason to re-read the path list: the event's own
-/// address may be stale by the time it is handled.
-async fn wait_direct(conn: &Connection, deadline: Duration) -> bool {
-    let mut events = conn.path_events();
-    let proven = async {
-        loop {
-            if selected_is_direct(conn) {
-                return true;
-            }
-            if events.next().await.is_none() {
-                return false;
-            }
-        }
-    };
-    n0_future::time::timeout(deadline, proven)
-        .await
-        .unwrap_or(false)
 }
 
 /// Apply a probe's verdict: a proven peer is grafted, an unproven one is

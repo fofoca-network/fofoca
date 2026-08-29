@@ -513,7 +513,10 @@ pub fn add_peer_addr(endpoint: &Endpoint, addr: EndpointAddr) -> Result<()> {
     Ok(())
 }
 
-/// Bounded `GOSSIP_ALPN` connect-probe. Dialing forces iroh to
+/// Bounded `GOSSIP_ALPN` connect-probe. On a mesh whose relay is lookup
+/// only the far side's accept gate holds and finally closes this connection;
+/// the probe wants only the resolution side effect, so that is harmless.
+/// Dialing forces iroh to
 /// (re)resolve and (re)path `target` via the configured
 /// address-lookups; the connection is only ever wanted for that side
 /// effect. `true` iff a connection was established within `timeout`
@@ -579,6 +582,9 @@ pub(crate) fn build_mesh(
         crate::transport::IceProfile,
     )>,
     protocols: Vec<(Vec<u8>, Box<dyn iroh::protocol::DynProtocolHandler>)>,
+    // The mesh's `transport.relay`: with it off, every inbound gossip
+    // connection is held until iroh selects a direct path on it.
+    relay_transport: bool,
 ) -> (Gossip, Router) {
     // `active_view_capacity` is the live direct-neighbor cap (`--max-peers`),
     // raised above iroh-gossip's default (5) so meshes up to it form a full mesh
@@ -594,7 +600,10 @@ pub(crate) fn build_mesh(
         .membership_config(membership)
         .spawn(endpoint.clone());
     let local = endpoint.id();
-    let mut builder = Router::builder(endpoint).accept(GOSSIP_ALPN, gossip.clone());
+    let mut builder = Router::builder(endpoint).accept(
+        GOSSIP_ALPN,
+        crate::transport::DirectOnlyGossip::new(gossip.clone(), relay_transport),
+    );
     // A peer also accepts inbound unicast; the rendezvous/beacon endpoint
     // passes `None` (it is not a peer and carries no unicast traffic).
     if let Some(acceptor) = unicast {

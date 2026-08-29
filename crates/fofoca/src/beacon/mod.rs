@@ -68,6 +68,10 @@ pub(crate) struct RendezvousParams {
     /// address-lookups (or a joiner using only mDNS/DHT could never
     /// resolve it) — see `beacon_lookups`.
     pub(crate) lookups: LookupOpts,
+    /// The mesh's `transport.relay`. With it off, the beacon holds every
+    /// inbound gossip connection — a joiner's first link — until iroh selects
+    /// a direct path on it, so no frame ever crosses the relay.
+    pub(crate) relay_transport: bool,
     /// The single relay **rung** the beacon homes on — initialized to
     /// the first ladder rung (optimistic, unprobed) at setup and
     /// corrected off the event loop: a backgrounded startup probe and
@@ -656,6 +660,7 @@ async fn claim(
         // The rendezvous serves no caller protocol either — it is a meeting
         // point, not somewhere an application is reachable.
         Vec::new(),
+        params.relay_transport,
     );
 
     // Register the peer's address so the rendezvous can dial it
@@ -806,6 +811,7 @@ mod tests {
             bind_ports: Vec::new(),
             id,
             lookups: LookupOpts::loopback(),
+            relay_transport: false,
             bootstrap_relay: None,
             rung_tx: watch::channel(None).0,
         }

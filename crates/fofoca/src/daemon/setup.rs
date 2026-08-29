@@ -90,6 +90,7 @@ fn rendezvous_params(
         bind_ports,
         id: mesh.rendezvous_id(),
         lookups: lookups.clone(),
+        relay_transport: mesh.config.transport.relay,
         bootstrap_relay,
         rung_tx,
     }
@@ -178,12 +179,17 @@ pub(crate) fn register_rendezvous(endpoint: &Endpoint, params: &RendezvousParams
 /// received `UNICAST_ALPN` frames to the returned receiver, which the event
 /// loop drains into `gossip::ingest`. Bounded so a flooding peer can't
 /// back-pressure the loop (a dropped frame heals via anti-entropy).
-fn unicast_inbox() -> (
+fn unicast_inbox(
+    relay_transport: bool,
+) -> (
     mpsc::Receiver<bytes::Bytes>,
     crate::transport::UnicastAcceptor,
 ) {
     let (tx, rx) = mpsc::channel::<bytes::Bytes>(crate::util::consts::UNICAST_INBOX_CAP);
-    (rx, crate::transport::UnicastAcceptor::new(tx))
+    (
+        rx,
+        crate::transport::UnicastAcceptor::new(tx, relay_transport),
+    )
 }
 
 /// Build this member's peer endpoint, registering the multi-hop transport
@@ -363,6 +369,8 @@ struct SetupBuild<'a> {
     /// `Mutex` is bought purely for the `Sync` it carries.
     protocols: std::sync::Mutex<CallerProtocols>,
     rung_tx: &'a watch::Sender<Option<RelayUrl>>,
+    /// The mesh's `transport.relay`, for the accept gates.
+    relay_transport: bool,
 }
 
 impl SetupBuild<'_> {
@@ -462,7 +470,7 @@ pub async fn setup_mesh(kind: SetupKind, params: SetupParams) -> Result<EventLoo
     let ladder = relay_ladder(&lookups.relay);
     let (rung_tx, rung_rx) = watch::channel(ladder.first().cloned());
 
-    let (unicast_rx, unicast_acceptor) = unicast_inbox();
+    let (unicast_rx, unicast_acceptor) = unicast_inbox(relay_transport);
 
     // This member's per-author signing identity. Hoisted above the match so it is
     // available to both attach paths.
@@ -479,6 +487,7 @@ pub async fn setup_mesh(kind: SetupKind, params: SetupParams) -> Result<EventLoo
         injected,
         protocols: std::sync::Mutex::new(protocols),
         rung_tx: &rung_tx,
+        relay_transport,
     };
     let Assembled {
         mesh_id,
@@ -598,6 +607,7 @@ fn build_overlay(
         Some(build.unicast_acceptor.clone()),
         Some((webrtc.clone(), admission.clone(), ice)),
         build.take_protocols(),
+        build.relay_transport,
     );
     (gossip, router, admission, ice)
 }

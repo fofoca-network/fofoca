@@ -20,6 +20,7 @@
 
 mod accept;
 mod admission;
+mod direct_gossip;
 #[cfg(feature = "host")]
 pub(crate) mod ipc;
 mod path;
@@ -45,6 +46,7 @@ pub(crate) mod sender;
 
 pub(crate) use accept::UnicastAcceptor;
 pub(crate) use admission::SignalAdmission;
+pub(crate) use direct_gossip::DirectOnlyGossip;
 #[cfg(feature = "blob")]
 pub(crate) use path::refuse_relayed;
 pub(crate) use path::{RELAY_REFUSED, payload_allowed_on};
