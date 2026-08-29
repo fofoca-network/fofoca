@@ -564,6 +564,7 @@ pub async fn setup_mesh(kind: SetupKind, params: SetupParams) -> Result<EventLoo
         #[cfg(feature = "host")]
         multihop: multihop_handle,
         webrtc,
+        webrtc_enabled: transports.webrtc,
         webrtc_admission,
         webrtc_ice,
         unicast_rx,
@@ -605,7 +606,10 @@ fn build_overlay(
         endpoint.clone(),
         build.max_peers,
         Some(build.unicast_acceptor.clone()),
-        Some((webrtc.clone(), admission.clone(), ice)),
+        build
+            .transports
+            .webrtc
+            .then(|| (webrtc.clone(), admission.clone(), ice)),
         build.take_protocols(),
         build.relay_transport,
     );

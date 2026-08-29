@@ -28,6 +28,31 @@ use iroh_gossip::proto::HyparviewConfig;
 use crate::protocol::mesh::{LookupOpts, RelayChoice};
 use crate::util::clock::millis_saturating;
 
+/// Whether every endpoint built from now on trusts any relay certificate.
+#[cfg(feature = "iroh-test-utils")]
+static TRUST_ANY_RELAY_CERT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Make every endpoint built from now on — a peer's and the beacon's alike —
+/// accept any TLS certificate a relay presents. For a test against
+/// `iroh::test_utils::run_relay_server`, whose certificate is self-signed;
+/// process-wide because the engine builds its endpoints itself.
+#[cfg(feature = "iroh-test-utils")]
+pub fn trust_any_relay_cert() {
+    TRUST_ANY_RELAY_CERT.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Apply [`trust_any_relay_cert`] to an endpoint builder. Every builder in
+/// this module goes through here — the rung probe binds its own endpoint,
+/// and a probe that distrusts the test relay would read it as down.
+pub(crate) fn relay_trust(builder: iroh::endpoint::Builder) -> iroh::endpoint::Builder {
+    #[cfg(feature = "iroh-test-utils")]
+    if TRUST_ANY_RELAY_CERT.load(std::sync::atomic::Ordering::Relaxed) {
+        return builder.ca_tls_config(iroh_relay::tls::CaTlsConfig::insecure_skip_verify());
+    }
+    builder
+}
+
 #[cfg(feature = "host")]
 pub use capability::{NetworkCapability, probe as capability_probe};
 pub(crate) use relay::RungRefresh;
@@ -107,7 +132,9 @@ pub struct TransportOpts {
     /// rendezvous: it carries the bootstrap dial and the JSEP exchange. Clearing
     /// it would sever the very thing that lets a `WebRTC` session be negotiated.
     pub relay: bool,
-    /// QUIC over a `WebRTC` data channel.
+    /// QUIC over a `WebRTC` data channel. Off, the transport is not registered
+    /// on the endpoint, no offer is answered and none is made — so a pair
+    /// with IP cleared too has the relay as its only path.
     pub webrtc: bool,
     /// Source-routed multi-hop. Host-only.
     pub multihop: bool,
@@ -247,7 +274,9 @@ pub async fn build_endpoint(
     // rather than replacing them. Two native peers are better served by iroh's
     // own hole-punching; this is the browser's only path, and a fallback for
     // NATs that defeat hole-punching but not ICE.
-    if let Some(handle) = transports.webrtc {
+    if let Some(handle) = transports.webrtc
+        && transports.opts.webrtc
+    {
         builder = builder.add_custom_transport(handle.transport());
         // MUST come after `builder.preset(handle)` for multihop above: there is
         // a single `path_selector` slot and the last call wins. Safe only
@@ -291,6 +320,8 @@ pub async fn build_endpoint(
     // fought that tuning — marginal / distant links falsely idle-timed-out,
     // HyParView refilled from passive, and the resulting NeighborDown/Up churn
     // drove a per-connection memory leak. So we set nothing here.
+
+    let builder = relay_trust(builder);
 
     // For the private rendezvous endpoint this returns `AddrInUse`
     // when another member already holds the deterministic port — the

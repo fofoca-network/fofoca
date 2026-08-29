@@ -92,6 +92,7 @@ pub async fn run<A: NodeDriver>(
         #[cfg(feature = "host")]
         multihop,
         webrtc,
+        webrtc_enabled,
         webrtc_admission,
         webrtc_ice,
         unicast_rx,
@@ -173,7 +174,9 @@ pub async fn run<A: NodeDriver>(
     {
         state.multihop = multihop; // `--multihop`: the registered transport's handle
     }
-    state.webrtc = Some(webrtc); // the direct-path transport the session manager fills
+    // The direct-path transport the session manager fills; `None` leaves
+    // every pair to iroh's own paths.
+    state.webrtc = webrtc_enabled.then_some(webrtc);
     state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), relay_transport);
     // Before the first write, so the initial advertisement carries a real count.
     state.live_count = live_count;
