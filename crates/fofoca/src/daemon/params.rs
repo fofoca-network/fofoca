@@ -232,11 +232,13 @@ pub fn derive_topic_mesh_with(string: &str, lookups: LookupOpts) -> Result<Mesh>
 /// dropped.
 ///
 /// # Errors
-/// The string is empty or whitespace.
+/// The string is empty or whitespace, or `config` fails
+/// [`MeshConfig::validate`].
 pub fn derive_topic_mesh_config(string: &str, config: MeshConfig) -> Result<Mesh> {
     if string.trim().is_empty() {
         anyhow::bail!("topic string must not be empty");
     }
+    config.validate()?;
     Ok(Mesh::from_topic(
         string,
         MeshConfig {
@@ -323,5 +325,18 @@ mod topic_derivation_tests {
     fn both_forms_reject_an_empty_string() {
         assert!(derive_topic_mesh("   ").is_err());
         assert!(derive_topic_mesh_with("   ", LookupOpts::loopback()).is_err());
+    }
+
+    /// A minted config gets the same cross-field check a decoded id gets;
+    /// otherwise the creator would run a mesh whose id every joiner rejects.
+    #[test]
+    fn a_relay_transport_without_a_relay_lookup_is_rejected_on_mint() {
+        let config = MeshConfig {
+            lookups: LookupOpts::loopback(),
+            password: None,
+            issuer_pubkey: None,
+            transport: TransportPolicy { relay: true },
+        };
+        assert!(derive_topic_mesh_config("standup", config).is_err());
     }
 }

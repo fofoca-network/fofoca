@@ -448,6 +448,9 @@ pub async fn setup_mesh(kind: SetupKind, params: SetupParams) -> Result<EventLoo
         SetupKind::Create { config, .. } => config,
         SetupKind::Join { mesh, .. } | SetupKind::Topic { mesh, .. } => &mesh.config,
     };
+    // Decode already validated a joined id; a minted config has had no check
+    // yet, and an invalid one would produce an id every joiner rejects.
+    mesh_config.validate()?;
     let lookups = mesh_config.lookups.clone();
     let relay_transport = mesh_config.transport.relay;
 

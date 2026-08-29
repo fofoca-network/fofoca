@@ -272,7 +272,8 @@ impl MeshConfig {
     }
 
     /// The one cross-field rule: letting the relay carry payload needs a
-    /// relay to exist as a lookup. Checked on decode and by minting callers.
+    /// relay to exist as a lookup. Checked on decode and at `setup_mesh`,
+    /// the choke point every minted config passes before any network.
     ///
     /// # Errors
     /// `transport.relay` is `true` while `lookups.relay` is `Disabled`.
