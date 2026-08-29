@@ -121,7 +121,8 @@ pub(crate) async fn graft_proven(
 
 /// The alive-tick retry: every known peer that is neither linked nor mid-probe
 /// gets another `ensure_direct`, subject to the relink cooldown. A no-op while
-/// the relay may carry payload.
+/// the relay may carry payload. The rendezvous is skipped: it accepts no
+/// unicast, so it cannot be probed; its link is gated on the beacon's side.
 pub(crate) async fn retry_direct(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
     if state.relay_transport {
         return;
