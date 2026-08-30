@@ -149,8 +149,10 @@ tag plus a GitHub Release, and a consumer pins it:
 fofoca = { git = "https://github.com/fofoca-network/fofoca", tag = "v0.6.0" }
 ```
 
-A tag pin still needs the three iroh `[patch.crates-io]` lines — see the pin
-table in [FORKED.md](FORKED.md).
+The pin is self-contained: this workspace carries no `[patch.crates-io]`
+(every fork is a direct git dependency with an exact version), so a consumer
+restates nothing. Proven by a scratch crate that pins the tag and
+`cargo check`s clean.
 
 To cut a release:
 
