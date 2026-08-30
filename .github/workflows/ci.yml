@@ -89,6 +89,10 @@ jobs:
       - name: Check (wasm32)
         run: |
           cargo check --target wasm32-unknown-unknown -p fofoca-blobs --all-targets
+          # `wasm-simd` only changes blake3's codegen (it assumes +simd128 at
+          # runtime, not at compile time), so checking with it on costs nothing
+          # and keeps the feature from rotting.
+          cargo check --target wasm32-unknown-unknown -p fofoca-chunks --all-targets --features wasm-simd
           cargo check --target wasm32-unknown-unknown -p fofoca-iroh-webrtc-transport --features web
           # The engine itself must reach the browser, not merely be avoidable
           # from it. `--no-default-features` is the portable half: no `host`,
@@ -116,6 +120,7 @@ jobs:
       - name: Clippy (wasm32)
         run: |
           cargo clippy --target wasm32-unknown-unknown -p fofoca-blobs --all-targets -- -D warnings
+          cargo clippy --target wasm32-unknown-unknown -p fofoca-chunks --all-targets --features wasm-simd -- -D warnings
           cargo clippy --target wasm32-unknown-unknown -p fofoca-iroh-webrtc-transport --features web -- -D warnings
           cargo clippy --target wasm32-unknown-unknown -p fofoca --no-default-features -- -D warnings
           cargo clippy --target wasm32-unknown-unknown -p fofoca-netplay --no-default-features -- -D warnings

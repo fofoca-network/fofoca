@@ -62,6 +62,11 @@ serde = { version = "1", features = ["derive"] }
 # `--output json` stream.
 serde_json = { version = "1", features = ["raw_value"] }
 anyhow = "1"
+# Named by `fofoca-chunks` and `fofoca-blobs`. The floor is the OFF position:
+# `default-features = false` keeps the wasm build honest, and `std` comes back
+# for `std::io` and threading on the host. A crate that needs more (SIMD) opts
+# in through its own feature, never by widening this entry.
+blake3 = { version = "1.8", default-features = false, features = ["std"] }
 bytes = "1"
 # Cargo-style colored status output for the operator-facing commands (`plug`,
 # `unplug`, `doctor`). `anstream` resolves color support per stream at write

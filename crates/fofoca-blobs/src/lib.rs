@@ -1,5 +1,9 @@
 //! Verified byte ranges over data you already own.
 //!
+//! Sibling note: `fofoca-chunks` is the content-addressed counterpart (chunks
+//! prove themselves; these outboards prove placement) and is meant to replace
+//! this crate eventually; until then they coexist.
+//!
 //! A store of BLAKE3/bao verification metadata — outboards, root bindings, and
 //! which ranges are held — for bytes that live somewhere this crate does not
 //! control. That inversion is the whole design:

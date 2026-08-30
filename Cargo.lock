@@ -1525,6 +1525,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "fofoca-chunks"
+version = "0.5.0"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "js-sys",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "wasm-bindgen-test",
+ "web-sys",
+]
+
+[[package]]
 name = "fofoca-doc"
 version = "0.5.0"
 dependencies = [

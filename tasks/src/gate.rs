@@ -132,7 +132,7 @@ pub(crate) const STEPS: &[Step] = &[
         scope: Scope::Crate("fofoca-iroh-webrtc-transport"),
         args: &["--features", "native", "--all-targets"],
     },
-    // Five crates are reachable on wasm32 and between them that is a
+    // Six crates are reachable on wasm32 and between them that is a
     // substantial amount of code nothing else compiles: roughly a third of
     // `fofoca-blobs` (`src/opfs.rs`, `src/idb.rs`, `tests/opfs_browser.rs`), the
     // whole `web` backend of the WebRTC transport, the portable half of the
@@ -143,6 +143,13 @@ pub(crate) const STEPS: &[Step] = &[
         kind: Kind::WasmCheck,
         scope: Scope::Crate("fofoca-blobs"),
         args: &["--all-targets"],
+    },
+    // `wasm-simd` only changes blake3's codegen, so checking with it on costs
+    // nothing and keeps the feature from rotting.
+    Step {
+        kind: Kind::WasmCheck,
+        scope: Scope::Crate("fofoca-chunks"),
+        args: &["--all-targets", "--features", "wasm-simd"],
     },
     Step {
         kind: Kind::WasmCheck,
@@ -191,6 +198,11 @@ pub(crate) const STEPS: &[Step] = &[
         kind: Kind::WasmClippy,
         scope: Scope::Crate("fofoca-blobs"),
         args: &["--all-targets"],
+    },
+    Step {
+        kind: Kind::WasmClippy,
+        scope: Scope::Crate("fofoca-chunks"),
+        args: &["--all-targets", "--features", "wasm-simd"],
     },
     Step {
         kind: Kind::WasmClippy,

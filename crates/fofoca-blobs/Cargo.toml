@@ -37,7 +37,7 @@ path = "src/lib.rs"
 # Measured wasm-clean: the resulting cdylib has zero imports, and the wasm
 # dependency set carries neither `iroh-io` nor `tokio`.
 bao-tree = { version = "0.16", default-features = false, features = ["validate"] }
-blake3 = { version = "1.8.5", default-features = false, features = ["std"] }
+blake3.workspace = true
 # `bao_tree::ChunkRanges` *is* a `range_collections::RangeSet2`, but the crate is
 # not re-exported, so iterating one needs the dependency named directly. Already
 # in the graph via bao-tree, and wasm-clean.

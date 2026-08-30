@@ -30,6 +30,7 @@ fofoca-util          host helpers, no deps of consequence   (13 crates resolved)
               └── fofoca-iroh-multihop-transport  QUIC relayed through peers
 
 fofoca-blobs                      verified byte ranges, + bao-tree, blake3
+fofoca-chunks                     content-addressed chunk store, + blake3
 ```
 
 `fofoca-blobs` is standalone: nothing here depends on it. The two transports
@@ -47,6 +48,12 @@ through `fofoca::iroh` so the graph can never hold two copies.
 metadata — outboards, root bindings, which ranges are held — for bytes that live
 wherever the caller already keeps them, so a peer can serve verified ranges of a
 file it did not have to copy first.
+
+[`fofoca-chunks`](crates/fofoca-chunks) is the content-addressed counterpart
+to `fofoca-blobs`: fixed 64 KiB chunks addressed by BLAKE3 of their own bytes,
+so a chunk proves itself and dedups across files, where a bao outboard proves
+placement inside one file. It is meant to replace `fofoca-blobs`; until that
+retirement they coexist, and like it, it never copies the caller's bytes.
 
 [`fofoca-netplay`](crates/fofoca-netplay) is GGPO-style rollback netcode for
 peer-to-peer games on a mesh: peers agree a roster in a lobby, then each
