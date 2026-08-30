@@ -112,6 +112,8 @@ jobs:
           # this is the only place the breakage is caught from inside the
           # workspace.
           cargo check --target wasm32-unknown-unknown -p fofoca-pipe
+          # The browser peer itself (packages/fofoca-wasm's Rust half).
+          cargo check --target wasm32-unknown-unknown -p fofoca-wasm
 
       - name: Clippy (wasm32)
         run: |
@@ -120,6 +122,7 @@ jobs:
           cargo clippy --target wasm32-unknown-unknown -p fofoca --no-default-features -- -D warnings
           cargo clippy --target wasm32-unknown-unknown -p fofoca-netplay --no-default-features -- -D warnings
           cargo clippy --target wasm32-unknown-unknown -p fofoca-pipe -- -D warnings
+          cargo clippy --target wasm32-unknown-unknown -p fofoca-wasm -- -D warnings
 
       - name: Test
         run: cargo test --workspace

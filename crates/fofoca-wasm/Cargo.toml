@@ -1,0 +1,45 @@
+# The browser build of the byte-pipe embedding: `fofoca-pipe` behind a
+# wasm-bindgen class. The counterpart of `fofoca-ffi` — one wire contract,
+# two builds — and the crate behind `packages/fofoca-wasm`.
+#
+# A workspace member, unlike the light-cycles example's wasm crate: nothing
+# native in this workspace shares a feature graph with a `-p fofoca-wasm
+# --target wasm32-unknown-unknown` build (target-scoped deps do not unify
+# across targets under resolver 3), and membership is what keeps it inside
+# the lint pass and the shared lockfile.
+[package]
+name = "fofoca-wasm"
+description = "fofoca mesh peer for the browser: the fofoca-pipe embedding behind a wasm-bindgen class"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+publish = false
+
+[lib]
+# `cdylib` for wasm-bindgen; `rlib` so `cargo check` / native `cargo clippy`
+# on this crate work without going through wasm-bindgen at all.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+anyhow.workspace = true
+# `--no-default-features`: the portable half only — no `host`, no IPC
+# listener, no state file, nothing a browser has no equivalent of.
+fofoca = { path = "../fofoca", default-features = false }
+fofoca-pipe = { path = "../fofoca-pipe" }
+serde_json.workspace = true
+# Deliberately not the workspace entry: that one turns on `net`, which drags
+# `mio`, which refuses to build for wasm32. `sync` alone is the plain
+# channel/mutex data structures — no runtime, no `tokio::spawn`.
+tokio = { version = "1", default-features = false, features = ["sync"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+wasm-bindgen.workspace = true
+wasm-bindgen-futures.workspace = true
+# Turns a Rust panic into a readable JS stack trace instead of the
+# `unreachable executed` the runtime would otherwise report.
+console_error_panic_hook = "0.1"
+web-sys = { workspace = true, features = ["console"] }
+
+[lints]
+workspace = true
