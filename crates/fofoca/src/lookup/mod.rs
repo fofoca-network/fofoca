@@ -28,29 +28,39 @@ use iroh_gossip::proto::HyparviewConfig;
 use crate::protocol::mesh::{LookupOpts, RelayChoice};
 use crate::util::clock::millis_saturating;
 
-/// Whether every endpoint built from now on trusts any relay certificate.
-#[cfg(feature = "iroh-test-utils")]
-static TRUST_ANY_RELAY_CERT: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+/// A local relay server every side of a test can reach: plain HTTP, so the
+/// engine dials `ws://` with no TLS — and so can a **browser**, which owns
+/// its own trust store and refuses a self-signed certificate with no
+/// override (`iroh::test_utils::run_relay_server` is https-only). No QUIC
+/// address discovery: a tab has no UDP, and the tests that use this force
+/// the relay to be the only path anyway.
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+pub mod test_relay {
+    use anyhow::Context as _;
 
-/// Make every endpoint built from now on — a peer's and the beacon's alike —
-/// accept any TLS certificate a relay presents. For a test against
-/// `iroh::test_utils::run_relay_server`, whose certificate is self-signed;
-/// process-wide because the engine builds its endpoints itself.
-#[cfg(feature = "iroh-test-utils")]
-pub fn trust_any_relay_cert() {
-    TRUST_ANY_RELAY_CERT.store(true, std::sync::atomic::Ordering::Relaxed);
-}
-
-/// Apply [`trust_any_relay_cert`] to an endpoint builder. Every builder in
-/// this module goes through here — the rung probe binds its own endpoint,
-/// and a probe that distrusts the test relay would read it as down.
-pub(crate) fn relay_trust(builder: iroh::endpoint::Builder) -> iroh::endpoint::Builder {
-    #[cfg(feature = "iroh-test-utils")]
-    if TRUST_ANY_RELAY_CERT.load(std::sync::atomic::Ordering::Relaxed) {
-        return builder.ca_tls_config(iroh_relay::tls::CaTlsConfig::insecure_skip_verify());
+    /// Spawn the relay; the URL is `http://127.0.0.1:<port>/`. Dropping the
+    /// server stops it.
+    ///
+    /// # Errors
+    /// Binding or spawning the relay server fails.
+    pub async fn spawn_plain() -> anyhow::Result<(iroh::RelayUrl, iroh_relay::server::Server)> {
+        let mut config = iroh_relay::server::ServerConfig::default();
+        config.relay = Some(iroh_relay::server::RelayConfig::new((
+            std::net::Ipv4Addr::LOCALHOST,
+            0,
+        )));
+        config.quic = None;
+        let server = iroh_relay::server::Server::spawn(config)
+            .await
+            .context("spawning the local relay server")?;
+        let addr = server
+            .http_addr()
+            .context("the local relay server bound no HTTP address")?;
+        let url = format!("http://{addr}/")
+            .parse()
+            .context("the local relay address is not a relay URL")?;
+        Ok((url, server))
     }
-    builder
 }
 
 #[cfg(feature = "host")]
@@ -320,8 +330,6 @@ pub async fn build_endpoint(
     // fought that tuning — marginal / distant links falsely idle-timed-out,
     // HyParView refilled from passive, and the resulting NeighborDown/Up churn
     // drove a per-connection memory leak. So we set nothing here.
-
-    let builder = relay_trust(builder);
 
     // For the private rendezvous endpoint this returns `AddrInUse`
     // when another member already holds the deterministic port — the

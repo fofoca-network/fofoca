@@ -45,11 +45,10 @@ dhat-heap = []
 # any shipped build.
 #
 # Also pulls `iroh-relay` (same rev as `iroh`, host only) for
-# `CaTlsConfig::insecure_skip_verify`, which `net::trust_any_relay_cert` needs:
-# the local test relay serves a self-signed certificate, and the engine builds
-# its own endpoints — the beacon's included — so the trust switch has to live
-# in `build_endpoint`.
-iroh-test-utils = ["iroh/test-utils", "dep:iroh-relay", "iroh-relay/test-utils"]
+# `net::test_relay::spawn_plain` — a plain-HTTP local relay that a browser can
+# reach too (a tab's WebSocket refuses a self-signed https cert with no
+# override, so the https `run_relay_server` is native-only).
+iroh-test-utils = ["iroh/test-utils", "dep:iroh-relay", "iroh-relay/server"]
 # Off by default. The blob-offload side-channel: a `habilis-mesh/blob/1` ALPN
 # server, a ticket, and fetch/offload, for handing a peer a payload too large to
 # ride a gossip frame. `agent-gossip` enables it for A2A payload offload; the

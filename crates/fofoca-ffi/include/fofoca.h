@@ -57,6 +57,9 @@ typedef struct {
   int relay;        /* relay as lookup: reachable via the default relay ladder */
   int relay_transport; /* relay as transport: payload may fall back to it.
                           0 keeps all data peer to peer; needs `relay` */
+  const char *relay_urls; /* comma-separated custom relay ladder; NULL = default */
+  int disable_ip;         /* nonzero: no direct UDP / hole-punched paths */
+  int disable_webrtc;     /* nonzero: no WebRTC lane */
   size_t max_peers;
 } fofoca_opts;
 

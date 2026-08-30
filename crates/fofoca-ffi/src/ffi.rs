@@ -47,6 +47,12 @@ pub struct FofocaOpts {
     pub relay: c_int,
     /// The relay as a transport; off keeps all data peer to peer.
     pub relay_transport: c_int,
+    /// Comma-separated custom relay ladder; NULL ⇒ the default ladder.
+    pub relay_urls: *const c_char,
+    /// Nonzero disables direct UDP / hole-punched paths.
+    pub disable_ip: c_int,
+    /// Nonzero disables the `WebRTC` lane.
+    pub disable_webrtc: c_int,
     pub max_peers: usize,
 }
 
@@ -236,6 +242,13 @@ pub unsafe extern "C" fn fofoca_open(opts: *const FofocaOpts) -> *mut FofocaPipe
         let (Ok(mesh), Ok(topic), Ok(nick), Ok(name)) = strings else {
             return std::ptr::null_mut();
         };
+        // SAFETY: NUL-terminated or NULL, per the header contract.
+        let Ok(relay_urls) = (unsafe { optional_str(opts.relay_urls) }) else {
+            return std::ptr::null_mut();
+        };
+        let relay_urls: Vec<String> = relay_urls
+            .map(|urls| urls.split(',').map(|url| url.trim().to_owned()).collect())
+            .unwrap_or_default();
         let parsed = Opts {
             mesh: mesh.map(str::to_owned),
             topic: topic.map(str::to_owned),
@@ -246,6 +259,11 @@ pub unsafe extern "C" fn fofoca_open(opts: *const FofocaOpts) -> *mut FofocaPipe
             dht: opts.dht != 0,
             relay: opts.relay != 0,
             relay_transport: opts.relay_transport != 0,
+            relay_urls,
+            transports: fofoca_pipe::TransportFlags {
+                ip: opts.disable_ip == 0,
+                webrtc: opts.disable_webrtc == 0,
+            },
             max_peers: opts.max_peers,
         };
         match Pipe::open(&parsed) {

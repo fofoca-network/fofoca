@@ -44,6 +44,16 @@ export interface CreateOpts {
    * `relay` (or `public`). Baked into the mesh id, so joiners inherit it.
    */
   relayTransport?: boolean
+  /**
+   * A custom relay ladder (ordered URLs, first preferred), replacing the
+   * default. Implies the relay lookup, and is part of the mesh id.
+   */
+  relayUrls?: string[]
+  /**
+   * This node's transport switches. Per node, not part of the id; everything
+   * the target has is on by default.
+   */
+  transports?: { ip?: boolean; webrtc?: boolean }
   maxPeers?: number
 }
 

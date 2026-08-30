@@ -32,6 +32,9 @@ fn create_opts(nick: &CStr) -> FofocaOpts {
         dht: 0,
         relay: 0,
         relay_transport: 0,
+        relay_urls: std::ptr::null(),
+        disable_ip: 0,
+        disable_webrtc: 0,
         max_peers: 0,
     }
 }
@@ -321,6 +324,9 @@ fn create_opts_for_join(id: &CStr, nick: &CStr) -> FofocaOpts {
         dht: 0,
         relay: 0,
         relay_transport: 0,
+        relay_urls: std::ptr::null(),
+        disable_ip: 0,
+        disable_webrtc: 0,
         max_peers: 0,
     }
 }

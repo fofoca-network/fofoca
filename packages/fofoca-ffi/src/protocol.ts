@@ -17,6 +17,9 @@ export interface WireOpts {
   readonly dht: boolean
   readonly relay: boolean
   readonly relayTransport: boolean
+  readonly relayUrls: string | null
+  readonly disableIp: boolean
+  readonly disableWebrtc: boolean
   readonly maxPeers: number
 }
 

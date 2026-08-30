@@ -189,9 +189,8 @@ async fn relay_only_pair_links_only_when_the_relay_may_carry_payload() {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_test_writer()
         .try_init();
-    // The local relay's certificate is self-signed.
-    fofoca::net::trust_any_relay_cert();
-    let (_map, relay, _server) = iroh::test_utils::run_relay_server()
+    // Plain HTTP, the same relay flavour the browser matrix uses.
+    let (relay, _server) = fofoca::net::test_relay::spawn_plain()
         .await
         .expect("local relay server");
 
