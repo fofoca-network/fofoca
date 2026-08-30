@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 description = "The portable byte-pipe embedding — the pipe_data/pipe_eof wire contract, its engine driver, and the join ritual every pipe peer shares"
+readme = "README.md"
 publish = false
 
 # No features, deliberately. The discovery legs (`mdns` / `dht`) gate *engine*

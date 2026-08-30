@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 description = "A C-ABI shim over the fofoca engine — lets a non-Rust process join a gossip mesh in-process"
+readme = "README.md"
 publish = false
 
 [features]

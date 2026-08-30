@@ -6,6 +6,7 @@ rust-version.workspace = true
 authors = ["Caio Gondim <me@caiogondim.com>"]
 description = "host-level helpers for fofoca: runtime dirs, clock, tuning dials, bounded containers, build stamp"
 license = "MIT"
+readme = "README.md"
 publish = false
 
 [features]
