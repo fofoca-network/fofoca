@@ -1,7 +1,7 @@
 //! `-p <crate>` — narrow a task to part of the workspace.
 //!
 //! One flag, shared by every task that has more than one crate to run against,
-//! so `cargo task lint -p fofoca-blobs` and `cargo task ci -p fofoca-blobs`
+//! so `cargo task lint -p fofoca-chunks` and `cargo task ci -p fofoca-chunks`
 //! mean the same thing by construction.
 
 use clap::Args;

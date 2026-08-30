@@ -132,18 +132,13 @@ pub(crate) const STEPS: &[Step] = &[
         scope: Scope::Crate("fofoca-iroh-webrtc-transport"),
         args: &["--features", "native", "--all-targets"],
     },
-    // Six crates are reachable on wasm32 and between them that is a
-    // substantial amount of code nothing else compiles: roughly a third of
-    // `fofoca-blobs` (`src/opfs.rs`, `src/idb.rs`, `tests/opfs_browser.rs`), the
-    // whole `web` backend of the WebRTC transport, the portable half of the
-    // engine, `fofoca-netplay`'s simulation, and `fofoca-pipe`'s wire contract.
+    // Five crates are reachable on wasm32 and between them that is a
+    // substantial amount of code nothing else compiles: `fofoca-chunks`'s
+    // IndexedDB backend, the whole `web` backend of the WebRTC transport, the
+    // portable half of the engine, `fofoca-netplay`'s simulation, and
+    // `fofoca-pipe`'s wire contract.
     // Without these rows that code rots silently, and the `#[expect(...)]`
     // attributes inside it are never lint-checked either.
-    Step {
-        kind: Kind::WasmCheck,
-        scope: Scope::Crate("fofoca-blobs"),
-        args: &["--all-targets"],
-    },
     // `wasm-simd` only changes blake3's codegen, so checking with it on costs
     // nothing and keeps the feature from rotting.
     Step {
@@ -194,11 +189,6 @@ pub(crate) const STEPS: &[Step] = &[
     },
     // Clippy, not just check. The `web` backend had never been linted before
     // these rows existed and carried 18 findings on its first pass.
-    Step {
-        kind: Kind::WasmClippy,
-        scope: Scope::Crate("fofoca-blobs"),
-        args: &["--all-targets"],
-    },
     Step {
         kind: Kind::WasmClippy,
         scope: Scope::Crate("fofoca-chunks"),

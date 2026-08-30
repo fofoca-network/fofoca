@@ -6,6 +6,15 @@ share one version and move together. A release is a git tag — nothing is
 published to a registry; pin it with
 `fofoca = { git = "https://github.com/fofoca-network/fofoca", tag = "v0.6.0" }`.
 
+## [Unreleased]
+
+### Removed
+
+- **Breaking:** the `fofoca-blobs` crate, and with it the workspace's only
+  OPFS store backend. `fofoca-chunks` is the store: chunks prove content,
+  where blobs' bao outboards proved placement. No known consumer imported
+  `fofoca_blobs` at removal time; the v0.6.0 tag keeps the crate.
+
 ## [0.6.0] - 2026-08-30
 
 The first tagged release. Everything since the extraction from mallorca.

@@ -21,7 +21,7 @@
 //! throughout.
 //!
 //! Not in CI: it needs a browser and a way to drive one, like
-//! `fofoca-blobs/tests/opfs_browser.rs`.
+//! `fofoca-chunks/tests/idb_browser.rs`.
 
 #![cfg(target_arch = "wasm32")]
 

@@ -23,10 +23,9 @@
 //! is proved here by the leaf row instead — leaf *k* belongs at offset
 //! *k* × [`CHUNK_BYTES`], and the row is what the root commits to.
 //!
-//! That is also the line between this crate and its sibling `fofoca-blobs`:
-//! blobs proves *placement* (bao outboards over one file), chunks proves
-//! *content*. This crate is meant to replace `fofoca-blobs`; until that
-//! retirement they coexist.
+//! That is also what separated this crate from the retired `fofoca-blobs`:
+//! blobs proved *placement* (bao outboards over one file), chunks proves
+//! *content*. This crate replaced it after v0.6.0.
 //!
 //! # What this crate is not
 //!
