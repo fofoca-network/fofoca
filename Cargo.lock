@@ -1087,7 +1087,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ccc2776f0c61eca1ca32528f85548abd1a4be8fb53d1b21c013e4f18da1e7090"
 dependencies = [
  "data-encoding",
- "syn 2.0.118",
+ "syn 1.0.109",
 ]
 
 [[package]]
@@ -1413,7 +1413,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2591,7 +2591,7 @@ dependencies = [
 [[package]]
 name = "iroh-mainline-address-lookup"
 version = "0.4.0"
-source = "git+https://github.com/fofoca-network/iroh-address-lookups?rev=53cf1ee6cc10a9b8c4805a5f7fe4d39570d86aa1#53cf1ee6cc10a9b8c4805a5f7fe4d39570d86aa1"
+source = "git+https://github.com/fofoca-network/iroh-address-lookups?rev=a5a77c6ff26fa2dcbb2b650bd0d095b7c94e2990#a5a77c6ff26fa2dcbb2b650bd0d095b7c94e2990"
 dependencies = [
  "derive_more",
  "iroh",
@@ -2608,7 +2608,7 @@ dependencies = [
 [[package]]
 name = "iroh-mdns-address-lookup"
 version = "0.4.0"
-source = "git+https://github.com/fofoca-network/iroh-address-lookups?rev=53cf1ee6cc10a9b8c4805a5f7fe4d39570d86aa1#53cf1ee6cc10a9b8c4805a5f7fe4d39570d86aa1"
+source = "git+https://github.com/fofoca-network/iroh-address-lookups?rev=a5a77c6ff26fa2dcbb2b650bd0d095b7c94e2990#a5a77c6ff26fa2dcbb2b650bd0d095b7c94e2990"
 dependencies = [
  "data-encoding",
  "derive_more",
@@ -3325,7 +3325,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4195,7 +4195,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4287,7 +4287,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4418,7 +4418,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5b55fb86dfd3a2f5f76ea78310a88f96c4ea21a3031f8d212443d56123fd0521"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4836,8 +4836,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 [[package]]
 name = "swarm-discovery"
 version = "0.6.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1b4877f20f064de34b77d79237c9caa37c393590af8ef5a2f3253d59be5a338b"
+source = "git+https://github.com/rkuhn/swarm-discovery?rev=b41dbcc431f419ad0cd91f786d4d7c71ec6be9ce#b41dbcc431f419ad0cd91f786d4d7c71ec6be9ce"
 dependencies = [
  "acto",
  "hickory-proto",
@@ -4959,10 +4958,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4972,7 +4971,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "230a1b821ccbd75b185820a1f1ff7b14d21da1e442e22c0863ea5f08771a8874"
 dependencies = [
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5759,7 +5758,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
