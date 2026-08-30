@@ -139,6 +139,31 @@ cargo check --workspace --no-default-features
 cargo check --workspace --all-features
 ```
 
+## Releasing
+
+All member crates share one version from `[workspace.package]` and move as
+one release. Nothing is published to a registry; a release is an annotated
+tag plus a GitHub Release, and a consumer pins it:
+
+```toml
+fofoca = { git = "https://github.com/fofoca-network/fofoca", tag = "v0.6.0" }
+```
+
+A tag pin still needs the three iroh `[patch.crates-io]` lines — see the pin
+table in [FORKED.md](FORKED.md).
+
+To cut a release:
+
+1. Bump `version` in `[workspace.package]` (root `Cargo.toml`) and the
+   version line in `docs/architecture.md`; run `cargo check --workspace` so
+   `Cargo.lock` follows.
+2. Add the section to `CHANGELOG.md`.
+3. Run `cargo task ci` and make sure it is green.
+4. Commit as `chore: release vX.Y.Z`, then tag: `git tag -a vX.Y.Z`.
+5. Push with the tag, then publish the notes:
+   `gh release create vX.Y.Z --title "fofoca X.Y.Z"` with the CHANGELOG
+   section as the body.
+
 ## The browser
 
 The engine runs in a tab. `--no-default-features` drops `host` and leaves the

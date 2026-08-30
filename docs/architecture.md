@@ -1,6 +1,6 @@
 # fofoca — Architecture
 
-This document describes the architecture of the fofoca workspace at version 0.5.0.
+This document describes the architecture of the fofoca workspace at version 0.6.0.
 The wire protocol described here is message version `12.0`.
 The style follows ASD-STE100 Simplified Technical English.
 

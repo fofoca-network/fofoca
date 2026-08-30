@@ -1470,7 +1470,7 @@ checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
 
 [[package]]
 name = "fofoca"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -1511,7 +1511,7 @@ dependencies = [
 
 [[package]]
 name = "fofoca-blobs"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "bao-tree",
@@ -1526,7 +1526,7 @@ dependencies = [
 
 [[package]]
 name = "fofoca-chunks"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1539,7 +1539,7 @@ dependencies = [
 
 [[package]]
 name = "fofoca-doc"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "automerge",
@@ -1557,7 +1557,7 @@ dependencies = [
 
 [[package]]
 name = "fofoca-ffi"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "fofoca",
@@ -1568,7 +1568,7 @@ dependencies = [
 
 [[package]]
 name = "fofoca-iroh-multihop-transport"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1586,14 +1586,14 @@ dependencies = [
 
 [[package]]
 name = "fofoca-iroh-transport-util"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "iroh",
 ]
 
 [[package]]
 name = "fofoca-iroh-webrtc-transport"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1622,7 +1622,7 @@ dependencies = [
 
 [[package]]
 name = "fofoca-logging"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "fofoca-protocol",
@@ -1636,7 +1636,7 @@ dependencies = [
 
 [[package]]
 name = "fofoca-netplay"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "fofoca",
@@ -1649,7 +1649,7 @@ dependencies = [
 
 [[package]]
 name = "fofoca-pipe"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -1663,7 +1663,7 @@ dependencies = [
 
 [[package]]
 name = "fofoca-protocol"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -1689,7 +1689,7 @@ dependencies = [
 
 [[package]]
 name = "fofoca-util"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "libc",
  "tokio",
