@@ -6,6 +6,7 @@ rust-version.workspace = true
 authors = ["Caio Gondim <me@caiogondim.com>"]
 description = "tracing sink and directive filter for fofoca"
 license = "MIT"
+readme = "README.md"
 publish = false
 
 [features]

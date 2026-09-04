@@ -6,6 +6,7 @@ rust-version.workspace = true
 authors = ["Caio Gondim <me@caiogondim.com>"]
 description = "wire vocabulary for fofoca: messages, mesh ids, nicknames, seed-derived identity, sealing, invites"
 license = "MIT"
+readme = "README.md"
 publish = false
 
 [features]

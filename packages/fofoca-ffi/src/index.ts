@@ -126,9 +126,11 @@ export function ffiOpener(wire: WireOpts, deps: OpenerDeps = {}): Opener {
       maxChunk: reply.maxChunk,
       send: async (to, bytes) => {
         // Copy before transferring: the caller's view may outlive this call,
-        // and a transferred buffer is detached under it.
-        const copy = bytes.slice()
-        await request({ t: 'send', to, bytes: copy.buffer as ArrayBuffer }, [copy.buffer as ArrayBuffer])
+        // and a transferred buffer is detached under it. A constructor copy,
+        // not `slice()`: a Node or Bun `Buffer` is a `Uint8Array` whose
+        // `slice` is `subarray`, a view over a shared pool.
+        const copy = new Uint8Array(bytes)
+        await request({ t: 'send', to, bytes: copy.buffer }, [copy.buffer])
       },
       sendEof: async (to) => {
         await request({ t: 'sendEof', to })

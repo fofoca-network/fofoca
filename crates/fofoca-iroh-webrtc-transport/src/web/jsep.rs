@@ -16,7 +16,8 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{
     RtcConfiguration, RtcDataChannel, RtcDataChannelEvent, RtcIceConnectionState,
-    RtcIceGatheringState, RtcPeerConnection, RtcSdpType, RtcSessionDescriptionInit,
+    RtcIceGatheringState, RtcPeerConnection, RtcPeerConnectionState, RtcSdpType,
+    RtcSessionDescriptionInit,
 };
 
 use crate::{DATA_CHANNEL_LABEL, SignalEnvelope, accept_ice_uri};
@@ -626,7 +627,7 @@ fn gathering_settled(local: usize, srflx: usize, quiet_ms: f64, expects_srflx: b
     local >= 1 && (srflx >= 1 || !expects_srflx) && quiet_ms >= ICE_QUIET_MS
 }
 
-fn now_ms() -> f64 {
+pub(super) fn now_ms() -> f64 {
     js_sys::Date::now()
 }
 
@@ -724,7 +725,10 @@ async fn wait_channel_open(
     let deadline = now_ms() + CHANNEL_OPEN_DEADLINE_MS;
     loop {
         let ice = peer_connection.ice_connection_state();
-        if ice == RtcIceConnectionState::Failed {
+        // `connectionState`, not `iceConnectionState`: it also covers a DTLS
+        // failure, and it is the state the hub's watchdog judges after the
+        // channel opens, so setup and steady state agree on what "failed" is.
+        if peer_connection.connection_state() == RtcPeerConnectionState::Failed {
             return Err(JsValue::from_str(
                 "ICE failed — no route between the peers (host/mDNS blocked and TURN did not connect)",
             ));
@@ -770,7 +774,7 @@ async fn wait_channel_open(
 ///
 /// Resolving immediately is kept only for a global with no `setTimeout` at all,
 /// where hanging really would be worse.
-async fn sleep_ms(millis: i32) {
+pub(super) async fn sleep_ms(millis: i32) {
     let promise = js_sys::Promise::new(&mut |resolve, _reject| {
         use wasm_bindgen::JsCast as _;
         let global = js_sys::global();

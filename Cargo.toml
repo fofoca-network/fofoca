@@ -25,7 +25,7 @@ resolver = "3"
 [workspace.package]
 edition = "2024"
 rust-version = "1.93"
-version = "0.5.0"
+version = "0.6.0"
 
 # Deps shared by the crates here, pinned once so versions stay in lockstep.
 #
@@ -62,6 +62,12 @@ serde = { version = "1", features = ["derive"] }
 # `--output json` stream.
 serde_json = { version = "1", features = ["raw_value"] }
 anyhow = "1"
+# Named by `fofoca-chunks`, and kept in the workspace table so a second namer
+# cannot drift. The floor is the OFF position:
+# `default-features = false` keeps the wasm build honest, and `std` comes back
+# for `std::io` and threading on the host. A crate that needs more (SIMD) opts
+# in through its own feature, never by widening this entry.
+blake3 = { version = "1.8", default-features = false, features = ["std"] }
 bytes = "1"
 # Cargo-style colored status output for the operator-facing commands (`plug`,
 # `unplug`, `doctor`). `anstream` resolves color support per stream at write
@@ -120,11 +126,14 @@ iroh-dns = { version = "=1.0.3", git = "https://github.com/fofoca-network/iroh",
 # The mDNS + mainline-DHT address-lookup providers, extracted from iroh core in
 # the 1.0 line. Forked for one reason only: they sat between this crate and iroh
 # and named iroh/iroh-base/iroh-dns from crates.io, which is what forced every
-# consumer to carry a patch table. The fork holds no functional change and has no
-# upstream path — n0 will not point their crates at ours — so delete it the
-# moment the iroh pins themselves become unnecessary.
-iroh-mdns-address-lookup = { version = "=0.4.0", git = "https://github.com/fofoca-network/iroh-address-lookups", rev = "53cf1ee6cc10a9b8c4805a5f7fe4d39570d86aa1" }
-iroh-mainline-address-lookup = { version = "=0.4.0", git = "https://github.com/fofoca-network/iroh-address-lookups", rev = "53cf1ee6cc10a9b8c4805a5f7fe4d39570d86aa1" }
+# consumer to carry a patch table. The fork holds one functional change on top
+# of that: it pins `swarm-discovery` to an unreleased upstream rev, because
+# 0.6.3 spins a 10 ms retry loop once its mDNS updater is gone
+# (rkuhn/swarm-discovery#28). Neither change has an upstream path — n0 will
+# not point their crates at ours — so delete the fork the moment the iroh pins
+# become unnecessary and swarm-discovery 0.6.4+ ships.
+iroh-mdns-address-lookup = { version = "=0.4.0", git = "https://github.com/fofoca-network/iroh-address-lookups", rev = "a5a77c6ff26fa2dcbb2b650bd0d095b7c94e2990" }
+iroh-mainline-address-lookup = { version = "=0.4.0", git = "https://github.com/fofoca-network/iroh-address-lookups", rev = "a5a77c6ff26fa2dcbb2b650bd0d095b7c94e2990" }
 # `default-features = false` for the same reason as `iroh`: the browser leg
 # cannot carry the host-only defaults.
 #
@@ -148,7 +157,7 @@ web-time = "1.1"
 # thread. Off wasm32 it is a verbatim re-export of `tokio::{time, spawn}`.
 n0-future = "0.3"
 n0-watcher = "1.0"
-# Shared by `fofoca-blobs` and the WebRTC transport's browser backend. Pinned
+# Shared by `fofoca-chunks` and the WebRTC transport's browser backend. Pinned
 # here so the two cannot drift: `wasm-bindgen` and its generated glue must be
 # one version across a module, or `wasm-bindgen` refuses to link them.
 wasm-bindgen = "0.2"

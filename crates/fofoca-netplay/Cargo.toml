@@ -6,6 +6,7 @@ rust-version.workspace = true
 authors = ["Caio Gondim <me@caiogondim.com>"]
 description = "GGPO-style rollback netcode for peer-to-peer games on a fofoca mesh"
 license = "MIT"
+readme = "README.md"
 publish = false
 # `examples/light-cycles` has no manifest at its own root — only its `native/`
 # and `web/` halves do — so cargo's package walk descends into it and folds a

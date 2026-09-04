@@ -129,6 +129,32 @@ describe('ffiOpener', () => {
     expect(bytes.byteLength).toBe(5)
   })
 
+  test('send posts only the bytes of a Buffer view, not its backing pool', async () => {
+    const { host, posted } = fakeHost((command, emit) => {
+      if (command.t === 'open' || command.t === 'send') {
+        emit({ t: 'ok', id: command.id, value: command.t === 'open' ? OPEN_REPLY : null })
+      }
+    })
+    const { sink } = recordingSink()
+    const opened = await ffiOpener(joinWire({ topic: 'tea' }), {
+      spawn: async () => host,
+      lib: '/fake',
+    })(sink)
+    // Node and Bun hand out small Buffers as views over a shared pool, and
+    // `Buffer.prototype.slice` is `subarray`: a view, not a copy. Transferring
+    // `.buffer` of that view would post the whole pool and detach it under
+    // every other Buffer that lives there.
+    const pool = new Uint8Array(16)
+    pool.set([0x68, 0x69], 3)
+    const bytes = Buffer.from(pool.buffer, 3, 2)
+    await opened.backend.send('bo', bytes)
+    const sent = posted[1] as Extract<Command, { t: 'send' }>
+    expect(sent.bytes.byteLength).toBe(2)
+    expect(Array.from(new Uint8Array(sent.bytes))).toEqual([0x68, 0x69])
+    expect(sent.bytes).not.toBe(pool.buffer)
+    expect(pool.buffer.byteLength).toBe(16)
+  })
+
   test('close awaits the worker reply and terminates it', async () => {
     const { host, terminatedCount } = fakeHost((command, emit) => {
       if (command.t === 'open') {

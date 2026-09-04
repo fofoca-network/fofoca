@@ -66,6 +66,13 @@ mod ice_uri;
     expect(dead_code, reason = "the browser-only methods; its tests still run")
 )]
 mod registry;
+// Same shape as `registry`: DOM-free so its tests run on the host, reached
+// only from the browser backend.
+#[cfg_attr(
+    all(not(feature = "web"), not(test)),
+    expect(dead_code, reason = "the browser hub's watchdog; its tests still run")
+)]
+mod liveness;
 #[cfg(any(feature = "native", feature = "web"))]
 mod selector;
 mod signaling;
@@ -296,6 +303,24 @@ impl WebRtcHandle {
     #[must_use]
     pub fn live_peer_ids(&self) -> Vec<iroh_base::EndpointId> {
         self.inner.live_peer_ids()
+    }
+
+    /// `RTCPeerConnection.connectionState` of a live session, if any.
+    #[must_use]
+    pub fn session_state(
+        &self,
+        remote: &iroh_base::EndpointId,
+    ) -> Option<web_sys::RtcPeerConnectionState> {
+        self.inner.session_state(remote)
+    }
+
+    /// The peer connection behind a live session, if any.
+    #[must_use]
+    pub fn peer_connection(
+        &self,
+        remote: &iroh_base::EndpointId,
+    ) -> Option<web_sys::RtcPeerConnection> {
+        self.inner.peer_connection(remote)
     }
 
     /// Selected ICE remote candidate for a live session, if any.

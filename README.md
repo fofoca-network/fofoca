@@ -29,10 +29,10 @@ fofoca-util          host helpers, no deps of consequence   (13 crates resolved)
               ├── fofoca-iroh-webrtc-transport  QUIC over a WebRTC data channel
               └── fofoca-iroh-multihop-transport  QUIC relayed through peers
 
-fofoca-blobs                      verified byte ranges, + bao-tree, blake3
+fofoca-chunks                     content-addressed chunk store, + blake3
 ```
 
-`fofoca-blobs` is standalone: nothing here depends on it. The two transports
+`fofoca-chunks` is standalone: nothing here depends on it. The two transports
 depend on nothing else here either, but the engine depends on *them* — on the
 multihop transport under `host`, and on the WebRTC transport per target.
 
@@ -43,10 +43,11 @@ tokio, QUIC, TLS or DNS; `-doc`, `-logging`, `-reassembly` and `-directory`
 inherit that). Everything else, in this workspace and downstream, reaches iroh
 through `fofoca::iroh` so the graph can never hold two copies.
 
-[`fofoca-blobs`](crates/fofoca-blobs) is a BLAKE3/bao store of verification
-metadata — outboards, root bindings, which ranges are held — for bytes that live
-wherever the caller already keeps them, so a peer can serve verified ranges of a
-file it did not have to copy first.
+[`fofoca-chunks`](crates/fofoca-chunks) is a content-addressed chunk store:
+fixed 64 KiB chunks addressed by BLAKE3 of their own bytes, so a chunk proves
+itself and dedups across files, and the store never copies the caller's bytes.
+It replaced `fofoca-blobs`, whose bao outboards proved placement inside one
+file rather than content (removed after v0.6.0).
 
 [`fofoca-netplay`](crates/fofoca-netplay) is GGPO-style rollback netcode for
 peer-to-peer games on a mesh: peers agree a roster in a lobby, then each
@@ -113,7 +114,7 @@ Every task takes `-p` to narrow it to one crate, which keeps the edit-check loop
 proportional to what you changed:
 
 ```bash
-cargo task ci   -p fofoca-blobs  # the same gate, one crate
+cargo task ci   -p fofoca-chunks # the same gate, one crate
 cargo task test -p fofoca        # its default tests and its `blob` ones
 ```
 
@@ -132,6 +133,33 @@ cargo check --workspace --no-default-features
 cargo check --workspace --all-features
 ```
 
+## Releasing
+
+All member crates share one version from `[workspace.package]` and move as
+one release. Nothing is published to a registry; a release is an annotated
+tag plus a GitHub Release, and a consumer pins it:
+
+```toml
+fofoca = { git = "https://github.com/fofoca-network/fofoca", tag = "v0.6.0" }
+```
+
+The pin is self-contained: this workspace carries no `[patch.crates-io]`
+(every fork is a direct git dependency with an exact version), so a consumer
+restates nothing. Proven by a scratch crate that pins the tag and
+`cargo check`s clean.
+
+To cut a release:
+
+1. Bump `version` in `[workspace.package]` (root `Cargo.toml`) and the
+   version line in `docs/architecture.md`; run `cargo check --workspace` so
+   `Cargo.lock` follows.
+2. Add the section to `CHANGELOG.md`.
+3. Run `cargo task ci` and make sure it is green.
+4. Commit as `chore: release vX.Y.Z`, then tag: `git tag -a vX.Y.Z`.
+5. Push with the tag, then publish the notes:
+   `gh release create vX.Y.Z --title "fofoca X.Y.Z"` with the CHANGELOG
+   section as the body.
+
 ## The browser
 
 The engine runs in a tab. `--no-default-features` drops `host` and leaves the
@@ -148,7 +176,7 @@ checks and lints every one:
 ```bash
 rustup target add wasm32-unknown-unknown
 cargo task wasm                              # all three
-cargo task wasm -p fofoca-blobs              # or one
+cargo task wasm -p fofoca-chunks             # or one
 ```
 
 `cargo check` is not enough on its own, which is why
@@ -163,8 +191,8 @@ CC=$(brew --prefix llvm)/bin/clang CC_wasm32_unknown_unknown=$(brew --prefix llv
   cargo test -p fofoca --no-default-features --target wasm32-unknown-unknown
 ```
 
-`fofoca-blobs`'s eight OPFS tests need a real browser and are not in CI:
-`wasm-pack test --headless --chrome crates/fofoca-blobs`.
+`fofoca-chunks`'s IndexedDB tests need a real browser and are not in CI:
+`wasm-pack test --headless --chrome crates/fofoca-chunks`.
 
 Neither is the WebRTC transport's browser suite, which drives real browsers over
 a build-profile and main-thread-pressure sweep: `cargo task e2e`, or

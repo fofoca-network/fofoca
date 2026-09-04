@@ -21,8 +21,8 @@ jobs:
       - uses: actions/checkout@v6
 
       # Reads rust-toolchain.toml — do not duplicate the version here.
-      # The extra target is for `fofoca-blobs`, whose OPFS and IndexedDB
-      # backends only exist on wasm32 and would otherwise compile nowhere.
+      # The extra target is for `fofoca-chunks`, whose IndexedDB backend
+      # only exists on wasm32 and would otherwise compile nowhere.
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           target: wasm32-unknown-unknown
@@ -72,10 +72,9 @@ jobs:
         run: cargo clippy -p fofoca-iroh-webrtc-transport --features native --all-targets -- -D warnings
 
       # Five crates are reachable on wasm32 and nowhere else, and between them
-      # that is a substantial amount of code no other job compiles: roughly a
-      # third of `fofoca-blobs` (`src/opfs.rs`, `src/idb.rs`,
-      # `tests/opfs_browser.rs`), the whole `web` backend of the WebRTC
-      # transport, the portable half of the engine, `fofoca-netplay`'s
+      # that is a substantial amount of code no other job compiles:
+      # `fofoca-chunks`'s IndexedDB backend, the whole `web` backend of the
+      # WebRTC transport, the portable half of the engine, `fofoca-netplay`'s
       # simulation, and `fofoca-pipe`'s wire contract. Without these steps that
       # code rots silently, and the `#[expect(...)]` attributes inside it are
       # never lint-checked either.
@@ -88,7 +87,10 @@ jobs:
       # `getrandom` or a C dependency.
       - name: Check (wasm32)
         run: |
-          cargo check --target wasm32-unknown-unknown -p fofoca-blobs --all-targets
+          # `wasm-simd` only changes blake3's codegen (it assumes +simd128 at
+          # runtime, not at compile time), so checking with it on costs nothing
+          # and keeps the feature from rotting.
+          cargo check --target wasm32-unknown-unknown -p fofoca-chunks --all-targets --features wasm-simd
           cargo check --target wasm32-unknown-unknown -p fofoca-iroh-webrtc-transport --features web
           # The engine itself must reach the browser, not merely be avoidable
           # from it. `--no-default-features` is the portable half: no `host`,
@@ -117,7 +119,7 @@ jobs:
 
       - name: Clippy (wasm32)
         run: |
-          cargo clippy --target wasm32-unknown-unknown -p fofoca-blobs --all-targets -- -D warnings
+          cargo clippy --target wasm32-unknown-unknown -p fofoca-chunks --all-targets --features wasm-simd -- -D warnings
           cargo clippy --target wasm32-unknown-unknown -p fofoca-iroh-webrtc-transport --features web -- -D warnings
           cargo clippy --target wasm32-unknown-unknown -p fofoca --no-default-features -- -D warnings
           cargo clippy --target wasm32-unknown-unknown -p fofoca-netplay --no-default-features -- -D warnings

@@ -102,6 +102,7 @@ js-sys = { workspace = true, optional = true }
 futures = { version = "0.3", optional = true }
 web-sys = { workspace = true, optional = true, features = [
     "RtcPeerConnection",
+    "RtcPeerConnectionState",
     "RtcConfiguration",
     "RtcDataChannel",
     "RtcDataChannelEvent",

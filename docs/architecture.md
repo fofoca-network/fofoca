@@ -1,6 +1,6 @@
 # fofoca — Architecture
 
-This document describes the architecture of the fofoca workspace at version 0.5.0.
+This document describes the architecture of the fofoca workspace at version 0.6.0.
 The wire protocol described here is message version `12.0`.
 The style follows ASD-STE100 Simplified Technical English.
 
@@ -82,7 +82,7 @@ The user-facing word in the CLI is **gossip**, and that word never reaches the w
 
 ## 3. Workspace structure
 
-The workspace is a virtual manifest with nine member crates.
+The workspace is a virtual manifest with twelve member crates.
 All crates share one version from `[workspace.package]`.
 Dependencies point strictly downward.
 
@@ -95,12 +95,12 @@ graph TD
     doc --> proto["fofoca-protocol<br>wire vocabulary"]
     logging --> proto
     proto --> util["fofoca-util<br>host helpers, constants"]
-    blobs["fofoca-blobs<br>verified byte ranges"]
+    chunks["fofoca-chunks<br>content-addressed chunks"]
     webrtc["fofoca-iroh-webrtc-transport"]
 ```
 
 An arrow reads "depends on".
-`fofoca-blobs` and `fofoca-iroh-webrtc-transport` stand alone.
+`fofoca-chunks` and `fofoca-iroh-webrtc-transport` stand alone.
 The engine meets the WebRTC transport in a consumer, through injected transport handles (section 9).
 
 | Crate | Role |
@@ -111,7 +111,7 @@ The engine meets the WebRTC transport in a consumer, through injected transport 
 | `fofoca-logging` | Tracing sink and directive filter. |
 | `fofoca` | The engine. The only crate that names `iroh` and `iroh-gossip`. |
 | `fofoca-ffi` | A C-ABI shim, so a non-Rust process joins a mesh in-process. |
-| `fofoca-blobs` | BLAKE3/bao metadata store for verified byte ranges over data the crate does not own. |
+| `fofoca-chunks` | Content-addressed chunk store: BLAKE3 leaf rows over data the crate does not own. Replaced `fofoca-blobs`. |
 | `fofoca-iroh-webrtc-transport` | An iroh custom transport: QUIC datagrams over a WebRTC data channel. |
 | `fofoca-iroh-multihop-transport` | An iroh custom transport: source-routed relaying through peers. |
 

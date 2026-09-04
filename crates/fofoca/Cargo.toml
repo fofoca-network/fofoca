@@ -6,6 +6,7 @@ rust-version.workspace = true
 authors = ["Caio Gondim <me@caiogondim.com>"]
 description = "serverless gossip-network engine for agent-gossip"
 license = "MIT"
+readme = "README.md"
 publish = false
 
 [lints]
@@ -56,9 +57,9 @@ iroh-test-utils = ["iroh/test-utils", "dep:iroh-relay", "iroh-relay/server"]
 # spool directory.
 #
 # Implies `host`: it spools to disk and stands up its own iroh endpoint, and a
-# browser has neither. Not to be confused with the `fofoca-blobs` crate — that
-# is a verified-range *metadata store* with no transport, no ALPN and no
-# framing, and the two are complements rather than alternatives.
+# browser has neither. Not to be confused with the `fofoca-chunks` crate — that
+# is a content-addressed *store* with no transport, no ALPN and no framing, and
+# the two are complements rather than alternatives.
 blob = ["host"]
 
 # Discovery legs and the control socket, each gating its own dependency tree.
