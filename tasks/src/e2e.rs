@@ -16,9 +16,11 @@ use clap::{Args as ClapArgs, ValueEnum};
 use crate::TaskOutcome;
 use crate::util::output;
 
-mod build;
+pub(crate) mod build;
 mod cdp;
+mod chat;
 mod loopback;
+mod mesh;
 mod server;
 mod webdriver;
 
@@ -109,6 +111,13 @@ enum Suite {
     Matrix,
     /// The fast four-test regression suite, on one browser.
     Loopback,
+    /// The native↔browser matrix: a real native peer, a real tab, a local
+    /// relay, swept over the relay-transport policy, the native transport
+    /// set and the join mode.
+    Mesh,
+    /// The chat example end to end: the native terminal chat in robot mode
+    /// against the browser chat page, over a local relay.
+    Chat,
 }
 
 /// Which wasm build a cell runs.
@@ -249,6 +258,14 @@ pub(crate) fn run(args: &Args) -> TaskOutcome {
     };
     if !args.list {
         build::check_tooling()?;
+    }
+
+    if args.suite == Suite::Mesh {
+        return mesh::run(args);
+    }
+
+    if args.suite == Suite::Chat {
+        return chat::run(args);
     }
 
     // The fast suite reports per-test through the runner rather than through a

@@ -29,6 +29,13 @@ ureq = { version = "3", default-features = false, features = ["json"] }
 # around it rather than like a shell script.
 anstyle = "1"
 anstream = "0.6"
+# The mesh suite (`e2e --suite mesh`) runs a real native peer in-process and
+# a local relay, so the runner depends on the engine it drives. Dev tool
+# only; the build cost is shared through the workspace target dir.
+fofoca = { path = "../crates/fofoca", features = ["iroh-test-utils"] }
+fofoca-pipe = { path = "../crates/fofoca-pipe" }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+tracing-subscriber.workspace = true
 
 [lints]
 workspace = true

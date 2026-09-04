@@ -18,7 +18,7 @@ use super::Profile;
 /// `Failed to detect test as having been run`. Four layers, none of which
 /// mentions clang. The chat-webrtc example's `build-wasm.sh` says the same
 /// thing for the same reason.
-pub(super) fn wasm_env() -> Result<BTreeMap<String, String>, String> {
+pub(crate) fn wasm_env() -> Result<BTreeMap<String, String>, String> {
     let clang = [
         "/opt/homebrew/opt/llvm/bin/clang",
         "/usr/local/opt/llvm/bin/clang",
@@ -149,6 +149,142 @@ pub(super) fn build(
             String::from_utf8_lossy(&built.stderr).trim()
         )),
     }
+}
+
+/// The plain `wasm-bindgen` CLI, which the browser-peer build shells out to.
+/// Distinct from [`check_tooling`]'s `wasm-bindgen-test-runner`: the sweeps
+/// need the runner, the peer build needs the generator.
+pub(crate) fn check_wasm_bindgen() -> TaskOutcome {
+    if Command::new("wasm-bindgen")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        return Err(
+            "wasm-bindgen is not on PATH\n             cargo install wasm-bindgen-cli".into(),
+        );
+    }
+    Ok(())
+}
+
+/// Build the browser peer (`fofoca-wasm`) and emit its ES-module glue into
+/// `packages/fofoca-wasm/wasm/`, returning the glue's path.
+///
+/// The `.wasm` path comes from cargo's own JSON for the same reason
+/// [`build`]'s does — a stale artefact is indistinguishable by filename —
+/// except a cdylib reports through `filenames`, not `executable`.
+/// `--release` for the same reason too: the debug wasm is enormous and the
+/// browser gives up loading it.
+pub(crate) fn build_wasm_peer(env: &BTreeMap<String, String>) -> Result<PathBuf, String> {
+    let built = Command::new("cargo")
+        .current_dir(repo_root())
+        .args([
+            "build",
+            "--release",
+            "--quiet",
+            "--target",
+            "wasm32-unknown-unknown",
+            "-p",
+            "fofoca-wasm",
+            "--message-format=json",
+        ])
+        .envs(env)
+        .output()
+        .map_err(|error| format!("could not run cargo: {error}"))?;
+
+    let artifact = String::from_utf8_lossy(&built.stdout)
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter_map(|message| {
+            message.get("filenames").and_then(|filenames| {
+                filenames.as_array()?.iter().find_map(|name| {
+                    let path = PathBuf::from(name.as_str()?);
+                    (path.file_name()? == "fofoca_wasm.wasm").then_some(path)
+                })
+            })
+        })
+        .next_back();
+    let Some(artifact) = artifact.filter(|path| path.is_file()) else {
+        return Err(format!(
+            "could not build the fofoca-wasm cdylib:\n{}",
+            String::from_utf8_lossy(&built.stderr).trim()
+        ));
+    };
+
+    let out_dir = repo_root().join("packages/fofoca-wasm/wasm");
+    let bound = Command::new("wasm-bindgen")
+        .args(["--target", "web", "--out-dir"])
+        .arg(&out_dir)
+        .arg(&artifact)
+        .output()
+        .map_err(|error| format!("could not run wasm-bindgen: {error}"))?;
+    if !bound.status.success() {
+        return Err(format!(
+            "wasm-bindgen failed:\n{}",
+            String::from_utf8_lossy(&bound.stderr).trim()
+        ));
+    }
+    Ok(out_dir.join("fofoca_wasm.js"))
+}
+
+/// Bun serves both e2e suites' pages; probe for it before anything builds.
+pub(crate) fn ensure_bun(why: &str) -> TaskOutcome {
+    if Command::new("bun")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .and_then(|mut child| child.wait())
+        .is_err()
+    {
+        return Err(format!("{why} — install bun first").into());
+    }
+    Ok(())
+}
+
+/// The whole browser-peer preamble the two e2e suites and `cargo task
+/// wasm-peer` share: tooling check, wasm env, build, announce.
+pub(crate) fn build_browser_peer() -> Result<PathBuf, String> {
+    check_wasm_bindgen().map_err(|error| error.to_string())?;
+    let env = wasm_env()?;
+    output::status("Building", "the browser peer (fofoca-wasm)");
+    let glue = build_wasm_peer(&env)?;
+    output::detail(&format!("             {}", glue.display()));
+    Ok(glue)
+}
+
+/// Build one cargo example and take its path from cargo's own JSON, for the
+/// same stale-artifact reason [`build`] does.
+pub(crate) fn build_example(package: &str, example: &str) -> Result<PathBuf, String> {
+    let built = Command::new("cargo")
+        .current_dir(repo_root())
+        .args([
+            "build",
+            "--quiet",
+            "-p",
+            package,
+            "--example",
+            example,
+            "--message-format=json",
+        ])
+        .output()
+        .map_err(|error| format!("could not run cargo: {error}"))?;
+    let artifact = String::from_utf8_lossy(&built.stdout)
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter_map(|message| {
+            message
+                .get("executable")
+                .and_then(serde_json::Value::as_str)
+                .map(PathBuf::from)
+        })
+        .next_back();
+    artifact.filter(|path| path.is_file()).ok_or_else(|| {
+        format!(
+            "could not build the {example} example:
+{}",
+            String::from_utf8_lossy(&built.stderr).trim()
+        )
+    })
 }
 
 /// Print the artifact that a cell is about to run, so a run that used a stale
