@@ -1657,6 +1657,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -4974,8 +4975,12 @@ dependencies = [
  "anstream 0.6.21",
  "anstyle",
  "clap",
+ "fofoca",
+ "fofoca-pipe",
  "serde",
  "serde_json",
+ "tokio",
+ "tracing-subscriber",
  "ureq",
  "xshell",
 ]
