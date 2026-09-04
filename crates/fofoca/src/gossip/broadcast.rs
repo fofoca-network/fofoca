@@ -262,7 +262,7 @@ pub fn unicast_farewell(state: &EventLoopState, bytes: &Bytes) {
 /// message log (`handle_peer_info` returns before the log push), so
 /// re-sending it is invisible to `poll`/`fetch_messages` consumers —
 /// safe to repeat on every new neighbor.
-pub(super) async fn broadcast_peer_info(ctx: &HandlerCtx<'_>) {
+pub(crate) async fn broadcast_peer_info(ctx: &HandlerCtx<'_>) {
     let our_addr = ctx.endpoint.addr();
     let addr_data = serde_json::to_string(&crate::protocol::peer_addr::endpoint_addr_to_json(
         &our_addr,
