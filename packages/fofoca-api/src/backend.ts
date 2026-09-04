@@ -40,6 +40,12 @@ export interface BackendSink {
   presence(event: { kind: 'joined' | 'left'; nick: string }): void
   /** A failure with no caller waiting on it. Surfaces as `error`; the mesh stays open. */
   failed(message: string): void
+  /**
+   * Any other surfaced event (`quiet`, `returned`, `fork`, `info`). Optional:
+   * a backend with no richer event stream than presence simply never calls
+   * it, and `openMesh` wires it only when present.
+   */
+  event?(event: MeshEvent): void
   /** The mesh is gone and no further push will arrive. Idempotent. */
   closed(reason: string): void
 }
