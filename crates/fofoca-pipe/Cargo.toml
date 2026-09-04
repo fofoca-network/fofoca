@@ -44,11 +44,17 @@ n0-future.workspace = true
 # call site, so a browser and a terminal cannot disagree about padding.
 base64 = "0.22"
 
-# No `[dev-dependencies]`, and that is load-bearing rather than incidental. The
-# workspace `tokio` dev-dep turns on `net` -> `mio`, and dev-deps are resolved
-# for test targets on every target, so an unscoped one breaks
-# `cargo check --target wasm32-unknown-unknown` before it reaches any code of
-# ours (`crates/fofoca/Cargo.toml` carries the same scar). The tests here are
-# pure arithmetic and derivation, needing nothing. The first one that wants a
-# runtime goes under
-# `[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]`.
+# No plain `[dev-dependencies]`, and that is load-bearing rather than
+# incidental. The workspace `tokio` dev-dep turns on `net` -> `mio`, and
+# unscoped dev-deps are resolved for test targets on every target, so one
+# breaks `cargo check --target wasm32-unknown-unknown` before it reaches any
+# code of ours (`crates/fofoca/Cargo.toml` carries the same scar). The tests
+# here are pure arithmetic and derivation, needing nothing. The chat example
+# below is the "first one that wants a runtime" the original note predicted,
+# so its deps live under the target-scoped table it prescribed.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+
+[[example]]
+name = "chat"
