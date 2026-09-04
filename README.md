@@ -141,8 +141,9 @@ a CLI runs, not a reduced stand-in. What it loses is the control socket, the
 session state file, the process helpers and the log sink, none of which have a
 wasm32 equivalent.
 
-Three crates reach that target, each at its own feature position, and CI checks
-and lints every one:
+Four crates reach that target — `fofoca-wasm` is the browser peer itself,
+behind `packages/fofoca-wasm` — each at its own feature position, and CI
+checks and lints every one:
 
 ```bash
 rustup target add wasm32-unknown-unknown
@@ -168,6 +169,13 @@ CC=$(brew --prefix llvm)/bin/clang CC_wasm32_unknown_unknown=$(brew --prefix llv
 Neither is the WebRTC transport's browser suite, which drives real browsers over
 a build-profile and main-thread-pressure sweep: `cargo task e2e`, or
 `cargo task e2e --quick` for the fast single-browser pass.
+
+The native↔browser matrix — the one that proves a terminal and a tab exchange
+payload on every lane under every relay policy — is
+`cargo task e2e --suite mesh` (`--quick` for the four-cell pass). It needs the
+wasm glue built first (`cargo task wasm-peer` — the mesh suite also builds
+it itself), bun, and
+`agent-browse` with Chrome for Testing.
 
 [`chat-webrtc`](crates/fofoca-iroh-webrtc-transport/examples/chat-webrtc) is a
 runnable demonstration of the browser leg on its own: a chat room a tab and a

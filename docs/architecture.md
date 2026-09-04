@@ -437,6 +437,7 @@ An id minted before the policy existed keeps its bytes and topic and reads as lo
 
 Every create surface names the relay's two roles apart: `relay` (lookup) and `relay_transport` (`relayTransport` in JSON and TypeScript, `--relay-transport` on a CLI).
 The second needs the first; a config that sets it with the relay disabled is rejected before any network.
+The policy is validated end to end by `cargo task e2e --suite mesh`: a real native peer and a real browser tab on a local relay, swept over the policy, the native transport set, and the join mode.
 
 ### 9.2 WebRTC transport
 
