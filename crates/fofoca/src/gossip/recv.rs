@@ -87,6 +87,8 @@ pub(crate) async fn handle_gossip_event(
                 // heal tick must not connect-probe the rendezvous (the
                 // probe would supersede this very link on the beacon).
                 state.rendezvous_linked = true;
+                state.rendezvous_session_stale = false;
+                state.rendezvous_offer_fallback = false;
             } else {
                 // `NeighborUp`/`NeighborDown` are the only writers of
                 // `linked_endpoints`: it must mirror the *live* overlay
@@ -122,6 +124,20 @@ pub(crate) async fn handle_gossip_event(
             tracing::info!(target: "fofoca::gossip", endpoint_id = %node_id, is_rendezvous, "gossip neighbor down");
             if is_rendezvous {
                 state.rendezvous_linked = false;
+                // A shed beacon takes its session table with it (the rival
+                // re-check releases and re-claims the rendezvous on a fresh
+                // endpoint), so a held session is stale the moment the link
+                // drops — and admission would refuse every re-offer with
+                // `HaveSession`. Drop it so the next heal tick offers anew.
+                if let Some(handle) = state.webrtc.as_ref()
+                    && handle.detach(&node_id)
+                {
+                    tracing::debug!(target: "fofoca::gossip", "detached the stale rendezvous webrtc session");
+                }
+                // Re-offer now rather than on the next heal tick: every
+                // saved interval halves the relink cycle a beacon shed costs
+                // a webrtc-shaped peer.
+                crate::transport::webrtc::negotiate_rendezvous_session(state, ctx);
             } else {
                 state.linked_endpoints.remove(&node_id);
                 state.direct.remove(&node_id);

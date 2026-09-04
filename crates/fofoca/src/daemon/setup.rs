@@ -565,6 +565,10 @@ pub async fn setup_mesh(kind: SetupKind, params: SetupParams) -> Result<EventLoo
         multihop: multihop_handle,
         webrtc,
         webrtc_enabled: transports.webrtc,
+        rendezvous_graft_needs_session: crate::transport::webrtc::node_graft_needs_session(
+            relay_transport,
+            transports.ip,
+        ),
         webrtc_admission,
         webrtc_ice,
         unicast_rx,
@@ -802,7 +806,16 @@ async fn setup_join(build: &SetupBuild<'_>, kind: SetupKind) -> Result<Assembled
     // the shared pinned relay that could capture our own bootstrap dial. A
     // topic instead claims eagerly (probe-first) so the first peer beacons.
     // See `EventLoopConfig::cohost`.
-    let topic = gossip.subscribe(topic_id, vec![rdv.id]).await?;
+    // A webrtc-shaped lookup-only node must not bootstrap-dial the
+    // rendezvous yet: the graft waits for its session (see
+    // `transport::webrtc::rendezvous_graftable`); the heal tick grafts once
+    // it is attached.
+    let needs_session = crate::transport::webrtc::node_graft_needs_session(
+        build.relay_transport,
+        build.transports.ip,
+    );
+    let bootstrap = if needs_session { vec![] } else { vec![rdv.id] };
+    let topic = gossip.subscribe(topic_id, bootstrap).await?;
 
     // `ready` is emitted by `run`, once the IPC socket accepts — not here.
     lifecycle::log_ready(

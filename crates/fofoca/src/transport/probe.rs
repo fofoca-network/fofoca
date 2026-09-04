@@ -133,7 +133,14 @@ pub(crate) async fn retry_direct(state: &mut EventLoopState, ctx: &HandlerCtx<'_
         .values()
         .filter(|addr| addr.id != ctx.rendezvous_id)
         .filter(|addr| !state.linked_endpoints.contains(&addr.id))
-        .filter(|addr| state.direct.get(&addr.id) != Some(&DirectState::Pending))
+        .filter(|addr| {
+            state.direct.get(&addr.id) != Some(&DirectState::Pending)
+                || (needs_webrtc_lane(addr)
+                    && state
+                        .webrtc
+                        .as_ref()
+                        .is_some_and(|handle| handle.has_session(&addr.id)))
+        })
         .filter(|addr| !state.relink_on_cooldown(addr.id, now))
         .cloned()
         .collect();

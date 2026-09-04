@@ -93,6 +93,7 @@ pub async fn run<A: NodeDriver>(
         multihop,
         webrtc,
         webrtc_enabled,
+        rendezvous_graft_needs_session,
         webrtc_admission,
         webrtc_ice,
         unicast_rx,
@@ -181,6 +182,7 @@ pub async fn run<A: NodeDriver>(
     // Before the first write, so the initial advertisement carries a real count.
     state.live_count = live_count;
     state.relay_transport = relay_transport;
+    state.rendezvous_graft_needs_session = rendezvous_graft_needs_session;
     // Direct-path probes report here; the loop grafts on the verdict.
     let (direct_tx, direct_rx) = mpsc::unbounded_channel();
     state.direct_proven = direct_tx;

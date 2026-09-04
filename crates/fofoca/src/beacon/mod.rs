@@ -460,7 +460,9 @@ fn beacon_lookups(params: &RendezvousParams) -> LookupOpts {
 /// rung; on `AddrInUse`, probe — *ours* ⇒ `None` (stay a peer),
 /// *foreign* ⇒ next rung. `None` also covers public build failure /
 /// every rung foreign-squatted (≈0); the next tick retries.
-async fn build_rendezvous_endpoint(params: &RendezvousParams) -> Option<Endpoint> {
+async fn build_rendezvous_endpoint(
+    params: &RendezvousParams,
+) -> Option<(Endpoint, Option<fofoca_iroh_webrtc_transport::WebRtcHandle>)> {
     let lookups = beacon_lookups(params);
     if params.bind_ports.is_empty() {
         // The public probe-before-claim that used to run here — the analog
@@ -468,12 +470,21 @@ async fn build_rendezvous_endpoint(params: &RendezvousParams) -> Option<Endpoint
         // (`spawn_rival_probe`), and `ensure` only reaches this point once
         // its verdict says the rendezvous is free. Everything left is a
         // bind.
+        //
+        // A public rendezvous carries the `WebRTC` transport and answers
+        // JSEP: a browser-shaped peer has no IP to punch with, so on a mesh
+        // whose relay is lookup only the data channel is the only path its
+        // rendezvous link can ever be admitted on.
+        let webrtc = crate::lookup::new_webrtc_handle(params.secret.public());
         let endpoint = build_endpoint(
             &lookups,
             Some(params.secret.clone()),
             None,
             Vec::new(),
-            TransportHandles::default(),
+            TransportHandles {
+                webrtc: Some(webrtc.clone()),
+                ..TransportHandles::default()
+            },
         )
         .await
         .ok();
@@ -482,7 +493,7 @@ async fn build_rendezvous_endpoint(params: &RendezvousParams) -> Option<Endpoint
         } else {
             tracing::debug!(target: "fofoca::beacon", "public beacon endpoint build failed; next tick retries");
         }
-        return endpoint;
+        return endpoint.map(|endpoint| (endpoint, Some(webrtc)));
     }
     // Built on the first contended rung and reused for the rest of the
     // walk, then closed. A throwaway identity, for the reason
@@ -490,7 +501,7 @@ async fn build_rendezvous_endpoint(params: &RendezvousParams) -> Option<Endpoint
     // make the beacon mistake the probe for this member's own gossip
     // connection and drop the real one when the probe closes.
     let mut prober: Option<Endpoint> = None;
-    let mut verdict = None;
+    let mut verdict: Option<(Endpoint, Option<fofoca_iroh_webrtc_transport::WebRtcHandle>)> = None;
     for &port in &params.bind_ports {
         if let Ok(endpoint) = build_endpoint(
             &lookups,
@@ -502,7 +513,8 @@ async fn build_rendezvous_endpoint(params: &RendezvousParams) -> Option<Endpoint
         .await
         {
             tracing::info!(target: "fofoca::beacon", port, "beacon assumed: bound rendezvous ladder rung");
-            verdict = Some(endpoint);
+            // No `WebRTC` on the ladder: a loopback mesh has no browsers.
+            verdict = Some((endpoint, None));
             break;
         }
         // build failed (AddrInUse): is it our beacon, or a foreign squat?
@@ -637,7 +649,7 @@ async fn claim(
     peer: &Endpoint,
     current: &mut Option<Rendezvous>,
 ) -> bool {
-    let Some(endpoint) = build_rendezvous_endpoint(params).await else {
+    let Some((endpoint, webrtc)) = build_rendezvous_endpoint(params).await else {
         // Public: endpoint build failed. Private: every ladder rung is
         // occupied — our mesh's beacon(s) already exist on the ladder
         // (joiners reach them by identity-checked dial). Either way,
@@ -649,14 +661,20 @@ async fn claim(
     // member peer cap, so it stays at the shipped default rather than
     // tracking `--max-peers`.
     // The rendezvous pseudo-node accepts no unicast — it is not a peer.
-    // The rendezvous serves no WebRTC either: it is a meeting point reached
-    // over the relay, and a peer that finds us here immediately moves to the
-    // real peer endpoint.
+    // A *public* rendezvous answers JSEP (`build_rendezvous_endpoint` put
+    // the transport on the endpoint): a browser-shaped peer has no other
+    // way onto a mesh whose relay is lookup only.
     let (gossip, router) = build_mesh(
         endpoint.clone(),
         crate::util::tuning::GOSSIP_ACTIVE_VIEW_CAPACITY,
         None,
-        None,
+        webrtc.map(|handle| {
+            (
+                handle,
+                crate::transport::SignalAdmission::new(crate::transport::MAX_DIRECT_PEERS),
+                crate::transport::IceProfile { host_only: false },
+            )
+        }),
         // The rendezvous serves no caller protocol either — it is a meeting
         // point, not somewhere an application is reachable.
         Vec::new(),

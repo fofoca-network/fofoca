@@ -93,6 +93,30 @@ const SIGNAL_FAILED: u32 = 2;
 /// Application close code: the negotiation ran out of time.
 const SIGNAL_ABORTED: u32 = 3;
 
+/// Register `remote`'s `WebRTC` transport address after a session attach.
+///
+/// Load-bearing, not bookkeeping: an attached session is only *usable* once a
+/// dial can name it — iroh fans a connect's Initial across the paths in the
+/// peer's known addresses, and the custom-transport path exists nowhere else.
+/// Without this registration every connection to a session-holding peer still
+/// carried exactly one path, the relay, which the lookup-only accept gate then
+/// (correctly) refused.
+fn register_session_addr(endpoint: &Endpoint, remote: EndpointId) {
+    let addr = EndpointAddr::from_parts(
+        remote,
+        [iroh::TransportAddr::Custom(
+            fofoca_iroh_webrtc_transport::custom_addr(remote),
+        )],
+    );
+    if let Err(error) = crate::lookup::add_peer_addr(endpoint, addr) {
+        // `warn`: a session that cannot be named is a session that cannot
+        // carry anything, and this is the only line that says why.
+        tracing::warn!(target: LOG_TARGET, %remote, %error, "could not register the webrtc transport address");
+    } else {
+        tracing::info!(target: LOG_TARGET, %remote, "registered the webrtc transport address");
+    }
+}
+
 /// The deadlines one round runs under.
 ///
 /// Injectable so tests need not wait 45 real seconds. A `util::tuning` knob
@@ -212,6 +236,9 @@ fn refused_at_cap(conn: &Connection) -> bool {
 #[derive(Debug, Clone)]
 pub(crate) struct WebRtcSignalAcceptor {
     handle: WebRtcHandle,
+    /// For registering the peer's transport address on attach; see
+    /// [`register_session_addr`].
+    endpoint: Endpoint,
     local: EndpointId,
     /// Shared with the dialing side, so the ceiling is one number for the node
     /// rather than one per role.
@@ -224,12 +251,14 @@ pub(crate) struct WebRtcSignalAcceptor {
 impl WebRtcSignalAcceptor {
     pub(crate) fn new(
         handle: WebRtcHandle,
+        endpoint: Endpoint,
         local: EndpointId,
         admission: SignalAdmission,
         ice: IceProfile,
     ) -> Self {
         Self {
             handle,
+            endpoint,
             local,
             admission,
             deadlines: SignalDeadlines::DEFAULT,
@@ -254,6 +283,18 @@ impl ProtocolHandler for WebRtcSignalAcceptor {
         // where sessions are keyed by peer, is impersonation rather than merely
         // a wasted negotiation.
         let remote = conn.remote_id();
+
+        // An offer from a peer we already hold a session with is itself the
+        // proof that *their* half is gone: a peer with a working session
+        // never re-offers (admission's `HaveSession` refuses its dialer).
+        // Without this, the recovery from a half-attached session cost the
+        // offerer two stale ticks plus our session's idle-out per round —
+        // observed as ~2 minutes of "InFlight"/refused re-offers to a
+        // browser-held rendezvous. The identity is TLS-proven, so only the
+        // peer itself can trigger the detach.
+        if self.handle.has_session(&remote) && self.handle.detach(&remote) {
+            tracing::debug!(target: LOG_TARGET, %remote, "detached a half-dead session on a fresh offer");
+        }
 
         // Admit *before* spawning, in the synchronous prefix of `accept`. Two
         // things fall out of that ordering:
@@ -283,6 +324,7 @@ impl ProtocolHandler for WebRtcSignalAcceptor {
         };
 
         let handle = self.handle.clone();
+        let endpoint = self.endpoint.clone();
         let local = self.local;
         let deadlines = self.deadlines;
         let ice = self.ice;
@@ -308,6 +350,7 @@ impl ProtocolHandler for WebRtcSignalAcceptor {
             .await
             {
                 Ok(Ok(())) => {
+                    register_session_addr(&endpoint, remote);
                     conn.close(0u32.into(), b"jsep done");
                     tracing::debug!(target: LOG_TARGET, %remote, "webrtc session attached (answerer)");
                 }
@@ -480,6 +523,7 @@ async fn dial_signal_round(
     let answer: SignalEnvelope = serde_json::from_slice(&raw).context("parse signal answer")?;
 
     offer.with_answer(answer).complete(remote, handle).await?;
+    register_session_addr(endpoint, remote);
     // Signalling is done the moment the session is attached; the data rides its
     // own connections from here.
     conn.close(0u32.into(), b"jsep done");
@@ -550,6 +594,14 @@ pub(crate) fn needs_webrtc_lane(addr: &EndpointAddr) -> bool {
     !addr.is_empty() && addr.ip_addrs().next().is_none()
 }
 
+/// The local-node twin of [`needs_webrtc_lane`]: whether *this* node's
+/// rendezvous graft must wait for a data-channel session. A wasm node never
+/// has IP transports whatever the flags say; with the relay allowed as a
+/// transport nothing needs holding.
+pub(crate) fn node_graft_needs_session(relay_transport: bool, has_ip_transport: bool) -> bool {
+    !relay_transport && (cfg!(target_arch = "wasm32") || !has_ip_transport)
+}
+
 pub(crate) fn negotiate_session(
     state: &mut crate::daemon::state::EventLoopState,
     ctx: &crate::daemon::ctx::HandlerCtx<'_>,
@@ -601,24 +653,144 @@ pub(crate) fn negotiate_session(
         }
     };
 
+    spawn_offer_round(state, ctx, peer, addr, handle, guard, None);
+}
+
+/// The shared tail of every offer: hold the admission slot in a spawned
+/// task (released by `Drop`, so the slot comes back whether the task
+/// returns, is dropped, or is aborted at shutdown), run the JSEP round,
+/// note a cap refusal — and on attach report the proven path, so the
+/// loop's `DirectOutcome` arm grafts inside the freshly proven window.
+/// Without that send nothing ever moves a webrtc-shaped peer out of
+/// `Pending`: the session attaches and the graft still never fires
+/// (observed native↔browser: `links_pending=1` for the life of a cell).
+/// Written once — the two offer entry points had grown diverging copies.
+fn spawn_offer_round(
+    state: &mut crate::daemon::state::EventLoopState,
+    ctx: &crate::daemon::ctx::HandlerCtx<'_>,
+    peer: EndpointId,
+    addr: EndpointAddr,
+    handle: WebRtcHandle,
+    guard: super::admission::AdmissionGuard,
+    attach_info: Option<&'static str>,
+) {
     let endpoint = ctx.endpoint.clone();
     let admission = state.webrtc_admission.clone();
     let ice = state.webrtc_ice;
+    let proven = state.direct_proven.clone();
     let task = n0_future::task::spawn(async move {
-        // Released by `Drop`, so the slot comes back whether this returns, is
-        // dropped, or is aborted at shutdown. The set this replaced was cleared
-        // by a statement at the end of the task — which a task that never
-        // finishes never reaches, leaving the peer marked in-flight forever and
-        // skipped by every later retry.
         let _guard = guard;
         if let Err(error) = Box::pin(dial_signal(&endpoint, addr, &handle, ice)).await {
             if is_cap_refusal(&error) {
                 admission.note_refused(peer);
             }
             tracing::debug!(target: LOG_TARGET, %peer, %error, "webrtc offer failed");
+        } else {
+            if let Some(message) = attach_info {
+                tracing::info!(target: LOG_TARGET, %peer, "{message}");
+            }
+            let _ = proven.send(crate::transport::probe::DirectOutcome { peer, direct: true });
         }
     });
     state.webrtc_admission.track(peer, task.abort_handle());
+}
+
+/// Whether the periodic heal legs may graft-dial the rendezvous at all.
+///
+/// A webrtc-shaped node on a lookup-only mesh must never graft on a timer:
+/// the beacon's accept gate holds a relay-only connection and closes it
+/// after its deadline, and iroh-gossip's actor never redials a peer whose
+/// accepted connection died before the gossip handshake — one doomed dial
+/// wedges the link for the life of the process. `has_session` is no defence
+/// either: the rival re-check rebuilds the rendezvous endpoint, leaving a
+/// session that is locally held but dead on the other end. The only safe
+/// trigger is the **attach event itself** — a JSEP round that just completed
+/// is the liveness proof — so [`negotiate_rendezvous_session`] reports it
+/// through the loop's `DirectOutcome` channel and the graft fires there,
+/// within the freshly proven window.
+pub(crate) fn rendezvous_graftable(state: &crate::daemon::state::EventLoopState) -> bool {
+    !state.rendezvous_graft_needs_session
+}
+
+/// Offer a `WebRTC` session to the **rendezvous** itself.
+///
+/// On a mesh whose relay is lookup only, the rendezvous link — like every
+/// link — is admitted only on a non-relay path, and a browser-shaped peer
+/// (no IP transports) has exactly one way to produce one: the data channel.
+/// The beacon answers JSEP for precisely this case, so the tab offers.
+///
+/// Unlike [`negotiate_session`], the lower-id rule does not apply — the
+/// beacon holds no address for a tab and can never be the dialer — and the
+/// peer-address lane check is skipped: the rendezvous address is a bare
+/// registered id, which reads as "unknown", not "browser". Everything else
+/// (admission, the in-flight guard, the cap, the cooldown) is shared.
+///
+/// A no-op unless: the relay is lookup only, this node is browser-shaped,
+/// and the rendezvous link is down. Driven by the heal tick, which runs
+/// exactly while that link is down.
+pub(crate) fn negotiate_rendezvous_session(
+    state: &mut crate::daemon::state::EventLoopState,
+    ctx: &crate::daemon::ctx::HandlerCtx<'_>,
+) {
+    if state.relay_transport || state.rendezvous_linked {
+        return;
+    }
+    let Some(handle) = state.webrtc.clone() else {
+        return;
+    };
+    if !needs_webrtc_lane(&ctx.endpoint.addr()) && !state.rendezvous_offer_fallback {
+        // An IP-capable peer normally reaches the rendezvous by punching
+        // inside the bootstrap connection — the data channel would be a
+        // worse path — so the punch gets the first heal tick. But IP
+        // capability says nothing about the *beacon*: a browser-held
+        // rendezvous has no UDP to punch to, and without this fallback an
+        // IP-capable native could never join a tab's mesh (observed in the
+        // browser-first matrix cells). Still linkless next tick: offer.
+        state.rendezvous_offer_fallback = true;
+        return;
+    }
+    let rendezvous = ctx.rendezvous_id;
+    // A held session with an *unlinked* rendezvous is stale: the beacon's
+    // rival re-check releases and re-claims the rendezvous on a fresh
+    // endpoint, whose session table starts empty, and this heal tick only
+    // runs while the link is down. Without a detach, admission would refuse
+    // every re-offer with `HaveSession` and the peer would stay wedged for
+    // the life of the process.
+    //
+    // But not on the *first* tick that sees it: this tick also re-grafts,
+    // and the graft dial is what turns the session into a link. Detaching
+    // here unconditionally killed the session moments before every dial —
+    // a phase lock in which no dial ever saw an attached session. So a held
+    // session gets one full tick to produce the link; only one that is
+    // still linkless on the next tick is torn down and re-negotiated.
+    if handle.has_session(&rendezvous) {
+        if !state.rendezvous_session_stale {
+            state.rendezvous_session_stale = true;
+            return;
+        }
+        if handle.detach(&rendezvous) {
+            tracing::debug!(target: LOG_TARGET, %rendezvous, "detached a stale rendezvous session before re-offering");
+        }
+    }
+    state.rendezvous_session_stale = false;
+    let guard = match state.webrtc_admission.try_admit(rendezvous, &handle) {
+        Ok(guard) => guard,
+        Err(reason) => {
+            tracing::debug!(target: LOG_TARGET, %rendezvous, ?reason, "not negotiating with the rendezvous");
+            return;
+        }
+    };
+    // The bare id resolves through the address registered by
+    // `register_rendezvous` — the relay-homed rendezvous address.
+    spawn_offer_round(
+        state,
+        ctx,
+        rendezvous,
+        EndpointAddr::new(rendezvous),
+        handle,
+        guard,
+        Some("webrtc session attached to the rendezvous"),
+    );
 }
 
 // ── Per-target JSEP ───────────────────────────────────────────────────────
@@ -863,11 +1035,22 @@ pub(crate) fn retry_sessions(
     // The peer's own advertised address, not one rebuilt from its id: a
     // rebuilt address carries no transports, so every peer looked like it
     // needed the browser lane and this pass opened a data channel with all of
-    // them.
+    // them. The cheap disqualifiers run before the clone — a peer whose
+    // session is already attached (admission would refuse it with
+    // `HaveSession` anyway) or a pure-IP pair costs a map walk, nothing more.
+    let own_addr = ctx.endpoint.addr();
+    let own_needs_lane = needs_webrtc_lane(&own_addr);
     let mut peers: Vec<EndpointAddr> = state
         .peer_endpoints
         .values()
         .filter(|addr| addr.id != ctx.rendezvous_id)
+        .filter(|addr| own_needs_lane || needs_webrtc_lane(addr))
+        .filter(|addr| {
+            !state
+                .webrtc
+                .as_ref()
+                .is_some_and(|handle| handle.has_session(&addr.id))
+        })
         .cloned()
         .collect();
     // Sorted because the cap now bites here: in a mesh larger than the ceiling
@@ -1021,6 +1204,7 @@ mod tests {
                 MESH_WEBRTC_SIGNAL_ALPN,
                 WebRtcSignalAcceptor::new(
                     handle.clone(),
+                    endpoint.clone(),
                     endpoint.id(),
                     admission.clone(),
                     // Host candidates only: these tests must not touch STUN.
@@ -1204,6 +1388,455 @@ mod tests {
     /// a multi-second negotiation does not serialize inbound offers, and so the
     /// browser's `!Send` JSEP future has somewhere to live. `ProtocolHandler`'s
     /// `shutdown` hook is what replaces that reachability.
+    /// Like [`endpoint`], but with the address-lookup store intact, so
+    /// `add_peer_addr` has somewhere to register and a bare-id dial has
+    /// something to resolve through.
+    async fn endpoint_with_lookup() -> (Endpoint, WebRtcHandle) {
+        let key = SecretKey::generate();
+        let handle = WebRtcHandle::new(WebRtcTransport::new(key.public()));
+        let endpoint = Endpoint::builder(presets::Minimal)
+            .secret_key(key)
+            .relay_mode(RelayMode::Disabled)
+            .add_custom_transport(handle.transport())
+            .bind()
+            .await
+            .expect("bind loopback endpoint");
+        (endpoint, handle)
+    }
+
+    /// **The load-bearing assumption of the whole `WebRTC` lane**: after a
+    /// session is attached and [`register_session_addr`] has run, a dial by
+    /// *bare id* — which is all iroh-gossip's actor ever dials with — must
+    /// resolve to the custom-transport path and connect over the data
+    /// channel. No relay and no IP address exist in this test, so a success
+    /// here is that resolution working and nothing else.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_bare_id_dial_resolves_to_the_attached_session() {
+        let (server, server_hub) = endpoint_with_lookup().await;
+        let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
+        let router = serve(&server, &server_hub, &admission);
+
+        let (client, client_hub) = endpoint_with_lookup().await;
+        dial_signal_with(
+            &client,
+            server.addr(),
+            &client_hub,
+            quick(),
+            IceProfile { host_only: true },
+        )
+        .await
+        .expect("the signal round must attach a session");
+        assert!(client_hub.has_session(&server.id()));
+
+        register_session_addr(&client, server.id());
+
+        let conn = tokio::time::timeout(
+            Duration::from_secs(10),
+            client.connect(EndpointAddr::new(server.id()), MESH_WEBRTC_SIGNAL_ALPN),
+        )
+        .await
+        .expect("a bare-id dial must not hang")
+        .expect("a bare-id dial must resolve through the registered custom address");
+        let direct = super::super::path::selected_is_direct(&conn);
+        conn.close(0u32.into(), b"done");
+        assert!(direct, "the connection's selected path must be the session");
+
+        router.shutdown().await.expect("shutdown");
+        client.close().await;
+    }
+
+    /// The **reverse** of [`a_bare_id_dial_resolves_to_the_attached_session`],
+    /// and the direction the native/web matrix caught missing: the *answerer*
+    /// dialing the *offerer* by bare id. The production acceptor registers the
+    /// offerer's custom address on attach, and a data channel is symmetric —
+    /// so this dial must ride the session exactly like the forward one. In the
+    /// matrix, every conn dialed in this direction sat on the relay until the
+    /// accept gate refused it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_bare_id_dial_rides_the_session_from_the_answerer_too() {
+        let (server, server_hub) = endpoint_with_lookup().await;
+        let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
+        let router = serve(&server, &server_hub, &admission);
+
+        let (client, client_hub) = endpoint_with_lookup().await;
+        let client_admission = SignalAdmission::new(MAX_DIRECT_PEERS);
+        let client_router = serve(&client, &client_hub, &client_admission);
+        dial_signal_with(
+            &client,
+            server.addr(),
+            &client_hub,
+            quick(),
+            IceProfile { host_only: true },
+        )
+        .await
+        .expect("the signal round must attach a session");
+        assert!(
+            until(|| server_hub.has_session(&client.id())).await,
+            "the answerer's hub must hold the session"
+        );
+        // `register_session_addr` runs in the acceptor task right after the
+        // attach the poll above observed; give it a beat to land.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let conn = tokio::time::timeout(
+            Duration::from_secs(10),
+            server.connect(EndpointAddr::new(client.id()), MESH_WEBRTC_SIGNAL_ALPN),
+        )
+        .await
+        .expect("an answerer's bare-id dial must not hang")
+        .expect("an answerer's bare-id dial must resolve through the registered custom address");
+        let direct = super::super::path::selected_is_direct(&conn);
+        conn.close(0u32.into(), b"done");
+        assert!(direct, "the connection's selected path must be the session");
+
+        router.shutdown().await.expect("shutdown");
+        client_router.shutdown().await.expect("shutdown");
+        server.close().await;
+        client.close().await;
+    }
+
+    /// The whole lookup-only browser story in one offline test: with a
+    /// session attached and its address registered, an **iroh-gossip graft
+    /// by bare id** must connect over the session and pass the lookup-only
+    /// accept gate. This is the layer above [`a_bare_id_dial_resolves_to_the_attached_session`]:
+    /// the gossip actor does its own dialing, and it is the actor's dial —
+    /// not ours — that the rendezvous link depends on.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_gossip_graft_by_bare_id_rides_the_attached_session() {
+        use futures_util::StreamExt as _;
+        use iroh_gossip::net::{GOSSIP_ALPN, Gossip};
+
+        let (server, server_hub) = endpoint_with_lookup().await;
+        let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
+        let server_gossip = Gossip::builder().spawn(server.clone());
+        // One Router for both ALPNs: `Router::spawn` overrides the endpoint's
+        // ALPN list, so a second Router silently unregisters the first's.
+        let router = Router::builder(server.clone())
+            .accept(
+                MESH_WEBRTC_SIGNAL_ALPN,
+                WebRtcSignalAcceptor::new(
+                    server_hub.clone(),
+                    server.clone(),
+                    server.id(),
+                    admission.clone(),
+                    IceProfile { host_only: true },
+                )
+                .with_deadlines(quick()),
+            )
+            .accept(
+                GOSSIP_ALPN,
+                super::super::DirectOnlyGossip::new(server_gossip.clone(), false),
+            )
+            .spawn();
+
+        let (client, client_hub) = endpoint_with_lookup().await;
+        let client_gossip = Gossip::builder().spawn(client.clone());
+
+        dial_signal_with(
+            &client,
+            server.addr(),
+            &client_hub,
+            quick(),
+            IceProfile { host_only: true },
+        )
+        .await
+        .expect("the signal round must attach a session");
+        register_session_addr(&client, server.id());
+
+        let topic = iroh_gossip::proto::TopicId::from_bytes([9u8; 32]);
+        let mut server_topic = server_gossip
+            .subscribe(topic, vec![])
+            .await
+            .expect("server subscribes");
+        let mut client_topic = client_gossip
+            .subscribe(topic, vec![server.id()])
+            .await
+            .expect("client subscribes and grafts by bare id");
+
+        let linked = tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                tokio::select! {
+                    event = client_topic.next() => {
+                        if matches!(
+                            event,
+                            Some(Ok(iroh_gossip::api::Event::NeighborUp(id))) if id == server.id()
+                        ) {
+                            return;
+                        }
+                    }
+                    event = server_topic.next() => {
+                        let _ = event;
+                    }
+                }
+            }
+        })
+        .await;
+        assert!(
+            linked.is_ok(),
+            "the graft dial must ride the attached session through the lookup-only gate"
+        );
+
+        router.shutdown().await.expect("shutdown");
+        client.close().await;
+    }
+
+    /// The failing browser topology, natively: both ends also hold a relay
+    /// path. The graft's connection then opens over the relay first, and the
+    /// lookup-only gate passes only if selection *migrates* to the attached
+    /// session within the hold. This is the exact cell the matrix kept
+    /// failing; everything below the relay's presence is covered by
+    /// [`a_gossip_graft_by_bare_id_rides_the_attached_session`].
+    #[cfg(feature = "iroh-test-utils")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_gossip_graft_prefers_the_session_over_the_relay() {
+        use futures_util::StreamExt as _;
+        use iroh_gossip::net::{GOSSIP_ALPN, Gossip};
+
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .with_test_writer()
+            .try_init();
+
+        let (relay_url, _relay_server) = crate::lookup::test_relay::spawn_plain()
+            .await
+            .expect("local relay");
+        let with_relay = |key: SecretKey, handle: &WebRtcHandle, browser_shaped: bool| {
+            let relay_url = relay_url.clone();
+            let transport = handle.transport();
+            let selector = handle.path_selector();
+            async move {
+                let builder = Endpoint::builder(presets::Minimal)
+                    .secret_key(key)
+                    .relay_mode(RelayMode::custom([relay_url]))
+                    .add_custom_transport(transport)
+                    .path_selector(selector);
+                // A browser has no IP stack: without this, localhost punches
+                // a UDP path inside the held connection and the gate passes
+                // on a path a tab could never have.
+                let builder = if browser_shaped {
+                    builder.clear_ip_transports()
+                } else {
+                    builder
+                };
+                builder.bind().await.expect("bind endpoint with relay")
+            }
+        };
+        let server_key = SecretKey::generate();
+        let server_hub = WebRtcHandle::new(WebRtcTransport::new(server_key.public()));
+        let server = with_relay(server_key, &server_hub, false).await;
+        let client_key = SecretKey::generate();
+        let client_hub = WebRtcHandle::new(WebRtcTransport::new(client_key.public()));
+        let client = with_relay(client_key, &client_hub, true).await;
+
+        let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
+        let server_gossip = Gossip::builder().spawn(server.clone());
+        let router = Router::builder(server.clone())
+            .accept(
+                MESH_WEBRTC_SIGNAL_ALPN,
+                WebRtcSignalAcceptor::new(
+                    server_hub.clone(),
+                    server.clone(),
+                    server.id(),
+                    admission.clone(),
+                    IceProfile { host_only: true },
+                ),
+            )
+            .accept(
+                GOSSIP_ALPN,
+                super::super::DirectOnlyGossip::new(server_gossip.clone(), false),
+            )
+            .spawn();
+
+        let client_gossip = Gossip::builder().spawn(client.clone());
+        // The relay-homed address, as `register_rendezvous` hands a joiner.
+        let relay_addr = EndpointAddr::new(server.id()).with_relay_url(relay_url.clone());
+        dial_signal_with(
+            &client,
+            relay_addr,
+            &client_hub,
+            SignalDeadlines::DEFAULT,
+            IceProfile { host_only: true },
+        )
+        .await
+        .expect("the signal round must attach a session over the relay");
+        register_session_addr(&client, server.id());
+
+        let topic = iroh_gossip::proto::TopicId::from_bytes([11u8; 32]);
+        let mut server_topic = server_gossip
+            .subscribe(topic, vec![])
+            .await
+            .expect("server subscribes");
+        let mut client_topic = client_gossip
+            .subscribe(topic, vec![server.id()])
+            .await
+            .expect("client subscribes and grafts by bare id");
+
+        let linked = tokio::time::timeout(Duration::from_secs(40), async {
+            loop {
+                tokio::select! {
+                    event = client_topic.next() => {
+                        if matches!(
+                            event,
+                            Some(Ok(iroh_gossip::api::Event::NeighborUp(id))) if id == server.id()
+                        ) {
+                            return;
+                        }
+                    }
+                    event = server_topic.next() => {
+                        let _ = event;
+                    }
+                }
+            }
+        })
+        .await;
+        assert!(
+            linked.is_ok(),
+            "with a session attached, the graft must not stay pinned to the relay"
+        );
+
+        router.shutdown().await.expect("shutdown");
+        client.close().await;
+    }
+
+    /// The real join order: the graft is attempted *before* any session
+    /// exists — the gate holds the relayed connection for its deadline and
+    /// closes it — and only then does the session attach. The re-graft after
+    /// the refusal must still link; if a refused connection poisons later
+    /// dials to the same peer, this is the test that says so.
+    #[cfg(feature = "iroh-test-utils")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_graft_recovers_after_a_refused_relay_attempt() {
+        use futures_util::StreamExt as _;
+        use iroh_gossip::net::{GOSSIP_ALPN, Gossip};
+
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .with_test_writer()
+            .try_init();
+
+        let (relay_url, _relay_server) = crate::lookup::test_relay::spawn_plain()
+            .await
+            .expect("local relay");
+        let with_relay = |key: SecretKey, handle: &WebRtcHandle, browser_shaped: bool| {
+            let relay_url = relay_url.clone();
+            let transport = handle.transport();
+            let selector = handle.path_selector();
+            async move {
+                let builder = Endpoint::builder(presets::Minimal)
+                    .secret_key(key)
+                    .relay_mode(RelayMode::custom([relay_url]))
+                    .add_custom_transport(transport)
+                    .path_selector(selector);
+                // A browser has no IP stack: without this, localhost punches
+                // a UDP path inside the held connection and the gate passes
+                // on a path a tab could never have.
+                let builder = if browser_shaped {
+                    builder.clear_ip_transports()
+                } else {
+                    builder
+                };
+                builder.bind().await.expect("bind endpoint with relay")
+            }
+        };
+        let server_key = SecretKey::generate();
+        let server_hub = WebRtcHandle::new(WebRtcTransport::new(server_key.public()));
+        let server = with_relay(server_key, &server_hub, false).await;
+        let client_key = SecretKey::generate();
+        let client_hub = WebRtcHandle::new(WebRtcTransport::new(client_key.public()));
+        let client = with_relay(client_key, &client_hub, true).await;
+
+        let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
+        let server_gossip = Gossip::builder().spawn(server.clone());
+        let router = Router::builder(server.clone())
+            .accept(
+                MESH_WEBRTC_SIGNAL_ALPN,
+                WebRtcSignalAcceptor::new(
+                    server_hub.clone(),
+                    server.clone(),
+                    server.id(),
+                    admission.clone(),
+                    IceProfile { host_only: true },
+                ),
+            )
+            .accept(
+                GOSSIP_ALPN,
+                super::super::DirectOnlyGossip::new(server_gossip.clone(), false),
+            )
+            .spawn();
+
+        let client_gossip = Gossip::builder().spawn(client.clone());
+        // What register_rendezvous does for a joiner: the relay-homed
+        // address, registered before the first graft dial.
+        crate::lookup::add_peer_addr(
+            &client,
+            EndpointAddr::new(server.id()).with_relay_url(relay_url.clone()),
+        )
+        .expect("register the relay-homed address");
+        let topic = iroh_gossip::proto::TopicId::from_bytes([13u8; 32]);
+        let mut server_topic = server_gossip
+            .subscribe(topic, vec![])
+            .await
+            .expect("server subscribes");
+        // The graft attempt with nothing but the relay: held, then refused.
+        let (client_sender, mut client_rx) = client_gossip
+            .subscribe(topic, vec![server.id()])
+            .await
+            .expect("client subscribes")
+            .split();
+
+        // Outlast the gate's hold (15 s) so the refusal has happened.
+        tokio::time::sleep(Duration::from_secs(17)).await;
+
+        // Now the session, as the heal tick would drive it.
+        let relay_addr = EndpointAddr::new(server.id()).with_relay_url(relay_url.clone());
+        dial_signal_with(
+            &client,
+            relay_addr,
+            &client_hub,
+            SignalDeadlines::DEFAULT,
+            IceProfile { host_only: true },
+        )
+        .await
+        .expect("the signal round must attach a session over the relay");
+        register_session_addr(&client, server.id());
+
+        let linked = tokio::time::timeout(Duration::from_secs(40), async {
+            loop {
+                client_sender
+                    .join_peers(vec![server.id()])
+                    .await
+                    .expect("re-graft");
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+                loop {
+                    tokio::select! {
+                        event = client_rx.next() => {
+                            if matches!(
+                                event,
+                                Some(Ok(iroh_gossip::api::Event::NeighborUp(id))) if id == server.id()
+                            ) {
+                                return;
+                            }
+                        }
+                        event = server_topic.next() => {
+                            let _ = event;
+                        }
+                        () = tokio::time::sleep_until(deadline) => {
+                            break;
+                        }
+                    }
+                }
+            }
+        })
+        .await;
+        assert!(
+            linked.is_ok(),
+            "a refused relay-only graft must not poison the re-graft over the session"
+        );
+
+        router.shutdown().await.expect("shutdown");
+        client.close().await;
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn router_shutdown_cancels_rounds_in_flight() {
         let (server, server_hub) = endpoint().await;

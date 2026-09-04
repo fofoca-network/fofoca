@@ -163,7 +163,9 @@ pub(super) async fn maybe_reclaim(
             schedule_rival_recheck(state, arm.policy, arm.params, ctx.endpoint);
             return;
         }
-        if regrafts_rendezvous(current.is_some(), state.rendezvous_linked) {
+        if regrafts_rendezvous(current.is_some(), state.rendezvous_linked)
+            && crate::transport::webrtc::rendezvous_graftable(state)
+        {
             tracing::info!(
                 target: "fofoca::gossip",
                 "reclaim tick: re-graft the rendezvous (link lost, beacon is someone else's)"

@@ -241,6 +241,21 @@ pub struct EventLoopState {
     /// drops — one rendezvous-link flap per heal tick, forever (the
     /// 2026-05-30 soak's residual flap).
     pub(crate) rendezvous_linked: bool,
+    /// Whether the held rendezvous `WebRTC` session has already survived one
+    /// heal tick without producing a link — the arming half of the stale
+    /// detach in `negotiate_rendezvous_session`.
+    pub(crate) rendezvous_session_stale: bool,
+    /// Whether an IP-capable node's rendezvous JSEP offer is armed. IP
+    /// capability normally means the punch inside the bootstrap connection
+    /// reaches the rendezvous — but it says nothing about the *beacon*: a
+    /// browser-held rendezvous has no UDP to punch to. The first linkless
+    /// heal tick sets this instead of offering; the second offers. Cleared
+    /// on the rendezvous `NeighborUp`, so a healthy mesh never offers.
+    pub(crate) rendezvous_offer_fallback: bool,
+    /// Whether grafting the rendezvous must wait for an attached `WebRTC`
+    /// session — true for a webrtc-shaped node on a lookup-only mesh; see
+    /// `transport::webrtc::rendezvous_graftable`.
+    pub(crate) rendezvous_graft_needs_session: bool,
     /// Set once we've broadcast our arrival (`joined` + `PeerInfo`).
     /// The announce is deferred to the first `NeighborUp` so it isn't
     /// lost into an unconnected overlay; subsequent neighbors only get
@@ -586,6 +601,9 @@ impl EventLoopState {
             joined_at: crate::util::clock::unix_secs(),
             gossip_open: true,
             rendezvous_linked: false,
+            rendezvous_session_stale: false,
+            rendezvous_offer_fallback: false,
+            rendezvous_graft_needs_session: false,
             announced: false,
             meshed: false,
             unicast_pool: crate::transport::UnicastPool::disconnected(),

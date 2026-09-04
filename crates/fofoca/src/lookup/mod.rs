@@ -497,14 +497,18 @@ pub(crate) fn detached_webrtc_handle(
 /// a `RTCPeerConnection` hub in a tab — but the handle type does not, so this is
 /// the one place the split shows.
 #[cfg(not(target_arch = "wasm32"))]
-fn new_webrtc_handle(local: iroh::EndpointId) -> fofoca_iroh_webrtc_transport::WebRtcHandle {
+pub(crate) fn new_webrtc_handle(
+    local: iroh::EndpointId,
+) -> fofoca_iroh_webrtc_transport::WebRtcHandle {
     fofoca_iroh_webrtc_transport::WebRtcHandle::new(
         fofoca_iroh_webrtc_transport::WebRtcTransport::new(local),
     )
 }
 
 #[cfg(target_arch = "wasm32")]
-fn new_webrtc_handle(local: iroh::EndpointId) -> fofoca_iroh_webrtc_transport::WebRtcHandle {
+pub(crate) fn new_webrtc_handle(
+    local: iroh::EndpointId,
+) -> fofoca_iroh_webrtc_transport::WebRtcHandle {
     fofoca_iroh_webrtc_transport::WebRtcHandle::hub(local)
 }
 
@@ -639,6 +643,9 @@ pub(crate) fn build_mesh(
         .membership_config(membership)
         .spawn(endpoint.clone());
     let local = endpoint.id();
+    // Cloned before the Router consumes the endpoint; the signal acceptor
+    // registers webrtc transport addresses on attach.
+    let endpoint_for_acceptor = endpoint.clone();
     let mut builder = Router::builder(endpoint).accept(
         GOSSIP_ALPN,
         crate::transport::DirectOnlyGossip::new(gossip.clone(), relay_transport),
@@ -655,7 +662,13 @@ pub(crate) fn build_mesh(
     if let Some((handle, admission, ice)) = webrtc {
         builder = builder.accept(
             crate::transport::MESH_WEBRTC_SIGNAL_ALPN,
-            crate::transport::WebRtcSignalAcceptor::new(handle, local, admission, ice),
+            crate::transport::WebRtcSignalAcceptor::new(
+                handle,
+                endpoint_for_acceptor,
+                local,
+                admission,
+                ice,
+            ),
         );
     }
     // The caller's own protocols, if it shares this endpoint with us.
