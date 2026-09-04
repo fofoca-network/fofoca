@@ -80,9 +80,25 @@ pub(crate) async fn refuse_unless_direct(
     close_code: u32,
 ) -> bool {
     if relay_transport || wait_direct(conn, deadline).await {
+        tracing::debug!(target: LOG_TARGET, remote = %conn.remote_id(), "payload path admitted");
         return true;
     }
-    tracing::info!(target: LOG_TARGET, remote = %conn.remote_id(), "{RELAY_REFUSED}");
+    // The paths iroh held at refusal time, because "which paths existed and
+    // which was selected" is the whole diagnosis when a link that should
+    // have gone direct did not.
+    let paths: Vec<String> = conn
+        .paths()
+        .iter()
+        .map(|path| {
+            format!(
+                "{:?}{}{}",
+                path.remote_addr(),
+                if path.is_selected() { " selected" } else { "" },
+                if path.is_relay() { " relay" } else { "" },
+            )
+        })
+        .collect();
+    tracing::info!(target: LOG_TARGET, remote = %conn.remote_id(), paths = ?paths, "{RELAY_REFUSED}");
     conn.close(close_code.into(), b"relay path refused");
     false
 }

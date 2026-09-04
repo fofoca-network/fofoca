@@ -15,6 +15,7 @@ use iroh::endpoint::Connection;
 use iroh::{Endpoint, EndpointAddr, EndpointId};
 use tokio::sync::Mutex;
 
+use super::path::wait_direct;
 use super::{LOG_TARGET, RELAY_REFUSED, UNICAST_ALPN, payload_allowed_on};
 
 use crate::util::clock::Instant;
@@ -33,6 +34,14 @@ const DIAL_TIMEOUT: Duration = Duration::from_secs(3);
 /// reply, a flushed backlog) serializes a [`DIAL_TIMEOUT`] stall per frame —
 /// the cooldown bounds that to one stall per window per peer.
 const DIAL_FAILURE_COOLDOWN: Duration = Duration::from_secs(10);
+
+/// How long a *fresh* inline dial may wait for iroh to select a non-relay
+/// path before the send is refused. Shorter than the accept side's
+/// `PROBE_DEADLINE`: this wait blocks the event loop exactly like the dial
+/// itself, so it gets a dial-sized budget, not an accept-sized one — and a
+/// punch or a WebRTC path-open lands in single-digit seconds when it lands
+/// at all.
+const PATH_SELECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone)]
 pub(crate) struct UnicastPool {
@@ -166,7 +175,13 @@ impl UnicastPool {
     pub(crate) async fn dial_and_send(&self, eid: EndpointId, bytes: Bytes) -> Result<()> {
         self.inner.dial_attempts.fetch_add(1, Ordering::Relaxed);
         let conn = self.warm_or_dial(eid).await?;
-        if !payload_allowed_on(&conn, self.inner.relay_transport) {
+        // A connection this call just dialed is milliseconds old: its
+        // non-relay path (the punch, or a WebRTC path opened right after
+        // `AddConnection`) is still forming, and the synchronous check read
+        // "no path selected yet" as relay — refusing the *first* directed
+        // frame to every peer without a warm connection. Wait like the
+        // accept side does, on a dial-sized budget.
+        if !self.inner.relay_transport && !wait_direct(&conn, PATH_SELECT_TIMEOUT).await {
             bail!("{RELAY_REFUSED}");
         }
         if let Err(error) = send_one(&conn, &bytes).await {
