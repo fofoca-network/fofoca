@@ -13,7 +13,7 @@ use fofoca::protocol::{
     DirectorySelection, LookupOpts, LookupSet, MeshConfig, MeshName, RelayChoice, RelaySelection,
     TransportPolicy, resolve_lookups,
 };
-use fofoca::runtime::{CreateParams, JoinParams, Node, Resolved, TopicParams};
+use fofoca::runtime::{CreateParams, JoinParams, Node, Resolved};
 use fofoca::runtime::{SetupKind, SetupParams, derive_topic_mesh_config, setup_mesh};
 use fofoca::util::tuning::GOSSIP_ACTIVE_VIEW_CAPACITY;
 use serde::Deserialize;
@@ -217,6 +217,29 @@ pub async fn join(opts: &Opts, sink: Arc<dyn NodeSink>) -> Result<Session> {
     Ok(Session { node, inbound })
 }
 
+impl Session {
+    /// Push a request into the event loop and await its reply — the dance
+    /// every consumer of the pipe (the wasm peer, the task runner's native
+    /// side, the chat example) had re-implemented on its own.
+    ///
+    /// # Errors
+    /// The event loop stopped, or dropped the reply.
+    pub async fn request<T>(
+        &self,
+        build: impl FnOnce(tokio::sync::oneshot::Sender<T>) -> crate::Request,
+    ) -> Result<T, String> {
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        self.node
+            .sender()
+            .send(build(reply))
+            .await
+            .map_err(|_| "the event loop stopped".to_owned())?;
+        answer
+            .await
+            .map_err(|_| "the event loop dropped the reply".to_owned())
+    }
+}
+
 /// Broadcast `Left` and wind the loop down, after a brief grace period: a gossip
 /// broadcast is fire-and-forget, so leaving the instant after a send could race
 /// the frames out of existence.
@@ -266,15 +289,6 @@ pub fn resolve_kind(opts: &Opts, nickname: Option<Nickname>) -> Result<(SetupKin
             // one string are two different meshes. `relay_urls` and
             // `relay_transport` are the two knobs that *do* change the id,
             // and every member must pass the same values.
-            if opts.relay_urls.is_empty() && !opts.relay_transport {
-                let Resolved { kind, author, .. } = TopicParams {
-                    string: string.clone(),
-                    nickname,
-                }
-                .resolve()
-                .context("resolving the topic string")?;
-                return Ok((kind, author));
-            }
             let config = MeshConfig {
                 lookups: LookupOpts {
                     mdns: true,
@@ -580,5 +594,36 @@ mod tests {
                 panic!("no selector must resolve to SetupKind::Create")
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod resolve_tests {
+    use super::*;
+    use fofoca::runtime::TopicParams;
+
+    /// The collapse of the bare-topic early return rests on this identity: a
+    /// tab and a terminal meet only if the no-override arm keeps deriving the
+    /// exact id `TopicParams::resolve` always produced.
+    #[test]
+    fn a_bare_topic_still_derives_the_public_preset_mesh() {
+        let opts = Opts {
+            topic: Some("standup".to_owned()),
+            ..Opts::default()
+        };
+        let (kind, _author) = resolve_kind(&opts, None).expect("resolve");
+        let SetupKind::Topic { mesh, .. } = kind else {
+            panic!("a topic resolves to a topic kind");
+        };
+        let Resolved { kind: baseline, .. } = TopicParams {
+            string: "standup".to_owned(),
+            nickname: None,
+        }
+        .resolve()
+        .expect("baseline");
+        let SetupKind::Topic { mesh: expected, .. } = baseline else {
+            panic!("the baseline is a topic kind");
+        };
+        assert_eq!(mesh.to_string(), expected.to_string());
     }
 }
