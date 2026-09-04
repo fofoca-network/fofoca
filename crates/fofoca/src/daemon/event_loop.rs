@@ -715,14 +715,35 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
             // latency this change was meant to leave untouched.
             found_rival = beacon::probe_verdict(&mut rival_probe) => {
                 state.idle.external += 1;
-                let claimed = beacon::claim_after_probe(&rendezvous_params, &endpoint, &mut rendezvous, found_rival).await;
-                if claimed {
-                    schedule_rival_recheck(&mut state, cohost, &rendezvous_params, &endpoint);
-                } else if found_rival {
-                    // A rival holds the identity: this arbitration epoch is
-                    // settled, so a later claim (the rival died) starts the
-                    // re-check backoff from its brisk base again.
-                    state.rival_recheck_rounds = 0;
+                // One free verdict is not enough to claim: a live beacon's
+                // rival re-check periodically releases the rendezvous to
+                // re-probe it, and a probe landing inside that window reads
+                // "free" while a holder is about to re-bind. Claiming on it
+                // stands up a rival copy, and two copies shed each other
+                // longer than most joins are willing to wait. Two frees in a
+                // row (the next reclaim tick re-probes) squares those odds
+                // away; a genuinely dead beacon costs one extra probe round.
+                if !found_rival && !state.rendezvous_probe_read_free {
+                    state.rendezvous_probe_read_free = true;
+                } else {
+                    state.rendezvous_probe_read_free = false;
+                    let claimed = beacon::claim_after_probe(&rendezvous_params, &endpoint, &mut rendezvous, found_rival).await;
+                    if claimed {
+                        // Two consecutive free probes preceded this claim, so
+                        // the simultaneous-claim window the brisk first
+                        // re-check exists for has already been ruled out
+                        // twice. Start the backoff a few rounds in: each
+                        // early shed costs every webrtc-shaped member a full
+                        // JSEP-and-graft cycle, and a real split still heals
+                        // at the backstop cadence.
+                        state.rival_recheck_rounds = state.rival_recheck_rounds.max(3);
+                        schedule_rival_recheck(&mut state, cohost, &rendezvous_params, &endpoint);
+                    } else if found_rival {
+                        // A rival holds the identity: this arbitration epoch is
+                        // settled, so a later claim (the rival died) starts the
+                        // re-check backoff from its brisk base again.
+                        state.rival_recheck_rounds = 0;
+                    }
                 }
             }
             _ = intervals.reclaim.tick() => {
