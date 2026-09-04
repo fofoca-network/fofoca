@@ -119,11 +119,15 @@ macro_rules! digest_newtype {
                         bytes.len()
                     );
                 }
+                // Decode from bytes, never by slicing the `&str`: the guard
+                // above counts bytes, and a slice that lands inside a
+                // multibyte char panics. Any non-hex byte is a plain error.
                 let mut out = [0u8; 32];
-                for (index, slot) in out.iter_mut().enumerate() {
-                    let pair = &text[index * 2..index * 2 + 2];
-                    *slot = u8::from_str_radix(pair, 16)
-                        .map_err(|_| anyhow::anyhow!(concat!("a ", $what, " is hex")))?;
+                for (slot, pair) in out.iter_mut().zip(bytes.chunks_exact(2)) {
+                    let (Some(high), Some(low)) = (hex_nibble(pair[0]), hex_nibble(pair[1])) else {
+                        bail!(concat!("a ", $what, " is hex"));
+                    };
+                    *slot = (high << 4) | low;
                 }
                 Ok(Self(out))
             }
@@ -135,6 +139,17 @@ macro_rules! digest_newtype {
             }
         }
     };
+}
+
+/// One ASCII hex digit to its value, either case. `None` for anything else,
+/// a UTF-8 continuation byte included.
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 digest_newtype!(ChunkHash, "chunk hash");
@@ -925,6 +940,18 @@ mod tests {
         assert_eq!(hash.to_hex().len(), 64);
         assert!(ChunkHash::from_hex("nope").is_err());
         assert!(ChunkHash::from_hex(&"z".repeat(64)).is_err());
+    }
+
+    /// The length guard counts bytes but the old decoder sliced the `&str`,
+    /// which panics at a char boundary. A store directory or a `binds.tsv`
+    /// row is where such a name arrives from, and both are documented to
+    /// degrade a row at a time rather than abort.
+    #[test]
+    fn non_ascii_hex_of_the_right_byte_length_errors_rather_than_panics() {
+        let text = format!("{}a", "€".repeat(21));
+        assert_eq!(text.len(), 64);
+        assert!(ChunkHash::from_hex(&text).is_err());
+        assert!(Root::from_hex(&text).is_err());
     }
 
     /// A root and a chunk hash are different types *and* different values, even
