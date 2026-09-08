@@ -44,7 +44,7 @@ pub struct FofocaOpts {
     pub mdns: c_int,
     pub dht: c_int,
     /// The relay as a lookup.
-    pub relay: c_int,
+    pub relay_lookup: c_int,
     /// The relay as a transport; off keeps all data peer to peer.
     pub relay_transport: c_int,
     /// Comma-separated custom relay ladder; NULL ⇒ the default ladder.
@@ -257,7 +257,7 @@ pub unsafe extern "C" fn fofoca_open(opts: *const FofocaOpts) -> *mut FofocaPipe
             public: opts.is_public != 0,
             mdns: opts.mdns != 0,
             dht: opts.dht != 0,
-            relay: opts.relay != 0,
+            relay_lookup: opts.relay_lookup != 0,
             relay_transport: opts.relay_transport != 0,
             relay_urls,
             transports: fofoca_pipe::TransportFlags {

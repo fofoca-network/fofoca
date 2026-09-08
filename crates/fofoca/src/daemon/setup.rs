@@ -83,14 +83,14 @@ fn rendezvous_params(
     // beacon's own liveness self-monitor correct it off the event loop
     // via `rung_tx` if rung 0 turns out to be unreachable. Empty for
     // private / relay-disabled ⇒ `None`.
-    let bootstrap_relay = relay_ladder(&lookups.relay).first().cloned();
+    let bootstrap_relay = relay_ladder(&lookups.relay_lookup).first().cloned();
     RendezvousParams {
         topic_id,
         secret: mesh.rendezvous_secret(),
         bind_ports,
         id: mesh.rendezvous_id(),
         lookups: lookups.clone(),
-        relay_transport: mesh.config.transport.relay,
+        relay_transport: mesh.config.transport.relay_transport,
         bootstrap_relay,
         rung_tx,
     }
@@ -369,7 +369,7 @@ struct SetupBuild<'a> {
     /// `Mutex` is bought purely for the `Sync` it carries.
     protocols: std::sync::Mutex<CallerProtocols>,
     rung_tx: &'a watch::Sender<Option<RelayUrl>>,
-    /// The mesh's `transport.relay`, for the accept gates.
+    /// The mesh's `transport.relay_transport`, for the accept gates.
     relay_transport: bool,
 }
 
@@ -460,14 +460,14 @@ pub async fn setup_mesh(kind: SetupKind, params: SetupParams) -> Result<EventLoo
     // yet, and an invalid one would produce an id every joiner rejects.
     mesh_config.validate()?;
     let lookups = mesh_config.lookups.clone();
-    let relay_transport = mesh_config.transport.relay;
+    let relay_transport = mesh_config.transport.relay_transport;
 
     // The off-loop rung channel: the backgrounded startup probe and the
     // beacon's liveness self-monitor publish a chosen rung here; the
     // event loop applies it (re-register + re-home) without ever running
     // a ladder walk on the sole loop. Initialized to the optimistic
     // rung 0 (empty ladder ⇒ `None`).
-    let ladder = relay_ladder(&lookups.relay);
+    let ladder = relay_ladder(&lookups.relay_lookup);
     let (rung_tx, rung_rx) = watch::channel(ladder.first().cloned());
 
     let (unicast_rx, unicast_acceptor) = unicast_inbox(relay_transport);

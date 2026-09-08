@@ -12,7 +12,7 @@
  *   int is_public;           // offset 32
  *   int mdns;                // offset 36
  *   int dht;                 // offset 40
- *   int relay;               // offset 44
+ *   int relay_lookup;        // offset 44
  *   int relay_transport;     // offset 48, then 4 bytes of padding
  *   const char *relay_urls;  // offset 56
  *   int disable_ip;          // offset 64
@@ -34,7 +34,7 @@ const NAME_OFFSET = 24
 const IS_PUBLIC_OFFSET = 32
 const MDNS_OFFSET = 36
 const DHT_OFFSET = 40
-const RELAY_OFFSET = 44
+const RELAY_LOOKUP_OFFSET = 44
 const RELAY_TRANSPORT_OFFSET = 48
 const RELAY_URLS_OFFSET = 56
 const DISABLE_IP_OFFSET = 64
@@ -94,7 +94,7 @@ export function encodeOpts(opts: WireOpts, pointerOf: (buffer: Uint8Array) => bi
   view.setInt32(IS_PUBLIC_OFFSET, opts.isPublic ? 1 : 0, LITTLE_ENDIAN)
   view.setInt32(MDNS_OFFSET, opts.mdns ? 1 : 0, LITTLE_ENDIAN)
   view.setInt32(DHT_OFFSET, opts.dht ? 1 : 0, LITTLE_ENDIAN)
-  view.setInt32(RELAY_OFFSET, opts.relay ? 1 : 0, LITTLE_ENDIAN)
+  view.setInt32(RELAY_LOOKUP_OFFSET, opts.relayLookup ? 1 : 0, LITTLE_ENDIAN)
   view.setInt32(RELAY_TRANSPORT_OFFSET, opts.relayTransport ? 1 : 0, LITTLE_ENDIAN)
   field(RELAY_URLS_OFFSET, opts.relayUrls)
   view.setInt32(DISABLE_IP_OFFSET, opts.disableIp ? 1 : 0, LITTLE_ENDIAN)

@@ -223,7 +223,7 @@ pub async fn build_endpoint(
     let network = lookups.network_label();
     let mut builder = if lookups.is_loopback() {
         debug_assert!(
-            !lookups.mdns && !lookups.dht && lookups.relay == RelayChoice::Disabled,
+            !lookups.mdns && !lookups.dht && lookups.relay_lookup == RelayChoice::Disabled,
             "loopback-only mesh must resolve to all-off lookups"
         );
         // Loopback-only = strictly loopback, **zero external network calls**.
@@ -257,7 +257,7 @@ pub async fn build_endpoint(
         // rustls crypto provider. The mDNS / DHT address-lookups are
         // wired **after** bind (below) — in iroh 1.0 they live in
         // companion crates and need the bound endpoint's id.
-        Endpoint::builder(presets::Minimal).relay_mode(relay::relay_mode(&lookups.relay))
+        Endpoint::builder(presets::Minimal).relay_mode(relay::relay_mode(&lookups.relay_lookup))
     };
 
     if let Some(secret_key) = secret_key {
@@ -355,7 +355,7 @@ pub async fn build_endpoint(
         network,
         mdns = lookups.mdns,
         dht = lookups.dht,
-        relay = ?lookups.relay,
+        relay = ?lookups.relay_lookup,
         role = if is_beacon { "beacon" } else { "peer" },
         endpoint_id = %endpoint.id(),
         "endpoint bound"
@@ -415,7 +415,7 @@ pub fn check_injected_identity(
         .addrs
         .iter()
         .any(|addr| matches!(addr, iroh::TransportAddr::Relay(_)));
-    let mesh_wants_relay = mesh_lookups.relay != RelayChoice::Disabled;
+    let mesh_wants_relay = mesh_lookups.relay_lookup != RelayChoice::Disabled;
     if mesh_wants_relay && !endpoint_has_relay {
         tracing::warn!(
             "injected endpoint advertises no relay address but the mesh rendezvous \
@@ -625,7 +625,7 @@ pub(crate) fn build_mesh(
         crate::transport::IceProfile,
     )>,
     protocols: Vec<(Vec<u8>, Box<dyn iroh::protocol::DynProtocolHandler>)>,
-    // The mesh's `transport.relay`: with it off, every inbound gossip
+    // The mesh's `transport.relay_transport`: with it off, every inbound gossip
     // connection is held until iroh selects a direct path on it.
     relay_transport: bool,
 ) -> (Gossip, Router) {

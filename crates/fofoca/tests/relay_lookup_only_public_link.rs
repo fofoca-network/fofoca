@@ -158,11 +158,13 @@ async fn spawn_with(
             lookups: LookupOpts {
                 mdns: false,
                 dht: false,
-                relay: RelayChoice::Custom(vec![relay.clone()]),
+                relay_lookup: RelayChoice::Custom(vec![relay.clone()]),
             },
             password: None,
             issuer_pubkey: None,
-            transport: TransportPolicy { relay: false },
+            transport: TransportPolicy {
+                relay_transport: false,
+            },
         },
     )
     .expect("derive");

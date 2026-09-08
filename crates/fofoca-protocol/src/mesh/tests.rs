@@ -13,7 +13,7 @@ fn custom_config() -> MeshConfig {
         lookups: LookupOpts {
             mdns: true,
             dht: false,
-            relay: RelayChoice::Custom(vec![
+            relay_lookup: RelayChoice::Custom(vec![
                 "https://a.example".parse().unwrap(),
                 "https://b.example".parse().unwrap(),
             ]),

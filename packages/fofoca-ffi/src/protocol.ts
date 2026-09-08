@@ -15,7 +15,7 @@ export interface WireOpts {
   readonly isPublic: boolean
   readonly mdns: boolean
   readonly dht: boolean
-  readonly relay: boolean
+  readonly relayLookup: boolean
   readonly relayTransport: boolean
   readonly relayUrls: string | null
   readonly disableIp: boolean

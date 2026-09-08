@@ -78,7 +78,7 @@ pub struct OffloadRequest {
 /// file is unreadable or exceeds `MAX_BLOB_BYTES`).
 /// # Panics
 /// Panics if an internal invariant is violated.
-/// `relay_transport` must be the mesh's `transport.relay` (`mesh.transport().relay`):
+/// `relay_transport` must be the mesh's `transport.relay_transport` (`mesh.transport().relay_transport`):
 /// the ticket carries it so the fetcher applies the same rule, and a per-node
 /// value would let one member serve over the relay for everyone.
 pub async fn offload(

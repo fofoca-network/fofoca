@@ -184,7 +184,7 @@ pub fn derive_topic_mesh(string: &str) -> Result<Mesh> {
         LookupOpts {
             mdns: true,
             dht: false,
-            relay: crate::protocol::mesh::RelayChoice::Disabled,
+            relay_lookup: crate::protocol::mesh::RelayChoice::Disabled,
         }
     } else {
         LookupOpts::public_preset()
@@ -339,13 +339,15 @@ mod topic_derivation_tests {
                 lookups: LookupOpts::public_preset(),
                 password: None,
                 issuer_pubkey: None,
-                transport: TransportPolicy { relay: true },
+                transport: TransportPolicy {
+                    relay_transport: true,
+                },
             },
         )
         .expect("derive");
         assert_ne!(lookup_only.to_string(), relayed.to_string());
-        assert!(!lookup_only.transport().relay);
-        assert!(relayed.transport().relay);
+        assert!(!lookup_only.transport().relay_transport);
+        assert!(relayed.transport().relay_transport);
     }
 
     /// A minted config gets the same cross-field check a decoded id gets;
@@ -356,7 +358,9 @@ mod topic_derivation_tests {
             lookups: LookupOpts::loopback(),
             password: None,
             issuer_pubkey: None,
-            transport: TransportPolicy { relay: true },
+            transport: TransportPolicy {
+                relay_transport: true,
+            },
         };
         assert!(derive_topic_mesh_config("standup", config).is_err());
     }

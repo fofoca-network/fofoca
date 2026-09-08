@@ -48,11 +48,11 @@ export interface CreateOpts {
   mdns?: boolean
   dht?: boolean
   /** The relay as a lookup: peers find each other through it. */
-  relay?: boolean
+  relayLookup?: boolean
   /**
    * The relay as a transport: payload may fall back to it. Off by default,
    * so all data is peer to peer and the relay is a meeting point only. Needs
-   * `relay` (or `public`). Baked into the mesh id, so joiners inherit it.
+   * `relayLookup` (or `public`). Baked into the mesh id, so joiners inherit it.
    */
   relayTransport?: boolean
   /**

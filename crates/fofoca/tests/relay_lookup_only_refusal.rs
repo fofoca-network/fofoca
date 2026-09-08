@@ -113,13 +113,11 @@ async fn spawn(
             lookups: LookupOpts {
                 mdns: false,
                 dht: false,
-                relay: RelayChoice::Custom(vec![relay.clone()]),
+                relay_lookup: RelayChoice::Custom(vec![relay.clone()]),
             },
             password: None,
             issuer_pubkey: None,
-            transport: TransportPolicy {
-                relay: relay_transport,
-            },
+            transport: TransportPolicy { relay_transport },
         },
     )
     .expect("derive a relay-only mesh");

@@ -160,9 +160,7 @@ impl LightCyclesPeer {
                 lookups: LookupOpts::public_preset(),
                 password: None,
                 issuer_pubkey: None,
-                transport: TransportPolicy {
-                    relay: relay_transport,
-                },
+                transport: TransportPolicy { relay_transport },
             },
         )
         .map_err(to_js_error)?;

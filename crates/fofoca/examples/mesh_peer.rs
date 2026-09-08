@@ -107,12 +107,12 @@ async fn main() -> anyhow::Result<()> {
                 lookups: LookupOpts {
                     mdns: true,
                     dht: true,
-                    relay: ladder,
+                    relay_lookup: ladder,
                 },
                 password: None,
                 issuer_pubkey: None,
                 transport: TransportPolicy {
-                    relay: std::env::var_os("MESH_RELAY_TRANSPORT")
+                    relay_transport: std::env::var_os("MESH_RELAY_TRANSPORT")
                         .is_some_and(|value| value == "on"),
                 },
             },
@@ -149,7 +149,7 @@ async fn main() -> anyhow::Result<()> {
                 // Baked into the id, so a joiner inherits it: only the
                 // creator reads the env var.
                 transport: TransportPolicy {
-                    relay: std::env::var_os("MESH_RELAY_TRANSPORT")
+                    relay_transport: std::env::var_os("MESH_RELAY_TRANSPORT")
                         .is_some_and(|value| value == "on"),
                 },
             },

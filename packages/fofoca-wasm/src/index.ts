@@ -58,7 +58,7 @@ export async function create(opts: CreateOpts & WasmOpts): Promise<Mesh> {
       public: opts.public ?? false,
       mdns: opts.mdns ?? false,
       dht: opts.dht ?? false,
-      relay: opts.relay ?? false,
+      relayLookup: opts.relayLookup ?? false,
       relayTransport: opts.relayTransport ?? false,
       relayUrls: opts.relayUrls ?? [],
       transports: opts.transports ?? {},

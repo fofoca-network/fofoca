@@ -68,7 +68,7 @@ pub(crate) struct RendezvousParams {
     /// address-lookups (or a joiner using only mDNS/DHT could never
     /// resolve it) — see `beacon_lookups`.
     pub(crate) lookups: LookupOpts,
-    /// The mesh's `transport.relay`. With it off, the beacon holds every
+    /// The mesh's `transport.relay_transport`. With it off, the beacon holds every
     /// inbound gossip connection — a joiner's first link — until iroh selects
     /// a direct path on it, so no frame ever crosses the relay.
     pub(crate) relay_transport: bool,
@@ -445,7 +445,7 @@ fn beacon_lookups(params: &RendezvousParams) -> LookupOpts {
     LookupOpts {
         mdns: params.lookups.mdns,
         dht: params.lookups.dht,
-        relay: params
+        relay_lookup: params
             .bootstrap_relay
             .clone()
             .map_or(RelayChoice::Disabled, |rung| {
@@ -692,7 +692,7 @@ async fn claim(
     // stall rendezvous bridging. Spawned whenever relay is enabled
     // (public + a non-empty ladder) — *not* gated on currently holding a
     // rung, so a relay-less beacon keeps probing to rediscover one.
-    let ladder = crate::lookup::relay_ladder(&params.lookups.relay);
+    let ladder = crate::lookup::relay_ladder(&params.lookups.relay_lookup);
     let monitors_relay = !params.lookups.is_loopback() && !ladder.is_empty();
     let monitor_endpoint = endpoint.clone();
     let monitor_homed = params.bootstrap_relay.is_some();

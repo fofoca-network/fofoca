@@ -16,7 +16,7 @@ export const USAGE = `usage: bun src/main.ts <how to reach the mesh> [options]
 
   create-only discovery flags:
     --public            the all-on preset (mDNS + DHT + relay)
-    --mdns --dht --relay  individual lookups; none of them = loopback only
+    --mdns --dht --relay-lookup  individual lookups; none of them = loopback only
     --name <string>     the mesh name
 
   options:
@@ -47,7 +47,7 @@ export function parseChatArgs(argv: string[]): ChatArgs {
       public: { type: 'boolean' },
       mdns: { type: 'boolean' },
       dht: { type: 'boolean' },
-      relay: { type: 'boolean' },
+      'relay-lookup': { type: 'boolean' },
       'relay-url': { type: 'string', multiple: true },
       name: { type: 'string' },
       nick: { type: 'string' },
@@ -61,9 +61,9 @@ export function parseChatArgs(argv: string[]): ChatArgs {
     throw new Error('pass exactly one of --topic, --id or --create')
   }
 
-  const discoveryFlags = values.public || values.mdns || values.dht || values.relay
+  const discoveryFlags = values.public || values.mdns || values.dht || values['relay-lookup']
   if (values.create !== true && (discoveryFlags === true || values.name !== undefined)) {
-    throw new Error('--public/--mdns/--dht/--relay/--name only apply to --create')
+    throw new Error('--public/--mdns/--dht/--relay-lookup/--name only apply to --create')
   }
 
   // The ladder is part of the mesh id: minted on create, mixed into a topic
@@ -96,7 +96,7 @@ export function parseChatArgs(argv: string[]): ChatArgs {
         ...(values.public === undefined ? {} : { public: values.public }),
         ...(values.mdns === undefined ? {} : { mdns: values.mdns }),
         ...(values.dht === undefined ? {} : { dht: values.dht }),
-        ...(values.relay === undefined ? {} : { relay: values.relay }),
+        ...(values['relay-lookup'] === undefined ? {} : { relayLookup: values['relay-lookup'] }),
         ...(relayUrls === undefined ? {} : { relayUrls }),
       },
     }

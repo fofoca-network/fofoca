@@ -10,7 +10,7 @@ const BASE: WireOpts = {
   isPublic: false,
   mdns: false,
   dht: false,
-  relay: false,
+  relayLookup: false,
   relayTransport: false,
   relayUrls: null,
   disableIp: false,
@@ -67,7 +67,7 @@ describe('encodeOpts', () => {
     expect(view.getInt32(32, true)).toBe(1) // is_public
     expect(view.getInt32(36, true)).toBe(0) // mdns
     expect(view.getInt32(40, true)).toBe(1) // dht
-    expect(view.getInt32(44, true)).toBe(0) // relay
+    expect(view.getInt32(44, true)).toBe(0) // relay_lookup
     expect(view.getInt32(48, true)).toBe(0) // relay_transport
     expect(view.getBigUint64(56, true)).toBe(0n) // relay_urls
     expect(view.getInt32(64, true)).toBe(0) // disable_ip
@@ -78,11 +78,11 @@ describe('encodeOpts', () => {
   test('relay transport and a custom ladder', () => {
     const pointers = fakePointers()
     const { struct, keepAlive } = encodeOpts(
-      { ...BASE, relay: true, relayTransport: true, relayUrls: 'http://a/,http://b/' },
+      { ...BASE, relayLookup: true, relayTransport: true, relayUrls: 'http://a/,http://b/' },
       pointers.pointerOf,
     )
     const view = new DataView(struct.buffer)
-    expect(view.getInt32(44, true)).toBe(1) // relay
+    expect(view.getInt32(44, true)).toBe(1) // relay_lookup
     expect(view.getInt32(48, true)).toBe(1) // relay_transport
     expect(view.getBigUint64(56, true)).toBe(0x1000n) // relay_urls
     expect(keepAlive.length).toBe(1)

@@ -40,7 +40,7 @@ default set" — it resolves to a loopback mesh nothing off this machine can
 reach. That is what makes the offline two-peer test possible, and it is
 surprising everywhere else. Pass `public: true`, or name the legs you want.
 
-**The relay carries no data unless you say so.** `relay` (and `public`) use
+**The relay carries no data unless you say so.** `relayLookup` (and `public`) use
 the relay as a *lookup*: a meeting point where peers find each other. Payload
 then goes peer to peer, and a pair that cannot open a direct path stays
 unlinked for data. `relayTransport: true` lets payload fall back to the relay.

@@ -30,13 +30,13 @@ pub enum RelayChoice {
 
 /// The lookup allowlist baked into the mesh id. `mdns`/`dht` are the
 /// enabled iroh address-lookups (both resolve the same seed-derived
-/// `rendezvous_id`); `relay` is the connectivity relay (see
+/// `rendezvous_id`); `relay_lookup` is the connectivity relay (see
 /// [`RelayChoice`]). An all-off set is a loopback-only mesh.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LookupOpts {
     pub mdns: bool,
     pub dht: bool,
-    pub relay: RelayChoice,
+    pub relay_lookup: RelayChoice,
 }
 
 /// Wire ceiling on a custom relay ladder, so a forged id can't blow up
@@ -53,7 +53,7 @@ impl LookupOpts {
         LookupOpts {
             mdns: false,
             dht: false,
-            relay: RelayChoice::Disabled,
+            relay_lookup: RelayChoice::Disabled,
         }
     }
 
@@ -64,14 +64,14 @@ impl LookupOpts {
         LookupOpts {
             mdns: true,
             dht: true,
-            relay: RelayChoice::Pinned,
+            relay_lookup: RelayChoice::Pinned,
         }
     }
 
     /// True when nothing reaches off-machine — the mesh is loopback-only.
     #[must_use]
     pub fn is_loopback(&self) -> bool {
-        !self.mdns && !self.dht && self.relay == RelayChoice::Disabled
+        !self.mdns && !self.dht && self.relay_lookup == RelayChoice::Disabled
     }
 
     /// Human/JSON label for the mesh's reach. Derived from the lookups —
@@ -100,13 +100,13 @@ impl LookupOpts {
         if self.dht {
             flags |= 0b0010;
         }
-        match &self.relay {
+        match &self.relay_lookup {
             RelayChoice::Disabled => {}
             RelayChoice::Pinned => flags |= 0b0100,
             RelayChoice::Custom(_) => flags |= 0b0100 | 0b1000,
         }
         buf.push(flags);
-        if let RelayChoice::Custom(ladder) = &self.relay {
+        if let RelayChoice::Custom(ladder) = &self.relay_lookup {
             // The ladder is created locally and bounded by the CLI / library API,
             // so this cast and the lengths below always fit.
             buf.push(u8::try_from(ladder.len()).expect("relay ladder bounded by MAX_RELAY_LADDER"));
@@ -133,7 +133,7 @@ impl LookupOpts {
         if relay_custom && !relay_enabled {
             bail!("custom-relay bit set without relay-enabled bit");
         }
-        let relay = if !relay_enabled {
+        let relay_lookup = if !relay_enabled {
             RelayChoice::Disabled
         } else if !relay_custom {
             RelayChoice::Pinned
@@ -148,7 +148,11 @@ impl LookupOpts {
             }
             RelayChoice::Custom(decode_relay_ladder(bytes, pos, count)?)
         };
-        Ok(LookupOpts { mdns, dht, relay })
+        Ok(LookupOpts {
+            mdns,
+            dht,
+            relay_lookup,
+        })
     }
 }
 
@@ -217,7 +221,7 @@ pub struct TransportPolicy {
     /// session stays unlinked for payload rather than relayed. `true` lets
     /// payload fall back to the relay; meaningless without a relay lookup, so
     /// rejected together with [`RelayChoice::Disabled`].
-    pub relay: bool,
+    pub relay_transport: bool,
 }
 
 /// Byte length of the Ed25519 issuer public key an invite-only mesh carries.
@@ -276,11 +280,11 @@ impl MeshConfig {
     /// the choke point every minted config passes before any network.
     ///
     /// # Errors
-    /// `transport.relay` is `true` while `lookups.relay` is `Disabled`.
+    /// `transport.relay_transport` is `true` while `lookups.relay_lookup` is `Disabled`.
     pub fn validate(&self) -> Result<()> {
-        if self.transport.relay && self.lookups.relay == RelayChoice::Disabled {
+        if self.transport.relay_transport && self.lookups.relay_lookup == RelayChoice::Disabled {
             bail!(
-                "transport.relay=on needs a relay lookup: with the relay disabled there is none to carry payload"
+                "transport.relay_transport=on needs a relay lookup: with the relay disabled there is none to carry payload"
             );
         }
         Ok(())
@@ -302,7 +306,7 @@ impl MeshConfig {
         if self.issuer_pubkey.is_some() {
             features |= FEATURE_INVITE_ONLY;
         }
-        if self.transport.relay {
+        if self.transport.relay_transport {
             features |= FEATURE_RELAY_TRANSPORT;
         }
         if features != 0 {
@@ -378,9 +382,7 @@ impl MeshConfig {
             lookups,
             password,
             issuer_pubkey,
-            transport: TransportPolicy {
-                relay: relay_transport,
-            },
+            transport: TransportPolicy { relay_transport },
         };
         config.validate()?;
         Ok(config)
@@ -515,18 +517,18 @@ pub fn validate_advertise(
 }
 
 /// The lookup flags the user selected on the CLI. `mdns`/`dht` are
-/// address-lookups; `relay` is the connectivity/relay-direct rendezvous
+/// address-lookups; `relay_lookup` is the connectivity/relay-direct rendezvous
 /// path.
 #[derive(Debug, Clone, Default)]
 pub struct LookupSet {
     pub mdns: bool,
     pub dht: bool,
-    pub relay: RelaySelection,
+    pub relay_lookup: RelaySelection,
 }
 
 impl LookupSet {
     fn any(&self) -> bool {
-        self.mdns || self.dht || self.relay.is_set()
+        self.mdns || self.dht || self.relay_lookup.is_set()
     }
 }
 
@@ -539,7 +541,7 @@ impl LookupSet {
 #[must_use]
 pub fn resolve_lookups(public: bool, lookups: LookupSet) -> LookupOpts {
     if lookups.any() {
-        let relay = match lookups.relay {
+        let relay_lookup = match lookups.relay_lookup {
             RelaySelection::Unset => RelayChoice::Disabled,
             RelaySelection::Default => RelayChoice::Pinned,
             RelaySelection::Named(ladder) => RelayChoice::Custom(ladder.as_urls().to_vec()),
@@ -547,7 +549,7 @@ pub fn resolve_lookups(public: bool, lookups: LookupSet) -> LookupOpts {
         LookupOpts {
             mdns: lookups.mdns,
             dht: lookups.dht,
-            relay,
+            relay_lookup,
         }
     } else if public {
         LookupOpts::public_preset()
@@ -649,8 +651,12 @@ mod lookup_tests {
         TransportPolicy, resolve_lookups,
     };
 
-    fn lookups(mdns: bool, dht: bool, relay: RelaySelection) -> LookupSet {
-        LookupSet { mdns, dht, relay }
+    fn lookups(mdns: bool, dht: bool, relay_lookup: RelaySelection) -> LookupSet {
+        LookupSet {
+            mdns,
+            dht,
+            relay_lookup,
+        }
     }
 
     #[test]
@@ -689,14 +695,18 @@ mod lookup_tests {
             !opts.is_loopback(),
             "a named relay makes the mesh reachable"
         );
-        assert!(matches!(opts.relay, RelayChoice::Custom(_)));
+        assert!(matches!(opts.relay_lookup, RelayChoice::Custom(_)));
     }
 
     #[test]
     fn public_no_flags_enables_all_three() {
         let opts = resolve_lookups(true, LookupSet::default());
         assert!(opts.mdns && opts.dht);
-        assert_eq!(opts.relay, RelayChoice::Pinned, "preset ⇒ pinned relay");
+        assert_eq!(
+            opts.relay_lookup,
+            RelayChoice::Pinned,
+            "preset ⇒ pinned relay"
+        );
         assert!(!opts.is_loopback());
     }
 
@@ -712,7 +722,7 @@ mod lookup_tests {
         let opts = resolve_lookups(false, lookups(true, false, RelaySelection::Unset));
         assert!(opts.mdns && !opts.dht);
         assert_eq!(
-            opts.relay,
+            opts.relay_lookup,
             RelayChoice::Disabled,
             "--mdns alone ⇒ relay off"
         );
@@ -723,7 +733,7 @@ mod lookup_tests {
     fn bare_relay_is_pinned_and_suppresses_lookups() {
         let opts = resolve_lookups(false, lookups(false, false, RelaySelection::Default));
         assert!(!opts.mdns && !opts.dht);
-        assert_eq!(opts.relay, RelayChoice::Pinned);
+        assert_eq!(opts.relay_lookup, RelayChoice::Pinned);
     }
 
     #[test]
@@ -732,7 +742,7 @@ mod lookup_tests {
         let rung1: iroh_base::RelayUrl = "https://b.example".parse().unwrap();
         let ladder: RelayLadder = "https://a.example,https://b.example".parse().unwrap();
         let opts = resolve_lookups(false, lookups(false, false, RelaySelection::Named(ladder)));
-        assert_eq!(opts.relay, RelayChoice::Custom(vec![rung0, rung1]));
+        assert_eq!(opts.relay_lookup, RelayChoice::Custom(vec![rung0, rung1]));
     }
 
     #[test]
@@ -755,7 +765,7 @@ mod lookup_tests {
             lookups: LookupOpts {
                 mdns: true,
                 dht: false,
-                relay: RelayChoice::Custom(vec![
+                relay_lookup: RelayChoice::Custom(vec![
                     "https://a.example".parse().unwrap(),
                     "https://b.example".parse().unwrap(),
                 ]),
@@ -819,7 +829,9 @@ mod lookup_tests {
     #[test]
     fn config_round_trips_relay_as_transport() {
         let config = MeshConfig {
-            transport: TransportPolicy { relay: true },
+            transport: TransportPolicy {
+                relay_transport: true,
+            },
             ..MeshConfig::public_preset()
         };
         let bytes = config.to_bytes();
@@ -838,8 +850,13 @@ mod lookup_tests {
     fn relay_is_lookup_only_by_default_and_on_every_pre_policy_id() {
         // An id minted before the policy existed has no feature byte; it now
         // reads as lookup only, the default, with its bytes and topic intact.
-        assert!(!MeshConfig::public_preset().transport.relay);
-        assert!(!MeshConfig::from_bytes(&[0b0111]).unwrap().transport.relay);
+        assert!(!MeshConfig::public_preset().transport.relay_transport);
+        assert!(
+            !MeshConfig::from_bytes(&[0b0111])
+                .unwrap()
+                .transport
+                .relay_transport
+        );
     }
 
     #[test]
@@ -848,7 +865,9 @@ mod lookup_tests {
             lookups: LookupOpts::public_preset(),
             password: Some([0xA5u8; 16]),
             issuer_pubkey: None,
-            transport: TransportPolicy { relay: true },
+            transport: TransportPolicy {
+                relay_transport: true,
+            },
         };
         let decoded = MeshConfig::from_bytes(&config.to_bytes()).unwrap();
         assert_eq!(decoded, config);
@@ -857,7 +876,9 @@ mod lookup_tests {
     #[test]
     fn config_rejects_relay_transport_on_without_a_relay_lookup() {
         let config = MeshConfig {
-            transport: TransportPolicy { relay: true },
+            transport: TransportPolicy {
+                relay_transport: true,
+            },
             ..MeshConfig::loopback()
         };
         assert!(config.validate().is_err(), "no relay to carry payload");

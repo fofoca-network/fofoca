@@ -217,7 +217,7 @@ describe('wire opts', () => {
       isPublic: false,
       mdns: false,
       dht: false,
-      relay: false,
+      relayLookup: false,
       relayTransport: false,
       relayUrls: null,
       disableIp: false,

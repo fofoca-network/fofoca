@@ -33,7 +33,7 @@ use crate::wire::{DEPARTURE_GRACE, INBOUND_CAP};
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
 #[expect(
     clippy::struct_excessive_bools,
-    reason = "four independent discovery choices (public/mdns/dht/relay) plus the relay's transport role; they are flat inputs, not a state machine to model as an enum"
+    reason = "four independent discovery choices (public/mdns/dht/relay lookup) plus the relay's transport role; they are flat inputs, not a state machine to model as an enum"
 )]
 pub struct Opts {
     /// A `mesh id` to join.
@@ -50,10 +50,10 @@ pub struct Opts {
     pub mdns: bool,
     pub dht: bool,
     /// The relay as a **lookup**: members find each other through it.
-    pub relay: bool,
+    pub relay_lookup: bool,
     /// The relay as a **transport**: payload may fall back to it. Off by
     /// default, so all data is peer to peer and the relay serves lookup
-    /// alone. Needs `relay` (or `public`); baked into the mesh id, so a
+    /// alone. Needs `relay_lookup` (or `public`); baked into the mesh id, so a
     /// joiner inherits it. Ignored when joining by id.
     pub relay_transport: bool,
     /// A custom relay **ladder** (ordered URLs, first preferred), replacing
@@ -293,12 +293,12 @@ pub fn resolve_kind(opts: &Opts, nickname: Option<Nickname>) -> Result<(SetupKin
                 lookups: LookupOpts {
                     mdns: true,
                     dht: true,
-                    relay: relay_choice(&opts.relay_urls, true)?,
+                    relay_lookup: relay_choice(&opts.relay_urls, true)?,
                 },
                 password: None,
                 issuer_pubkey: None,
                 transport: TransportPolicy {
-                    relay: opts.relay_transport,
+                    relay_transport: opts.relay_transport,
                 },
             };
             let mesh =
@@ -315,7 +315,7 @@ pub fn resolve_kind(opts: &Opts, nickname: Option<Nickname>) -> Result<(SetupKin
             let lookups = LookupSet {
                 mdns: opts.mdns,
                 dht: opts.dht,
-                relay: if opts.relay {
+                relay_lookup: if opts.relay_lookup {
                     RelaySelection::Default
                 } else {
                     RelaySelection::Unset
@@ -323,14 +323,14 @@ pub fn resolve_kind(opts: &Opts, nickname: Option<Nickname>) -> Result<(SetupKin
             };
             let mut resolved_lookups = resolve_lookups(opts.public, lookups);
             if !opts.relay_urls.is_empty() {
-                resolved_lookups.relay = relay_choice(&opts.relay_urls, true)?;
+                resolved_lookups.relay_lookup = relay_choice(&opts.relay_urls, true)?;
             }
             let config = MeshConfig {
                 lookups: resolved_lookups,
                 password: None,
                 issuer_pubkey: None,
                 transport: TransportPolicy {
-                    relay: opts.relay_transport,
+                    relay_transport: opts.relay_transport,
                 },
             };
             config
@@ -431,7 +431,7 @@ mod tests {
         }
     }
 
-    /// The relay's two roles are two options: `relay` finds peers through
+    /// The relay's two roles are two options: `relay_lookup` finds peers through
     /// it, `relay_transport` lets payload ride it. The second is off unless
     /// named, and meaningless without the first.
     #[test]
@@ -447,11 +447,11 @@ mod tests {
         let SetupKind::Create { config, .. } = kind else {
             panic!("no selector must resolve to SetupKind::Create")
         };
-        assert!(!config.transport.relay);
+        assert!(!config.transport.relay_transport);
 
         let (relayed, _) = resolve_kind(
             &Opts {
-                relay: true,
+                relay_lookup: true,
                 relay_transport: true,
                 ..opts()
             },
@@ -465,7 +465,7 @@ mod tests {
         else {
             panic!("no selector must resolve to SetupKind::Create")
         };
-        assert!(relayed_config.transport.relay);
+        assert!(relayed_config.transport.relay_transport);
 
         assert!(
             resolve_kind(
@@ -497,7 +497,7 @@ mod tests {
         let SetupKind::Create { config, .. } = kind else {
             panic!("no selector must resolve to SetupKind::Create")
         };
-        let RelayChoice::Custom(ladder) = &config.lookups.relay else {
+        let RelayChoice::Custom(ladder) = &config.lookups.relay_lookup else {
             panic!("relayUrls must resolve to a custom ladder")
         };
         assert_eq!(ladder.len(), 1);
@@ -570,8 +570,8 @@ mod tests {
             panic!("a topic selector must resolve to SetupKind::Topic")
         };
         assert_ne!(plain.to_string(), relayed.to_string());
-        assert!(relayed.transport().relay);
-        assert!(!plain.transport().relay);
+        assert!(relayed.transport().relay_transport);
+        assert!(!plain.transport().relay_transport);
     }
 
     #[test]
