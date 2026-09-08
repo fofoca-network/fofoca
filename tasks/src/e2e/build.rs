@@ -228,6 +228,7 @@ pub(crate) fn build_wasm_peer(env: &BTreeMap<String, String>) -> Result<PathBuf,
 }
 
 /// Bun serves both e2e suites' pages; probe for it before anything builds.
+#[cfg(feature = "mesh")]
 pub(crate) fn ensure_bun(why: &str) -> TaskOutcome {
     if Command::new("bun")
         .arg("--version")
@@ -254,6 +255,7 @@ pub(crate) fn build_browser_peer() -> Result<PathBuf, String> {
 
 /// Build one cargo example and take its path from cargo's own JSON, for the
 /// same stale-artifact reason [`build`] does.
+#[cfg(feature = "mesh")]
 pub(crate) fn build_example(package: &str, example: &str) -> Result<PathBuf, String> {
     let built = Command::new("cargo")
         .current_dir(repo_root())

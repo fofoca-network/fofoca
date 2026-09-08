@@ -82,6 +82,7 @@ impl Browser {
     }
 
     /// Open `url` in the launched window.
+    #[cfg(feature = "mesh")]
     pub(super) fn navigate(&self, url: &str) {
         self.cdp(
             "Page.navigate",

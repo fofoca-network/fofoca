@@ -239,6 +239,7 @@ pub(super) fn run(
 /// A live `WebDriver` session on one browser, for a suite that drives the page
 /// itself rather than harvesting a published table. The driver dies with the
 /// session (its `Drop` kills the process), which also closes the window.
+#[cfg(feature = "mesh")]
 #[derive(Debug)]
 pub(super) struct Session {
     driver: Driver,
@@ -246,6 +247,7 @@ pub(super) struct Session {
     version: String,
 }
 
+#[cfg(feature = "mesh")]
 impl Session {
     pub(super) fn open(browser: &str, binary: &str) -> Result<Self, Skip> {
         let driver = Driver::start(browser)?;

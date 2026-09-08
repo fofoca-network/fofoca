@@ -203,7 +203,9 @@ payload on every lane under every relay policy — is
 `cargo task e2e --suite mesh` (`--quick` for the four-cell pass). It needs the
 wasm glue built first (`cargo task wasm-peer` — the mesh suite also builds
 it itself), bun, and
-`agent-browse` with Chrome for Testing.
+`agent-browse` with Chrome for Testing. The suite runs with the task runner's
+`mesh` feature, which it turns on by re-running itself through cargo, so the
+first run builds the engine a second time with its test relay.
 
 [`chat-webrtc`](crates/fofoca-iroh-webrtc-transport/examples/chat-webrtc) is a
 runnable demonstration of the browser leg on its own: a chat room a tab and a
