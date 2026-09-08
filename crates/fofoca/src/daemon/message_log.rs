@@ -174,8 +174,12 @@ impl MessageLog {
     /// compact ids. `None` if the log is empty or `start` is past the end.
     pub(crate) fn window_at(&self, start: usize, max: usize) -> Option<DigestWindow> {
         let slice: Vec<&Message> = self.messages.iter().skip(start).take(max).collect();
-        let lo = slice.first()?.timestamp;
-        let hi = slice.last()?.timestamp;
+        // The extent of the slice, not its ends: the log is in arrival order,
+        // which is not timestamp order, so the first and last entries bound
+        // nothing. A bound that excludes an id the window lists makes every
+        // holder answer "nothing missing" for the gap around it.
+        let lo = slice.iter().map(|msg| msg.timestamp).min()?;
+        let hi = slice.iter().map(|msg| msg.timestamp).max()?;
         let ids = slice.iter().map(|msg| msg.dedup_key()).collect();
         Some(DigestWindow { lo, hi, ids })
     }
@@ -367,6 +371,46 @@ mod tests {
         assert_eq!(full.ids.len(), 5);
         // Past the end ⇒ None.
         assert!(log.window_at(5, 2).is_none());
+    }
+
+    /// The log keeps arrival order, and gossip does not deliver in timestamp
+    /// order, so the slice a window covers is not sorted. Its bounds must
+    /// still be the extent of what it lists: one early frame with a late
+    /// stamp at the head of the slice must not become `lo` and hide every
+    /// older gap from the peers that could fill it.
+    #[test]
+    fn window_bounds_are_the_extent_of_the_slice_not_its_ends() {
+        // One copy of each frame, so both logs share ids. The holder has all
+        // four; at the advertiser a late-stamped frame arrived first, then
+        // the older ones, and the one at ts=20 never arrived at all.
+        let frames: Vec<Message> = [10, 20, 30, 50]
+            .into_iter()
+            .map(|ts| msg_at(&ts.to_string(), ts))
+            .collect();
+        let mut holder = MessageLog::new(10);
+        for frame in &frames {
+            holder.push(frame.clone());
+        }
+        let mut advertiser = MessageLog::new(10);
+        for index in [3, 0, 2] {
+            advertiser.push(frames[index].clone());
+        }
+        let window = advertiser.window_at(0, 10).expect("non-empty window");
+        assert_eq!((window.lo, window.hi), (10, 50));
+
+        // The holder answers that window with the gap.
+        let have: HashSet<[u8; 16]> = window.ids.into_iter().collect();
+        let gap = holder.missing_in_window(MissingQuery {
+            range: WindowRange {
+                lo: window.lo,
+                hi: window.hi,
+            },
+            have: &have,
+            max: 10,
+            requester: &nick(ANYONE),
+        });
+        let bodies: Vec<&str> = gap.iter().map(|msg| msg.body.as_str()).collect();
+        assert_eq!(bodies, ["20"]);
     }
 
     #[test]
