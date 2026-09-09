@@ -228,8 +228,7 @@ pub async fn run<A: NodeDriver>(
     // heal cadence — long enough that a two-peer mesh looks simply broken.
     // With the window open, `maybe_reclaim` re-grafts within
     // `RECLAIM_INTERVAL_MS` instead, and stops as soon as the link is up.
-    state.reclaim_until =
-        Some(Instant::now() + Duration::from_secs(crate::util::tuning::RECLAIM_WINDOW_SECS));
+    state.arm_reclaim(Instant::now());
 
     let (gossip_sender, receiver) = topic.split();
 

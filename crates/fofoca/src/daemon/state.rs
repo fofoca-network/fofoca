@@ -21,8 +21,8 @@ use crate::util::clock::Instant;
 use crate::util::cooldown::Cooldown;
 
 use crate::util::tuning::{
-    KNOWN_ENDPOINTS_CAP, MESSAGE_LOG_SIZE, PENDING_OUTBOUND_CAP, QUIET_CAP, RELINK_COOLDOWN_SECS,
-    SEEN_IDS_CAP,
+    KNOWN_ENDPOINTS_CAP, MESSAGE_LOG_SIZE, PENDING_OUTBOUND_CAP, QUIET_CAP, RECLAIM_WINDOW_SECS,
+    RELINK_COOLDOWN_SECS, SEEN_IDS_CAP,
 };
 
 /// `RELINK_COOLDOWN_SECS` as a `Duration` — the window both per-endpoint
@@ -260,7 +260,9 @@ pub struct EventLoopState {
     /// Whether the previous rival probe read the public rendezvous as free.
     /// A claim needs two: a single free verdict may have landed inside a
     /// live beacon's rival-re-check release window, and claiming on it is
-    /// what created rival copies that shed each other indefinitely.
+    /// what created rival copies that shed each other indefinitely. Both
+    /// must fall in one arbitration, so every reopen or settle of the
+    /// rendezvous identity clears it (`forget_rendezvous_verdict`).
     pub(crate) rendezvous_probe_read_free: bool,
     /// Whether grafting the rendezvous must wait for an attached `WebRTC`
     /// session — true for a webrtc-shaped node on a lookup-only mesh; see
@@ -320,10 +322,10 @@ pub struct EventLoopState {
     #[cfg(feature = "host")]
     pub(crate) link_state_seq: u64,
     /// When `Some(deadline)` and not yet elapsed, the event loop runs
-    /// a fast `beacon::ensure` burst (event-driven failover). Armed
-    /// on `NeighborDown` — the beacon may have just died — so a
-    /// survivor claims the freed rendezvous port in ~1s rather than
-    /// waiting for the next 15s heal tick.
+    /// a fast `beacon::ensure` burst (event-driven failover). Armed by
+    /// `arm_reclaim`, mostly on `NeighborDown` — the beacon may have just
+    /// died — so a survivor claims the freed rendezvous port in ~1s rather
+    /// than waiting for the next 15s heal tick.
     pub(crate) reclaim_until: Option<Instant>,
     /// When `Some(deadline)`, the next rival re-check *shed* of an
     /// `EagerProbed` public beacon: at the deadline the holder drops its
@@ -790,6 +792,20 @@ impl EventLoopState {
     /// alive tick re-probed (about 40 s with the relink cooldown).
     pub(crate) fn unlink(&mut self, peer: EndpointId) {
         self.linked_endpoints.remove(&peer);
+    }
+
+    /// Open the fast `beacon::ensure` burst; the only writer of
+    /// [`Self::reclaim_until`].
+    pub(crate) fn arm_reclaim(&mut self, now: Instant) {
+        self.reclaim_until = Some(now + Duration::from_secs(RECLAIM_WINDOW_SECS));
+    }
+
+    /// The rendezvous arbitration was reopened or settled, so the previous
+    /// probe's free reading describes a world that is gone. Pairing it with
+    /// one fresh reading claims on what is effectively a single probe, which
+    /// is the rival copy the two-verdict rule exists to stop.
+    pub(crate) fn forget_rendezvous_verdict(&mut self) {
+        self.rendezvous_probe_read_free = false;
     }
 
     /// A probe reported no direct path to `peer`. A peer that proved itself
@@ -1740,6 +1756,22 @@ mod tests {
         );
         assert!(state.direct.is_empty());
         assert!(state.forget_peer_endpoint("bob").is_none());
+    }
+
+    // `arms_reclaim` fires on any peer loss while the mesh is beaconless, and
+    // the two probe rounds are ~5 s apart: clearing the verdict there lets
+    // ordinary churn starve the two-verdict rule until nobody claims.
+    #[test]
+    fn only_a_rendezvous_change_drops_a_free_verdict() {
+        let mut state = fresh_state();
+        state.rendezvous_probe_read_free = true;
+
+        state.arm_reclaim(Instant::now());
+        assert!(state.rendezvous_probe_read_free);
+        assert!(state.reclaim_until.is_some());
+
+        state.forget_rendezvous_verdict();
+        assert!(!state.rendezvous_probe_read_free);
     }
 
     // Under a long flap storm against a steady peer set, every collection *we*

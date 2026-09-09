@@ -74,6 +74,9 @@ pub(super) async fn run_heal(
         // The frozen-era link view is stale by definition; clearing this
         // re-arms the regular tick's probe until a fresh NeighborUp.
         state.rendezvous_linked = false;
+        // A free reading taken before the freeze is stale for the same
+        // reason, across the widest gap any of these deadlines can span.
+        state.forget_rendezvous_verdict();
         // A rival re-check deadline that "matured" while the process was
         // frozen would shed the beacon into a mesh that is still
         // re-forming; push it out a steady interval so the re-bootstrap
@@ -297,6 +300,9 @@ pub(super) fn apply_rung_change(
         // branch — the deterministic tie-break that exists precisely so two
         // simultaneous claimants shed in a decidable order.
         state.rival_recheck_rounds = 0;
+        // The rendezvous now answers at a different rung, so a free reading
+        // taken against the old one is not about this identity at all.
+        state.forget_rendezvous_verdict();
     }
 }
 

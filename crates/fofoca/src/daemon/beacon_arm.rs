@@ -15,7 +15,6 @@ use super::ctx::HandlerCtx;
 use super::state::EventLoopState;
 use crate::beacon;
 use crate::util::clock::Instant;
-use crate::util::tuning::RECLAIM_WINDOW_SECS;
 
 /// Close the co-hosted rendezvous endpoint before this loop's stack unwinds.
 ///
@@ -321,10 +320,13 @@ pub(super) fn shed_rival_beacon_if_due(
     // (mirroring the hard resume edge), or a yielding node's heal ticks
     // idle on "rendezvous linked" instead of grafting the rival's beacon.
     state.rendezvous_linked = false;
+    // We just released the identity to re-probe it, so the reading that
+    // stood before the release answers a question we have re-asked.
+    state.forget_rendezvous_verdict();
     // Arm the fast burst explicitly rather than waiting for our own
     // beacon's `NeighborDown` to do it — the re-probe (and the re-claim
     // when no rival exists) then runs within ~RECLAIM_INTERVAL_MS.
-    state.reclaim_until = Some(Instant::now() + Duration::from_secs(RECLAIM_WINDOW_SECS));
+    state.arm_reclaim(Instant::now());
     true
 }
 

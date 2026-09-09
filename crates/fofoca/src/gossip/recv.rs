@@ -7,7 +7,6 @@
 //! `lifecycle::observe` and dispatches by kind.
 
 use std::ops::ControlFlow;
-use std::time::Duration;
 
 use bytes::Bytes;
 use iroh_gossip::api::{ApiError, Event};
@@ -23,7 +22,6 @@ use crate::protocol::{Channel, Message, MessageKind, Nickname};
 use crate::util::clock::Instant;
 // The timer-driver clock the ping round's deadlines are kept in — distinct from
 // `clock::Instant` off wasm32. See `daemon::state`.
-use crate::util::tuning::RECLAIM_WINDOW_SECS;
 use n0_future::time::Instant as TokioInstant;
 
 use super::app::{AppClass, InboundApp, NodeApp};
@@ -89,6 +87,9 @@ pub(crate) async fn handle_gossip_event(
                 state.rendezvous_linked = true;
                 state.rendezvous_session_stale = false;
                 state.rendezvous_offer_fallback = false;
+                // This link settles the arbitration: someone holds the port
+                // a pending free verdict read as free.
+                state.forget_rendezvous_verdict();
             } else {
                 // `NeighborUp`/`NeighborDown` are the only writers of
                 // `linked_endpoints`: it must mirror the *live* overlay
@@ -124,6 +125,9 @@ pub(crate) async fn handle_gossip_event(
             tracing::info!(target: "fofoca::gossip", endpoint_id = %node_id, is_rendezvous, "gossip neighbor down");
             if is_rendezvous {
                 state.rendezvous_linked = false;
+                // The holder is gone, so the identity is up for arbitration
+                // again and any earlier reading of it is spent.
+                state.forget_rendezvous_verdict();
                 // A shed beacon takes its session table with it (the rival
                 // re-check releases and re-claims the rendezvous on a fresh
                 // endpoint), so a held session is stale the moment the link
@@ -146,8 +150,7 @@ pub(crate) async fn handle_gossip_event(
                 state.linked_endpoints.len(),
                 state.rendezvous_linked,
             ) {
-                state.reclaim_until =
-                    Some(Instant::now() + Duration::from_secs(RECLAIM_WINDOW_SECS));
+                state.arm_reclaim(Instant::now());
                 tracing::info!(target: "fofoca::gossip",
                     reason = if is_rendezvous {
                         "rendezvous-loss"
