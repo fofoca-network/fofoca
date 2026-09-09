@@ -1,8 +1,12 @@
-//! The highest-value test in this example: two independent bots on a
-//! loopback-only mesh (no internet, no relay — `LookupOpts::public_preset()`
-//! makes zero external network calls, so this runs offline and in CI)
-//! play a whole match against each other and independently derive the
-//! same outcome, having exchanged nothing but per-tick inputs.
+//! The public twin of `two_bots.rs`: two independent bots on a **public**
+//! mesh (`LookupOpts::public_preset()`: mDNS, the DHT and the public relay
+//! ladder) play a whole match against each other and independently derive
+//! the same outcome, having exchanged nothing but per-tick inputs.
+//!
+//! Ignored by default: it needs the public relay ladder and a network where
+//! two endpoints on one host can hole-punch each other, and on a shared CI
+//! runner the session handshake never completes. Run it by hand with
+//! `cargo test --test pubprobe -- --ignored`.
 //!
 //! That is the central claim of the example — GGPO-style rollback over a
 //! fofoca mesh, no authoritative peer, no state on the wire — checked
@@ -96,6 +100,7 @@ async fn drive(
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs the public relay ladder and a hole-punchable network; run with --ignored"]
 async fn public_path_probe() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
