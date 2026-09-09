@@ -209,8 +209,13 @@ jobs:
       # Includes `game/tests/two_bots.rs` — two headless bots on a
       # loopback-only mesh, no internet, converging purely from exchanged
       # `lc_turn` inputs. See the plan's "Verification plan" #6.
+      #
+      # `pubprobe.rs` reaches the public relay ladder and wires the engine's
+      # tracing to `RUST_LOG`; a failure prints the captured timeline.
       - name: Test
         run: cargo test --workspace
+        env:
+          RUST_LOG: fofoca=info
 
   # `crates/fofoca-netplay/examples/light-cycles/web/wasm/` is its own cargo
   # workspace (an empty `[workspace]` table, same trick chat-web uses —
