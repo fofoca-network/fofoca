@@ -154,7 +154,7 @@ pub(crate) async fn handle_presence(
         // A graceful goodbye, unlike a silence timeout, drops the dial hint —
         // and with it the warm unicast connection and any dial cooldown, so a
         // rejoin re-dials cold.
-        if let Some(endpoint_id) = state.peer_endpoints.remove(message.author.as_str()) {
+        if let Some(endpoint_id) = state.forget_peer_endpoint(message.author.as_str()) {
             state.unicast_pool.forget(endpoint_id.id).await;
         }
         state.quiet.remove(message.author.as_str());
@@ -180,14 +180,11 @@ pub(crate) async fn handle_presence(
         // fires on this loop to re-send it and our arrival flood predates
         // them; a rejoin across a beacon epoch may have lost it the same way
         // (both observed native↔browser in the mesh matrix: a roster entry
-        // with no endpoint binding reads "unreachable" forever).
-        // Self-keyed cooldown, not per triggering endpoint: one newcomer
-        // makes every member re-announce, and a per-endpoint key would let
-        // each member flood once per re-announce it hears (N²). A first
-        // sighting (the case the re-flood exists for) always floods.
+        // with no endpoint binding reads "unreachable" forever). Throttled
+        // by `joined_refloods_peerinfo`.
         let now = Instant::now();
         if state.joined_refloods_peerinfo(update.joined_new, now) {
-            gossip::broadcast_peer_info(ctx).await;
+            gossip::broadcast_peer_info(state, ctx).await;
             state.last_sent_at = now;
         }
         if update.joined_new {

@@ -66,7 +66,7 @@ pub(crate) async fn handle_gossip_event(
                 if state.peerinfo_on_cooldown(node_id, now) {
                     tracing::debug!(target: "fofoca::gossip", endpoint_id = %node_id, "skipped PeerInfo re-flood (cooldown)");
                 } else {
-                    broadcast_peer_info(ctx).await;
+                    broadcast_peer_info(state, ctx).await;
                     state.note_peerinfo(node_id, now);
                     state.last_sent_at = now;
                 }
@@ -139,8 +139,7 @@ pub(crate) async fn handle_gossip_event(
                 // a webrtc-shaped peer.
                 crate::transport::webrtc::negotiate_rendezvous_session(state, ctx);
             } else {
-                state.linked_endpoints.remove(&node_id);
-                state.direct.remove(&node_id);
+                state.unlink(node_id);
             }
             if arms_reclaim(
                 is_rendezvous,

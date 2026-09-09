@@ -90,14 +90,11 @@ pub(crate) async fn tick_heal_hard(
 /// With the relay lookup only, the re-dial is the direct-path probe
 /// (`transport::probe`) rather than a bulk graft: a graft dialed over the
 /// relay would only be held and closed by the far side's accept gate, and
-/// the probe is what proves the path unicast needs.
+/// the probe is what proves the path unicast needs. Every caller has
+/// decided the link view is void, so the probe distrusts it too.
 ///
 /// [`EventLoopState::known_endpoints`]: crate::daemon::state::EventLoopState::known_endpoints
-pub(crate) async fn rebridge_known(
-    state: &mut EventLoopState,
-    ctx: &HandlerCtx<'_>,
-    hard_edge: bool,
-) {
+pub(crate) async fn rebridge_known(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
     let peers: Vec<EndpointId> = state.known_endpoints.iter().copied().collect();
     // `info`, not `debug`: this fires only on the isolation signal (rare,
     // event-driven), and a re-bridge attempt is part of the always-on
@@ -109,7 +106,7 @@ pub(crate) async fn rebridge_known(
         "heal: rendezvous-independent re-bridge (re-dialing known peers)"
     );
     if !state.relay_transport {
-        crate::transport::probe::retry_direct(state, ctx, hard_edge).await;
+        crate::transport::probe::retry_direct(state, ctx, true).await;
         return;
     }
     if let Err(error) = ctx.sender.join_peers(peers).await {
@@ -145,8 +142,7 @@ pub(crate) async fn recover_from_starvation(state: &mut EventLoopState, ctx: &Ha
     state.note_degraded();
     state.relink.clear();
     state.peerinfo.clear();
-    state.joined_reflood_at = None;
-    rebridge_known(state, ctx, false).await;
+    rebridge_known(state, ctx).await;
     super::broadcast::announce_arrival(state, ctx).await;
     let now = Instant::now();
     state.last_sent_at = now;

@@ -131,11 +131,13 @@ pub struct EventLoopState {
     /// Distinct from `peers` — links are asymmetric and node-id
     /// keyed; the roster is symmetric and nickname keyed.
     pub(crate) linked_endpoints: HashSet<EndpointId>,
-    /// Whether each linked peer's data path is direct or relay-only, taken
-    /// from the same `conn_path` snapshot `NeighborUp` logs. Written by
-    /// `NeighborUp`/`NeighborDown` like `linked_endpoints`. Feeds the census
-    /// and the roster; when the relay is lookup only it is also what the send
-    /// lanes consult before carrying payload.
+    /// Whether each known peer's data path is direct or relay-only: the
+    /// `conn_path` snapshot `NeighborUp` logs, or a probe verdict. Keyed like
+    /// `peer_endpoints` and pruned with it (`forget_peer_endpoint`), not on
+    /// `NeighborDown`: the verdict describes the pooled connection, which
+    /// outlives the gossip link. Feeds the census and the roster; when the
+    /// relay is lookup only it is also what the send lanes consult before
+    /// carrying payload.
     pub(crate) direct: HashMap<EndpointId, DirectState>,
     /// Mirrors `TransportPolicy::relay`, set once at loop start.
     pub(crate) relay_transport: bool,
@@ -167,10 +169,9 @@ pub struct EventLoopState {
     /// stay independently reasoned (and a new neighbor still gets exactly one
     /// re-flood).
     pub(crate) peerinfo: Cooldown<EndpointId>,
-    /// When a received `joined` last re-flooded our `PeerInfo`. Self-keyed,
-    /// unlike `peerinfo`: one newcomer makes every member re-announce, so a
-    /// per-trigger key would let each member flood once per member (N²).
-    pub(crate) joined_reflood_at: Option<Instant>,
+    /// When we last flooded our `PeerInfo`, whatever triggered it. Stamped by
+    /// `broadcast_peer_info`; read by the `joined` re-flood gate.
+    pub(crate) peerinfo_flooded_at: Option<Instant>,
     /// When each author's digest was last served. Keyed on the pubkey rather
     /// than the nickname, which an author picks freely.
     digest_serves: Cooldown<String>,
@@ -596,7 +597,7 @@ impl EventLoopState {
             known_endpoints: BoundedFifoSet::new(KNOWN_ENDPOINTS_CAP),
             relink: Cooldown::new(RELINK_COOLDOWN),
             peerinfo: Cooldown::new(RELINK_COOLDOWN),
-            joined_reflood_at: None,
+            peerinfo_flooded_at: None,
             digest_serves: Cooldown::new(Duration::from_secs(
                 fofoca_util::tuning::ANTIENTROPY_SERVE_COOLDOWN_SECS,
             )),
@@ -761,20 +762,34 @@ impl EventLoopState {
         self.peerinfo.note(peer, now);
     }
 
-    /// Whether a `joined` received at `now` re-floods our `PeerInfo`, and if
-    /// so records the flood. A first sighting (`joined_new`) always does: the
-    /// newcomer linked to the rendezvous, so no `NeighborUp` on this loop will
-    /// send it our address. A re-announce does at most once per window (see
-    /// `joined_reflood_at`).
-    pub(crate) fn joined_refloods_peerinfo(&mut self, joined_new: bool, now: Instant) -> bool {
-        let on_cooldown = self
-            .joined_reflood_at
-            .is_some_and(|at| now.duration_since(at) < RELINK_COOLDOWN);
-        if !joined_new && on_cooldown {
-            return false;
-        }
-        self.joined_reflood_at = Some(now);
-        true
+    /// Whether a `joined` received at `now` re-floods our `PeerInfo`. A first
+    /// sighting (`joined_new`) always does: the newcomer linked to the
+    /// rendezvous, so no `NeighborUp` on this loop will send it our address.
+    /// A re-announce does only once per window since any flood: one newcomer
+    /// makes every member re-announce, and a per-trigger key would let each
+    /// member flood once per re-announce it hears (N²).
+    pub(crate) fn joined_refloods_peerinfo(&self, joined_new: bool, now: Instant) -> bool {
+        joined_new
+            || self
+                .peerinfo_flooded_at
+                .is_none_or(|at| now.duration_since(at) >= RELINK_COOLDOWN)
+    }
+
+    /// Drop `nick`'s dial hint and, with it, the path verdict keyed on that
+    /// endpoint. The two share a key space: the verdict describes the pooled
+    /// connection, which outlives a gossip link but not the peer.
+    pub(crate) fn forget_peer_endpoint(&mut self, nick: &str) -> Option<EndpointAddr> {
+        let addr = self.peer_endpoints.remove(nick)?;
+        self.direct.remove(&addr.id);
+        Some(addr)
+    }
+
+    /// A `NeighborDown` for `peer`: the gossip link is gone, the path verdict
+    /// stays. It describes the pooled unicast connection, which outlives the
+    /// link; erasing it parked every directed frame on a link flap until the
+    /// alive tick re-probed (about 40 s with the relink cooldown).
+    pub(crate) fn unlink(&mut self, peer: EndpointId) {
+        self.linked_endpoints.remove(&peer);
     }
 
     /// Record `message` as seen and report whether it was *already* seen.
@@ -1643,34 +1658,58 @@ mod tests {
         assert!(!state.peerinfo_on_cooldown(peer, later));
     }
 
-    // A received `joined` re-floods our `PeerInfo` so the joiner binds our
-    // endpoint. One newcomer makes every member re-announce, so each member
-    // hears N-1 `joined` from N-1 distinct endpoints inside one window. Keyed
-    // per triggering peer that was N-1 floods per member, N² mesh-wide. The
-    // gate is self-keyed instead: one flood per window whoever triggered it,
-    // while a first sighting (the case the re-flood exists for) still floods.
     #[test]
     fn joined_refloods_peerinfo_once_per_window() {
         let start = Instant::now();
         let mut state = fresh_state();
 
-        let refloods = (0..20u64)
-            .filter(|index| {
-                let now = start + Duration::from_millis(index * 10);
-                state.joined_refloods_peerinfo(false, now)
-            })
-            .count();
-        assert_eq!(
-            refloods, 1,
-            "a burst of re-announces re-floods once per window, not once per peer"
-        );
+        // Twenty re-announces from twenty peers inside one window.
+        let mut refloods = 0;
+        for index in 0..20u64 {
+            let now = start + Duration::from_millis(index * 10);
+            if state.joined_refloods_peerinfo(false, now) {
+                state.peerinfo_flooded_at = Some(now);
+                refloods += 1;
+            }
+        }
+        assert_eq!(refloods, 1, "once per window, not once per peer");
 
         // A first sighting inside the window is not throttled.
         assert!(state.joined_refloods_peerinfo(true, start + Duration::from_secs(1)));
 
         // Past the window a re-announce floods once more (no permanent silence).
-        let later = start + Duration::from_secs(1 + RELINK_COOLDOWN_SECS + 1);
+        let later = start + Duration::from_secs(RELINK_COOLDOWN_SECS + 1);
         assert!(state.joined_refloods_peerinfo(false, later));
+    }
+
+    // A `NeighborDown` drops the gossip link, not the pooled unicast
+    // connection the verdict describes. Erasing the verdict with the link
+    // parked every directed frame on a flap until the alive tick re-probed.
+    #[test]
+    fn unlinking_a_peer_keeps_its_path_verdict() {
+        let mut state = fresh_state();
+        let bob = endpoint_id(1);
+        state.linked_endpoints.insert(bob);
+        state.direct.insert(bob, DirectState::Direct);
+        state.unlink(bob);
+        assert!(state.linked_endpoints.is_empty());
+        assert_eq!(state.direct.get(&bob), Some(&DirectState::Direct));
+    }
+
+    #[test]
+    fn forgetting_a_peer_endpoint_drops_its_path_verdict() {
+        let mut state = fresh_state();
+        let bob = endpoint_id(1);
+        state
+            .peer_endpoints
+            .insert(nick("bob"), iroh::EndpointAddr::new(bob));
+        state.direct.insert(bob, DirectState::Direct);
+        assert_eq!(
+            state.forget_peer_endpoint("bob").map(|addr| addr.id),
+            Some(bob)
+        );
+        assert!(state.direct.is_empty());
+        assert!(state.forget_peer_endpoint("bob").is_none());
     }
 
     // Under a long flap storm against a steady peer set, every collection *we*
