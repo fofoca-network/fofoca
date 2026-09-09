@@ -108,7 +108,9 @@ async fn public_path_probe() {
 
     // The mesh forms, the lobby agrees a match, and both bots build a
     // session for it. Nobody negotiates the roster: the lobby fixes it.
-    let started = drive(&mut bots, Duration::from_secs(30), |bots| {
+    // Both bots claim the beacon after two probe rounds (~23s), and the first
+    // rival re-check (~12s later) is what merges the two halves.
+    let started = drive(&mut bots, Duration::from_secs(60), |bots| {
         bots.iter().all(|bot| bot.game.snapshot().roster.len() == 2)
     })
     .await;

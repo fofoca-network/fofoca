@@ -729,14 +729,10 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
                     state.rendezvous_probe_read_free = false;
                     let claimed = beacon::claim_after_probe(&rendezvous_params, &endpoint, &mut rendezvous, found_rival).await;
                     if claimed {
-                        // Two consecutive free probes preceded this claim, so
-                        // the simultaneous-claim window the brisk first
-                        // re-check exists for has already been ruled out
-                        // twice. Start the backoff a few rounds in: each
-                        // early shed costs every webrtc-shaped member a full
-                        // JSEP-and-graft cycle, and a real split still heals
-                        // at the backstop cadence.
-                        state.rival_recheck_rounds = state.rival_recheck_rounds.max(3);
+                        // Still from the brisk base: two joiners that start
+                        // together both read free twice and claim in the same
+                        // instant, and the first re-check is what merges that
+                        // split.
                         schedule_rival_recheck(&mut state, cohost, &rendezvous_params, &endpoint);
                     } else if found_rival {
                         // A rival holds the identity: this arbitration epoch is
