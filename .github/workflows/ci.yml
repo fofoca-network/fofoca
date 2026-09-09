@@ -215,7 +215,7 @@ jobs:
       - name: Test
         run: cargo test --workspace
         env:
-          RUST_LOG: fofoca=info
+          RUST_LOG: fofoca=debug
 
   # `crates/fofoca-netplay/examples/light-cycles/web/wasm/` is its own cargo
   # workspace (an empty `[workspace]` table, same trick chat-web uses —
