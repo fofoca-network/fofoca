@@ -229,10 +229,20 @@ pub(super) fn rival_recheck_applies(policy: CoHostPolicy, public: bool) -> bool 
 /// no rival is evidence there is none, and without the backoff a stable
 /// two-tab mesh blipped its beacon every 30-60s forever. Rounds reset when a
 /// rival wins an arbitration, so a fresh claim epoch starts brisk again.
+///
+/// An **empty** roster ramps past the island backstop to
+/// [`RIVAL_RECHECK_ALONE_SECS`](crate::util::tuning::RIVAL_RECHECK_ALONE_SECS).
+/// The brisk rounds are the same — a double-claim inside a probe window is
+/// repaired by the first few sheds, and those are untouched — but a node that
+/// has found no rival and knows no peer has nothing left to arbitrate, and the
+/// 300s cap only rebinds its public endpoint every few minutes forever. The
+/// tier is `roster == 0`, not "small": two survivors of a departed origin each
+/// count the other, and that split is the one the brisk cap exists for.
 pub(super) fn next_recheck_delay(round: u32, roster: usize, endpoint_id: EndpointId) -> Duration {
     use crate::util::tuning::{RIVAL_RECHECK_OFFSET_SPAN_SECS, RIVAL_RECHECK_SMALL_ROSTER};
     use crate::util::tuning::{
-        rival_recheck_first_secs, rival_recheck_meshed_secs, rival_recheck_secs,
+        rival_recheck_alone_secs, rival_recheck_first_secs, rival_recheck_meshed_secs,
+        rival_recheck_secs,
     };
 
     if round == 0 {
@@ -242,13 +252,18 @@ pub(super) fn next_recheck_delay(round: u32, roster: usize, endpoint_id: Endpoin
         let offset_ms = u64::from_le_bytes(prefix) % (RIVAL_RECHECK_OFFSET_SPAN_SECS * 1000);
         return Duration::from_secs(rival_recheck_first_secs()) + Duration::from_millis(offset_ms);
     }
-    let backstop_secs = rival_recheck_meshed_secs();
     let base_secs = if roster > RIVAL_RECHECK_SMALL_ROSTER {
-        backstop_secs
+        rival_recheck_meshed_secs()
     } else {
-        // Doublings capped well before the shift could overflow; the base is
-        // capped at the backstop regardless.
-        let doublings = round.saturating_sub(1).min(6);
+        let backstop_secs = if roster == 0 {
+            rival_recheck_alone_secs()
+        } else {
+            rival_recheck_meshed_secs()
+        };
+        // Seven doublings reach the alone ceiling from the brisk base
+        // (30s << 7 = 3840s); capped well before the shift could overflow, and
+        // the base is capped at the backstop regardless.
+        let doublings = round.saturating_sub(1).min(7);
         rival_recheck_secs()
             .saturating_mul(1u64 << doublings)
             .min(backstop_secs)
@@ -473,16 +488,53 @@ mod tests {
 
     #[test]
     fn rival_free_rounds_back_off_geometrically_to_the_backstop() {
-        use crate::util::tuning::{RIVAL_RECHECK_MESHED_SECS, RIVAL_RECHECK_SECS};
+        use crate::util::tuning::{
+            RIVAL_RECHECK_MESHED_SECS, RIVAL_RECHECK_SECS, RIVAL_RECHECK_SMALL_ROSTER,
+        };
 
         let id = iroh::SecretKey::from_bytes(&[9; 32]).public();
 
         // Each rival-free round doubles the brisk base, capped at the island
         // backstop: a stable small mesh must stop blipping its beacon every
-        // half-minute forever.
-        for round in 1..=8u32 {
-            let expected = (RIVAL_RECHECK_SECS << round.saturating_sub(1).min(6))
-                .min(RIVAL_RECHECK_MESHED_SECS);
+        // half-minute forever. Every small roster with at least one peer pays
+        // that cap — two survivors of a departed origin each count the other,
+        // and their same-id split is what the cap is priced for.
+        for roster in 1..=RIVAL_RECHECK_SMALL_ROSTER {
+            for round in 1..=10u32 {
+                let expected = (RIVAL_RECHECK_SECS << round.saturating_sub(1).min(7))
+                    .min(RIVAL_RECHECK_MESHED_SECS);
+                let base = Duration::from_secs(expected);
+                for _ in 0..4 {
+                    let delay = next_recheck_delay(round, roster, id);
+                    assert!(
+                        delay >= base && delay <= base * 2,
+                        "roster {roster}, round {round}: expected base {expected}s, got {delay:?}"
+                    );
+                }
+            }
+        }
+
+        // A large roster pays the backstop from round one, backoff or not.
+        let backstop = Duration::from_secs(RIVAL_RECHECK_MESHED_SECS);
+        let delay = next_recheck_delay(1, 20, id);
+        assert!(delay >= backstop && delay <= backstop * 2);
+    }
+
+    /// Regression for a permanently-alone public topic peer that rebound its
+    /// endpoint every few minutes forever: an empty roster has no split to
+    /// repair once its brisk rounds have found nobody, so its ramp continues
+    /// past the island backstop to the alone ceiling.
+    #[test]
+    fn an_empty_roster_ramps_past_the_island_backstop_to_the_alone_ceiling() {
+        use crate::util::tuning::{
+            RIVAL_RECHECK_ALONE_SECS, RIVAL_RECHECK_MESHED_SECS, RIVAL_RECHECK_SECS,
+        };
+
+        let id = iroh::SecretKey::from_bytes(&[9; 32]).public();
+
+        for round in 1..=12u32 {
+            let expected = (RIVAL_RECHECK_SECS << round.saturating_sub(1).min(7))
+                .min(RIVAL_RECHECK_ALONE_SECS);
             let base = Duration::from_secs(expected);
             for _ in 0..4 {
                 let delay = next_recheck_delay(round, 0, id);
@@ -493,10 +545,27 @@ mod tests {
             }
         }
 
-        // A large roster pays the backstop from round one, backoff or not.
-        let backstop = Duration::from_secs(RIVAL_RECHECK_MESHED_SECS);
-        let delay = next_recheck_delay(1, 20, id);
-        assert!(delay >= backstop && delay <= backstop * 2);
+        // The brisk rounds are untouched: an empty roster's early sheds are
+        // the double-claim repair, so they must match a two-member mesh's.
+        for round in 1..=4u32 {
+            let alone = next_recheck_delay(round, 0, id);
+            let pair = next_recheck_delay(round, 1, id);
+            let base = Duration::from_secs(RIVAL_RECHECK_SECS << round.saturating_sub(1));
+            assert!(
+                alone >= base && alone <= base * 2,
+                "round {round}: {alone:?}"
+            );
+            assert!(pair >= base && pair <= base * 2, "round {round}: {pair:?}");
+        }
+
+        // The settled cadence is well past the island backstop.
+        let settled = next_recheck_delay(12, 0, id);
+        let island_cap = Duration::from_secs(RIVAL_RECHECK_MESHED_SECS) * 2;
+        assert!(
+            settled > island_cap,
+            "a settled lone holder must idle past the island cap: {settled:?}"
+        );
+        assert!(settled >= Duration::from_secs(RIVAL_RECHECK_ALONE_SECS));
     }
 
     /// A rehome is a fresh arbitration epoch, so the backoff restarts with it.

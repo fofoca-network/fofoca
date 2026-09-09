@@ -209,6 +209,7 @@ pub struct Tuning {
     pub rival_recheck_first_secs: u64,
     pub rival_recheck_secs: u64,
     pub rival_recheck_meshed_secs: u64,
+    pub rival_recheck_alone_secs: u64,
     pub topic_mdns_only: bool,
 }
 
@@ -231,6 +232,7 @@ impl Tuning {
         rival_recheck_first_secs: RIVAL_RECHECK_FIRST_SECS,
         rival_recheck_secs: RIVAL_RECHECK_SECS,
         rival_recheck_meshed_secs: RIVAL_RECHECK_MESHED_SECS,
+        rival_recheck_alone_secs: RIVAL_RECHECK_ALONE_SECS,
         topic_mdns_only: false,
     };
 }
@@ -471,6 +473,28 @@ pub const RIVAL_RECHECK_MESHED_SECS: u64 = 300;
 #[must_use]
 pub fn rival_recheck_meshed_secs() -> u64 {
     current().rival_recheck_meshed_secs.max(1)
+}
+
+/// Shed cadence ceiling for a holder with an **empty roster** — the tier
+/// `daemon::beacon_arm::next_recheck_delay` picks when `roster == 0`.
+///
+/// [`RIVAL_RECHECK_MESHED_SECS`] is priced for two multi-member islands, and
+/// the geometric ramp caps there for every small roster. A node that knows no
+/// peer at all has nothing to reconcile: the brisk early rounds still run,
+/// and they are what repairs a double-claim, but once a run of probes has
+/// found no rival the only thing a 300s cap buys is a public-endpoint rebind
+/// every ~7 minutes, forever. Measured on a permanently-alone topic peer:
+/// ~138 rebinds/hour before the ramp existed, ~8/hour with the 300s cap, and
+/// the rebind is the suspected road into a `recvmsg` spin. At 3600 the ramp
+/// converges to a ~1.5h mean interval.
+///
+/// Hidden flag `--rival-recheck-alone-secs`. Clamped to `>= 1`.
+pub const RIVAL_RECHECK_ALONE_SECS: u64 = 3600;
+
+/// The live value, after any CLI override of [`RIVAL_RECHECK_ALONE_SECS`].
+#[must_use]
+pub fn rival_recheck_alone_secs() -> u64 {
+    current().rival_recheck_alone_secs.max(1)
 }
 
 /// Topic meshes are the public preset; the `--topic-mdns-only` flag narrows
