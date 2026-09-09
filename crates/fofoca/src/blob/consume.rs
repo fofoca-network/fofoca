@@ -60,8 +60,13 @@ where
     // inside it, so this waits rather than refusing at once. The producer
     // waits too; refusing here first spares the round trip and names the
     // cause.
-    crate::transport::refuse_relayed(&conn, ticket.relay_transport, super::RELAY_REFUSED_CODE)
-        .await?;
+    crate::transport::refuse_relayed(
+        &conn,
+        ticket.relay_transport,
+        crate::transport::PROBE_DEADLINE,
+        super::RELAY_REFUSED_CODE,
+    )
+    .await?;
     let (mut send, mut recv) = conn.open_bi().await?;
 
     // Request: sha256 ‖ secret, then done sending.
