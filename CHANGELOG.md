@@ -8,6 +8,60 @@ published to a registry; pin it with
 
 ## [Unreleased]
 
+### Added
+
+- `fofoca-wasm`: the browser peer, the byte pipe as a wasm-bindgen class,
+  with `packages/fofoca-wasm` as its JS backend and a driverless harness
+  page. `cargo task wasm-peer` builds it.
+- A custom relay ladder (`relay_urls` / `relayUrls` / `--relay-url`) and the
+  per-node transport switches (`ip`, `webrtc`) on every create surface. The
+  ladder is mixed into a derived topic id, so every member must pass the
+  same list.
+- `cargo task e2e --suite mesh` and `--suite chat`: a real native peer and a
+  real browser tab on a local plain-HTTP relay, swept over the relay policy,
+  the native transport set and the join mode. Behind the `mesh` feature of
+  `tasks`, and local-only for now.
+- `Session::request` on the pipe, and one config path for every topic.
+
+### Changed
+
+- **Breaking (C ABI):** `fofoca_opts` gained `relay_transport`,
+  `relay_urls`, `disable_ip` and `disable_webrtc`, and grew from 56 to 80
+  bytes. A consumer compiled against the old header keeps passing the old
+  struct and the engine reads past it — there is no version field to catch
+  that, so relink against the new `include/fofoca.h`. The layout is now
+  pinned by a compile-time assert in `fofoca-ffi` and by
+  `packages/fofoca-ffi`'s encoder test.
+- **Breaking:** the relay's two roles are named apart on every create
+  surface: `relay_lookup` (`relayLookup`, `--relay-lookup`) for the lookup,
+  `relay_transport` (`relayTransport`, `--relay-transport`) for the payload
+  fallback. The second needs the first; a config that sets it with the relay
+  disabled is rejected before any network. `TransportOpts.relay` keeps its
+  name — it is per-node capability, not the mesh policy.
+- `MeshConfig::validate` now also rejects a custom relay ladder that would
+  not survive the wire (more than 16 rungs, or a URL over 512 bytes). A
+  caller-supplied ladder reached the encoder unbounded before: past 255
+  rungs it panicked, and between 17 and 255 it minted an id no member could
+  decode.
+
+### Fixed
+
+- A negotiated WebRTC session is registered as a transport address, so a
+  bare-id dial migrates onto it instead of being refused on the relay.
+- An offer from a peer we already hold a session with detaches the old
+  session and answers fresh.
+- Every `joined` re-floods our `PeerInfo` behind a per-endpoint cooldown, so
+  a newcomer or a rejoin across a beacon epoch is not unreachable forever.
+- A public rendezvous claim needs two consecutive free probes, so a probe
+  inside a live beacon's release window no longer stands up a rival copy.
+- A fresh unicast dial waits up to five seconds for a direct path before its
+  first frame, which the pool used to refuse as relayed.
+- A digest window is bounded by the extent of its slice rather than by its
+  first and last entries; the log is in arrival order, so the ends bounded
+  nothing and a holder answered "nothing missing" for a gap.
+- On a lookup-only mesh the debug census no longer demotes a proven peer on
+  a relayed `conn_path` reading, which stopped every payload lane to it.
+
 ### Removed
 
 - **Breaking:** the `fofoca-blobs` crate, and with it the workspace's only

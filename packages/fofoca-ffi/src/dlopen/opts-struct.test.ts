@@ -31,6 +31,14 @@ function fakePointers() {
 }
 
 describe('encodeOpts', () => {
+  // The literal, not OPTS_BYTES against itself. The other side of this number
+  // is the layout assert on `FofocaOpts` in crates/fofoca-ffi/src/ffi.rs; a
+  // linked C consumer keeps passing the old struct when it moves, so both
+  // sides must be edited together.
+  test('the struct is the 80 bytes the C header lays out', () => {
+    expect(OPTS_BYTES).toBe(80)
+  })
+
   test('null selectors encode as NULL pointers', () => {
     const { struct } = encodeOpts(BASE, fakePointers().pointerOf)
     expect(struct.byteLength).toBe(OPTS_BYTES)

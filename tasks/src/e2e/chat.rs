@@ -52,7 +52,13 @@ impl Robot {
     fn spawn(binary: &PathBuf, topic: &str, relay_url: &str) -> Result<Self, Skip> {
         let mut child = Command::new(binary)
             .args([
-                "--topic", topic, "--nick", "terminal", "--relay", relay_url, "--robot",
+                "--topic",
+                topic,
+                "--nick",
+                "terminal",
+                "--relay-url",
+                relay_url,
+                "--robot",
             ])
             .env("RUST_LOG", "fofoca=info")
             .stdin(Stdio::piped())

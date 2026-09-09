@@ -71,13 +71,14 @@ jobs:
       - name: Clippy (webrtc, native backend)
         run: cargo clippy -p fofoca-iroh-webrtc-transport --features native --all-targets -- -D warnings
 
-      # Five crates are reachable on wasm32 and nowhere else, and between them
+      # Six crates are reachable on wasm32 and nowhere else, and between them
       # that is a substantial amount of code no other job compiles:
       # `fofoca-chunks`'s IndexedDB backend, the whole `web` backend of the
       # WebRTC transport, the portable half of the engine, `fofoca-netplay`'s
-      # simulation, and `fofoca-pipe`'s wire contract. Without these steps that
-      # code rots silently, and the `#[expect(...)]` attributes inside it are
-      # never lint-checked either.
+      # simulation, `fofoca-pipe`'s wire contract, and `fofoca-wasm`, the
+      # browser peer, which has no other target at all. Without these steps
+      # that code rots silently, and the `#[expect(...)]` attributes inside it
+      # are never lint-checked either.
       #
       # Clippy, not just check. The `web` backend had never been linted before
       # this job existed and carried 18 findings on its first pass.
@@ -140,6 +141,59 @@ jobs:
       # a str0m data channel, offline via `IceConfig::host_only()`.
       - name: Test (webrtc, native backend)
         run: cargo test -p fofoca-iroh-webrtc-transport --features native
+
+      # `iroh-test-utils` is off by default, and no step above reaches a test
+      # target with it on: `--all-features` here has no `--all-targets`, and
+      # `--all-targets` elsewhere runs with default features. That left the
+      # relay-policy proofs — `tests/relay_lookup_only_{refusal,public_link}.rs`
+      # and the webrtc graft tests — never even compiled by CI, free to rot
+      # behind a green tick.
+      #
+      # `--no-run`, not a test run: two of those tests are red on the pinned
+      # iroh revs until the fork fixes land (issue #2) and carry `#[ignore]`,
+      # and the rest stand up real relays and JSEP rounds that are too
+      # timing-sensitive for a shared runner. Compiling them is what catches
+      # the rot; the mesh e2e suite is what proves the behaviour.
+      - name: Check (relay-policy tests compile)
+        run: cargo test -p fofoca --features iroh-test-utils --all-targets --no-run
+
+      # `--all-targets` is what the plain Clippy step above has and the
+      # `--all-features` check step lacks, so the `mesh` feature's e2e suites
+      # (~1,100 lines under tasks/src/e2e/) are compiled by CI but never linted.
+      - name: Clippy (all features)
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  # The TypeScript half of the workspace — `packages/*` and `examples/chat/*`.
+  # Nothing ran it before: the only other Bun steps live in `light-cycles (web)`
+  # and `working-directory` into that example's own Bun workspace. The cost of
+  # the gap is on record — `typecheck:node` shipped pointing at a directory that
+  # did not exist, and stayed broken because no job ever called it.
+  #
+  # No wasm build: `packages/fofoca-wasm` loads the wasm-bindgen glue through a
+  # dynamic import with a hand-declared shape (`src/module.ts`), and its
+  # tsconfig covers `src/` and `harness/` only, so both scripts pass on a clean
+  # checkout. The glue's own build is covered by `Check (wasm32)`.
+  typescript:
+    name: TypeScript
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Install
+        run: bun install --frozen-lockfile
+
+      # Five projects: fofoca-api, fofoca-ffi, chat/bun-ffi, fofoca-wasm,
+      # chat/web. tsconfig.base.json has no `references`, so each is a
+      # standalone `tsc -p` and this is the complete set.
+      - name: Typecheck
+        run: bun run typecheck
+
+      # Includes the `fofoca_opts` layout test, the other side of the
+      # `size_of::<FofocaOpts>()` assert in crates/fofoca-ffi/src/ffi.rs.
+      - name: Test
+        run: bun test packages
 
   # The C ABI is the whole point of fofoca-ffi and its only non-Rust consumer
   # links the staticlib. Build it the way that consumer does.
@@ -211,8 +265,11 @@ jobs:
       # `lc_turn` inputs. See the plan's "Verification plan" #6.
       #
       # `pubprobe.rs` is ignored: it needs the public relay ladder and a
-      # hole-punchable network. The tests wire the engine's tracing to
-      # `RUST_LOG`, so a failure prints the captured timeline.
+      # hole-punchable network. What runs here is `two_bots.rs`, offline and
+      # deterministic; it wires the engine's tracing to `RUST_LOG`, so a
+      # failure prints the captured timeline. Keep this at `info` — `debug`
+      # turns on the per-peer `conn_path` census, which is N actor
+      # round-trips per tick.
       - name: Test
         run: cargo test --workspace
         env:

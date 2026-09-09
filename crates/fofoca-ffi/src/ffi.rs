@@ -56,6 +56,36 @@ pub struct FofocaOpts {
     pub max_peers: usize,
 }
 
+/// The layout `packages/fofoca-ffi/src/dlopen/opts-struct.ts` hand-encodes,
+/// pinned here so the two sides are coupled by a compile error rather than by
+/// copied comments. `bun:ffi` and Deno's FFI cannot marshal a struct, so that
+/// file writes these exact offsets into a byte buffer; koffi (Node) names the
+/// fields instead and does not depend on this block.
+///
+/// Adding or reordering a field breaks a linked C consumer silently — it keeps
+/// passing the old layout — so a failure here is the signal to bump
+/// `OPTS_BYTES` in that file, its offset constants, and the CHANGELOG entry
+/// together. 64-bit little-endian, the same scope the TypeScript claims.
+const _: () = {
+    use std::mem::{align_of, offset_of, size_of};
+
+    assert!(size_of::<FofocaOpts>() == 80, "opts-struct.ts OPTS_BYTES");
+    assert!(align_of::<FofocaOpts>() == 8);
+    assert!(offset_of!(FofocaOpts, mesh) == 0);
+    assert!(offset_of!(FofocaOpts, topic) == 8);
+    assert!(offset_of!(FofocaOpts, nick) == 16);
+    assert!(offset_of!(FofocaOpts, name) == 24);
+    assert!(offset_of!(FofocaOpts, is_public) == 32);
+    assert!(offset_of!(FofocaOpts, mdns) == 36);
+    assert!(offset_of!(FofocaOpts, dht) == 40);
+    assert!(offset_of!(FofocaOpts, relay_lookup) == 44);
+    assert!(offset_of!(FofocaOpts, relay_transport) == 48);
+    assert!(offset_of!(FofocaOpts, relay_urls) == 56);
+    assert!(offset_of!(FofocaOpts, disable_ip) == 64);
+    assert!(offset_of!(FofocaOpts, disable_webrtc) == 68);
+    assert!(offset_of!(FofocaOpts, max_peers) == 72);
+};
+
 /// One received frame's metadata, mirroring `fofoca_frame` in the header. The
 /// payload itself lands in the caller's own buffer; `len` says how much.
 #[repr(C)]

@@ -543,6 +543,35 @@ mod tests {
         );
     }
 
+    /// `relay_urls` is caller-supplied — the `relay_urls` C field splits an
+    /// arbitrary string on `,` — so an oversize ladder must be an error here,
+    /// at the boundary. Past 255 rungs the wire count no longer fits its `u8`
+    /// and the encoder panics; a wasm or in-process caller has no guard to
+    /// catch that, and an FFI caller gets a bare "a panic crossed the FFI
+    /// boundary" instead of a diagnostic.
+    #[test]
+    fn an_oversize_relay_ladder_is_an_error_not_a_panic() {
+        let urls: Vec<String> = (0..300)
+            .map(|index| format!("https://r{index}.example"))
+            .collect();
+        for kind in [None, Some("standup".to_owned())] {
+            let error = resolve_kind(
+                &Opts {
+                    topic: kind.clone(),
+                    relay_urls: urls.clone(),
+                    ..opts()
+                },
+                None,
+            )
+            .expect_err("300 rungs must not reach the encoder");
+            // `{:#}` so the topic path's context does not hide the cause.
+            assert!(
+                format!("{error:#}").contains("relay ladder too long"),
+                "got: {error:#}"
+            );
+        }
+    }
+
     /// A topic with the relay allowed as transport derives a different mesh
     /// than the plain public-preset topic — and inherits the policy.
     #[test]

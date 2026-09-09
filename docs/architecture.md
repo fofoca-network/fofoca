@@ -111,6 +111,8 @@ The engine meets the WebRTC transport in a consumer, through injected transport 
 | `fofoca-logging` | Tracing sink and directive filter. |
 | `fofoca` | The engine. The only crate that names `iroh` and `iroh-gossip`. |
 | `fofoca-ffi` | A C-ABI shim, so a non-Rust process joins a mesh in-process. |
+| `fofoca-pipe` | The byte pipe: one `Opts`-to-`Session` contract a tab and a terminal share. Reaches wasm32. |
+| `fofoca-wasm` | The browser peer — that pipe as a wasm-bindgen class. Builds only for wasm32. |
 | `fofoca-chunks` | Content-addressed chunk store: BLAKE3 leaf rows over data the crate does not own. Replaced `fofoca-blobs`. |
 | `fofoca-iroh-webrtc-transport` | An iroh custom transport: QUIC datagrams over a WebRTC data channel. |
 | `fofoca-iroh-multihop-transport` | An iroh custom transport: source-routed relaying through peers. |
@@ -431,12 +433,13 @@ A gossip graft waits for that proof (`transport::probe`), so a pair never dials 
 The accept side holds too: every inbound gossip, unicast and blob connection is held, unread, until iroh selects a direct path on it, and closed with a coded reason if none arrives in `PROBE_DEADLINE` (`transport::path::refuse_unless_direct`).
 The rendezvous link is gated the same way on the beacon, so no gossip frame ever crosses the relay.
 A pair that cannot hole-punch and has no WebRTC session stays unlinked for payload.
-`transport.relay = true` lets payload fall back to the relay, as before the policy existed.
+`transport.relay_transport = true` lets payload fall back to the relay, as before the policy existed.
 The policy is in the id so that every member enforces the same rule; one relaying member would undo the saving for everyone it links.
 An id minted before the policy existed keeps its bytes and topic and reads as lookup only.
 
-Every create surface names the relay's two roles apart: `relay` (lookup) and `relay_transport` (`relayTransport` in JSON and TypeScript, `--relay-transport` on a CLI).
-The second needs the first; a config that sets it with the relay disabled is rejected before any network.
+Every create surface names the relay's two roles apart: `relay_lookup` (`relayLookup` in JSON and TypeScript, `--relay-lookup` on a CLI) and `relay_transport` (`relayTransport`, `--relay-transport`).
+The second needs the first; a config that sets it with the relay disabled is rejected before any network, along with a custom ladder that would not survive the wire (`MeshConfig::validate`).
+Per-node capability is a different thing and stays out of the id: `TransportOpts` says whether *this* node has IP, WebRTC or a relay transport at all.
 The policy is validated end to end by `cargo task e2e --suite mesh`: a real native peer and a real browser tab on a local relay, swept over the policy, the native transport set, and the join mode.
 
 ### 9.2 WebRTC transport

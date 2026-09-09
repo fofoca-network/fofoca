@@ -36,7 +36,7 @@ refuse it by design — payload never rides the relay unless the mesh says
 so); `/peers` prints the roster; `/quit` leaves.
 
 Both halves accept the same selectors: a `topic` everyone shares, or a
-`mesh` id. `--relay <url>` / `?relay=<url>` swaps in a custom relay ladder
+`mesh` id. `--relay-url <url>` / `?relay=<url>` swaps in a custom relay ladder
 and is part of the derived id, so every member must pass the same list.
 `--relay-transport` / `?relayTransport=1` lets payload fall back to the
 relay — same rule.

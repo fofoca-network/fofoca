@@ -141,6 +141,11 @@ pub struct TransportOpts {
     /// The relay. **Never cleared by `webrtc`-only**, because the relay is the
     /// rendezvous: it carries the bootstrap dial and the JSEP exchange. Clearing
     /// it would sever the very thing that lets a `WebRTC` session be negotiated.
+    ///
+    /// Not the mesh policy: this says whether *this node* registers a relay
+    /// transport at all, the way `ip` and `webrtc` do. Whether the relay may
+    /// carry payload is mesh-wide and lives in the id, as
+    /// `protocol::TransportPolicy::relay_transport`.
     pub relay: bool,
     /// QUIC over a `WebRTC` data channel. Off, the transport is not registered
     /// on the endpoint, no offer is answered and none is made — so a pair

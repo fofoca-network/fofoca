@@ -41,9 +41,9 @@ pub struct LookupOpts {
 
 /// Wire ceiling on a custom relay ladder, so a forged id can't blow up
 /// allocation. Far above any real ladder.
-const MAX_RELAY_LADDER: usize = 16;
+pub(super) const MAX_RELAY_LADDER: usize = 16;
 /// Wire ceiling on a single relay URL's byte length.
-const MAX_RELAY_URL_BYTES: usize = 512;
+pub(super) const MAX_RELAY_URL_BYTES: usize = 512;
 
 impl LookupOpts {
     /// Loopback-only: no address-lookups, no relay (the seed-derived
@@ -85,13 +85,42 @@ impl LookupOpts {
         }
     }
 
+    /// The wire ceilings [`encode_into`](Self::encode_into) relies on. A
+    /// caller-supplied ladder (`--relay-url`, `relayUrls`, the `relay_urls` C
+    /// field) reaches the encoder unbounded otherwise: past
+    /// [`MAX_RELAY_LADDER`] it mints an id [`decode_from`](Self::decode_from)
+    /// rejects, and past 255 the count no longer fits its `u8`.
+    ///
+    /// # Errors
+    /// The custom ladder is longer than [`MAX_RELAY_LADDER`], or one of its
+    /// URLs is longer than [`MAX_RELAY_URL_BYTES`].
+    pub fn validate(&self) -> Result<()> {
+        let RelayChoice::Custom(ladder) = &self.relay_lookup else {
+            return Ok(());
+        };
+        if ladder.len() > MAX_RELAY_LADDER {
+            bail!(
+                "relay ladder too long: {} rungs, the wire ceiling is {MAX_RELAY_LADDER}",
+                ladder.len()
+            );
+        }
+        for url in ladder {
+            let len = url.to_string().len();
+            if len > MAX_RELAY_URL_BYTES {
+                bail!("relay URL too long: {len} bytes, the wire ceiling is {MAX_RELAY_URL_BYTES}");
+            }
+        }
+        Ok(())
+    }
+
     /// Append the canonical wire encoding to `buf`:
     /// `[flags u8][if custom: [count u8] ([len u16 LE] url)*]`.
     ///
     /// # Panics
     /// If a relay ladder longer than `MAX_RELAY_LADDER`, or a relay URL longer
-    /// than `MAX_RELAY_URL_BYTES`, reaches here — both are rejected at
-    /// construction, so this is a broken invariant rather than bad input.
+    /// than `MAX_RELAY_URL_BYTES`, reaches here — [`validate`](Self::validate)
+    /// rejects both, and every mint runs it, so this is a broken invariant
+    /// rather than bad input.
     pub fn encode_into(&self, buf: &mut Vec<u8>) {
         let mut flags: u8 = 0;
         if self.mdns {
@@ -194,7 +223,7 @@ const FEATURE_PASSWORD: u8 = 0b0001;
 const FEATURE_INVITE_ONLY: u8 = 0b0010;
 
 /// Feature bit marking a mesh whose relay may carry **payload**
-/// ([`TransportPolicy::relay`] is `true`). Absent — the default, and every id
+/// ([`TransportPolicy::relay_transport`] is `true`). Absent — the default, and every id
 /// minted before the policy existed — the relay is lookup only: members carry
 /// payload (gossip, unicast, blobs) over a direct path alone, hole-punched IP
 /// or a `WebRTC` session, and the relay serves the bootstrap dial, JSEP
@@ -275,13 +304,17 @@ impl MeshConfig {
         }
     }
 
-    /// The one cross-field rule: letting the relay carry payload needs a
-    /// relay to exist as a lookup. Checked on decode and at `setup_mesh`,
-    /// the choke point every minted config passes before any network.
+    /// Everything a minted config must satisfy before it becomes an id:
+    /// [`LookupOpts::validate`]'s wire ceilings, plus the one cross-field rule
+    /// — letting the relay carry payload needs a relay to exist as a lookup.
+    /// Checked on decode and at `setup_mesh`, the choke point every minted
+    /// config passes before any network.
     ///
     /// # Errors
-    /// `transport.relay_transport` is `true` while `lookups.relay_lookup` is `Disabled`.
+    /// The lookups fail [`LookupOpts::validate`], or `transport.relay_transport`
+    /// is `true` while `lookups.relay_lookup` is `Disabled`.
     pub fn validate(&self) -> Result<()> {
+        self.lookups.validate()?;
         if self.transport.relay_transport && self.lookups.relay_lookup == RelayChoice::Disabled {
             bail!(
                 "transport.relay_transport=on needs a relay lookup: with the relay disabled there is none to carry payload"

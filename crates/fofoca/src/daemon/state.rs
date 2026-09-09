@@ -895,7 +895,17 @@ impl EventLoopState {
 
     /// Record a `conn_path` reading for `peer`; a reading that proves nothing
     /// leaves what was known — a probe verdict or a gated link — in place.
+    ///
+    /// When the relay is lookup only, a `Relay` reading is one of those: the
+    /// lanes never ride the relay, so what admitted this peer was the accept
+    /// gate or the probe, and `conn_path` cannot see which path iroh selected
+    /// underneath. Demoting on it would stop every payload lane to a peer that
+    /// is proven direct. `gossip::recv` gates its own call for this reason;
+    /// the census tick in `daemon::timers` does not, so the gate lives here.
     pub(crate) fn observe_path(&mut self, peer: EndpointId, summary: crate::gossip::PathSummary) {
+        if !self.relay_transport && summary == crate::gossip::PathSummary::Relay {
+            return;
+        }
         if let Some(state) = DirectState::from_summary(summary) {
             self.direct.insert(peer, state);
         }
@@ -1429,6 +1439,10 @@ mod tests {
     fn direct_state_follows_conn_path_readings_and_counts() {
         use crate::gossip::PathSummary;
         let mut state = fresh_state();
+        // The mapping only reaches `RelayOnly` on a mesh whose relay may carry
+        // payload; the lookup-only half is
+        // `a_relay_reading_never_demotes_a_proven_peer_on_a_lookup_only_mesh`.
+        state.relay_transport = true;
         state.observe_path(endpoint_id(1), PathSummary::Direct);
         state.observe_path(endpoint_id(2), PathSummary::Relay);
         state.direct.insert(endpoint_id(3), DirectState::Pending);
@@ -1462,6 +1476,35 @@ mod tests {
         state.observe_path(endpoint_id(4), PathSummary::Mixed);
         assert_eq!(
             state.direct.get(&endpoint_id(4)),
+            Some(&DirectState::RelayOnly)
+        );
+    }
+
+    /// On a lookup-only mesh the census reading cannot demote a proven peer.
+    /// `gossip::recv` gates its own `observe_path` for the same reason — a link
+    /// up *is* the proof there, and `conn_path` cannot see which path is
+    /// selected — but the census tick (`daemon::timers`) calls it ungated, so
+    /// the gate belongs here. A `Relay` reading on a peer the accept gate and
+    /// the probe both admitted would otherwise stop every payload lane to it.
+    #[test]
+    fn a_relay_reading_never_demotes_a_proven_peer_on_a_lookup_only_mesh() {
+        use crate::gossip::PathSummary;
+        let mut state = fresh_state();
+        state.relay_transport = false;
+        state.direct.insert(endpoint_id(1), DirectState::Direct);
+        state.observe_path(endpoint_id(1), PathSummary::Relay);
+        assert_eq!(
+            state.direct.get(&endpoint_id(1)),
+            Some(&DirectState::Direct),
+            "the relay may not carry payload, so a relayed reading proves nothing"
+        );
+
+        // With the relay allowed as transport the reading is real news: the
+        // peer is reachable, over the relay, and the lanes may use it.
+        state.relay_transport = true;
+        state.observe_path(endpoint_id(1), PathSummary::Relay);
+        assert_eq!(
+            state.direct.get(&endpoint_id(1)),
             Some(&DirectState::RelayOnly)
         );
     }

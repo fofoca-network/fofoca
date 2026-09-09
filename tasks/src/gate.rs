@@ -109,6 +109,14 @@ pub(crate) const STEPS: &[Step] = &[
         scope: Scope::Crate("fofoca-iroh-webrtc-transport"),
         args: &["--features", "native", "--all-targets"],
     },
+    // `--all-targets` is what the first row has and the `--all-features` check
+    // row lacks, so without this one the `mesh` feature's e2e suites are
+    // compiled but never linted — the only Rust in the workspace that isn't.
+    Step {
+        kind: Kind::Lint,
+        scope: Scope::Workspace,
+        args: &["--all-targets", "--all-features"],
+    },
     Step {
         kind: Kind::Check,
         scope: Scope::Workspace,
@@ -187,6 +195,14 @@ pub(crate) const STEPS: &[Step] = &[
         scope: Scope::Crate("fofoca-pipe"),
         args: &[],
     },
+    // The browser peer itself — `packages/fofoca-wasm`'s Rust half. wasm32 is
+    // the only target it has: the crate is a `cdylib` over wasm-bindgen, so
+    // nothing else builds it as the browser will.
+    Step {
+        kind: Kind::WasmCheck,
+        scope: Scope::Crate("fofoca-wasm"),
+        args: &[],
+    },
     // Clippy, not just check. The `web` backend had never been linted before
     // these rows existed and carried 18 findings on its first pass.
     Step {
@@ -215,6 +231,11 @@ pub(crate) const STEPS: &[Step] = &[
         args: &[],
     },
     Step {
+        kind: Kind::WasmClippy,
+        scope: Scope::Crate("fofoca-wasm"),
+        args: &[],
+    },
+    Step {
         kind: Kind::Test,
         scope: Scope::Workspace,
         args: &[],
@@ -234,6 +255,16 @@ pub(crate) const STEPS: &[Step] = &[
         kind: Kind::Test,
         scope: Scope::Crate("fofoca-iroh-webrtc-transport"),
         args: &["--features", "native"],
+    },
+    // `iroh-test-utils` is off by default and no row above reaches a test target
+    // with it on, so the relay-policy proofs — `tests/relay_lookup_only_*.rs`
+    // and the webrtc graft tests — were never even compiled. `--no-run`: two of
+    // them are red on the pinned iroh revs (issue #2) and the rest want a
+    // network of their own, so compiling is the part that belongs in a gate.
+    Step {
+        kind: Kind::Test,
+        scope: Scope::Crate("fofoca"),
+        args: &["--features", "iroh-test-utils", "--all-targets", "--no-run"],
     },
 ];
 

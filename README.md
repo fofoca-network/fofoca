@@ -24,7 +24,9 @@ fofoca-util          host helpers, no deps of consequence   (13 crates resolved)
         ├── fofoca-doc          shared-state CRDT channels
         ├── fofoca-logging      tracing sink + filter
         └── fofoca         the engine, + iroh, iroh-gossip (436 crates)
-              ├── fofoca-ffi                    the C ABI
+              ├── fofoca-pipe                   the byte pipe, tab and terminal
+              │     ├── fofoca-ffi              the C ABI
+              │     └── fofoca-wasm             the browser peer (wasm32 only)
               ├── fofoca-netplay                rollback netcode for p2p games
               ├── fofoca-iroh-webrtc-transport  QUIC over a WebRTC data channel
               └── fofoca-iroh-multihop-transport  QUIC relayed through peers
@@ -169,13 +171,13 @@ a CLI runs, not a reduced stand-in. What it loses is the control socket, the
 session state file, the process helpers and the log sink, none of which have a
 wasm32 equivalent.
 
-Four crates reach that target — `fofoca-wasm` is the browser peer itself,
+Six crates reach that target — `fofoca-wasm` is the browser peer itself,
 behind `packages/fofoca-wasm` — each at its own feature position, and CI
 checks and lints every one:
 
 ```bash
 rustup target add wasm32-unknown-unknown
-cargo task wasm                              # all three
+cargo task wasm                              # all six
 cargo task wasm -p fofoca-chunks             # or one
 ```
 
