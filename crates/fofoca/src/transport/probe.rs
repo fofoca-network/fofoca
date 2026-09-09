@@ -123,16 +123,43 @@ pub(crate) async fn graft_proven(
 /// gets another `ensure_direct`, subject to the relink cooldown. A no-op while
 /// the relay may carry payload. The rendezvous is skipped: it accepts no
 /// unicast, so it cannot be probed; its link is gated on the beacon's side.
-pub(crate) async fn retry_direct(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
+///
+/// On a `hard_edge` (resume) every link and proven path is stale by
+/// definition, so linked peers are retried too and their `Direct` verdicts
+/// are forgotten first, or `ensure_direct` would trust the pre-sleep answer.
+pub(crate) async fn retry_direct(
+    state: &mut EventLoopState,
+    ctx: &HandlerCtx<'_>,
+    hard_edge: bool,
+) {
     if state.relay_transport {
         return;
     }
-    let now = Instant::now();
+    let peers = retry_candidates(state, ctx.rendezvous_id, hard_edge, Instant::now());
+    if hard_edge {
+        for addr in &peers {
+            state.direct.remove(&addr.id);
+        }
+    }
+    for addr in peers {
+        if ensure_direct(state, ctx, addr.id, &addr) {
+            graft_proven(state, ctx, addr.id).await;
+        }
+    }
+}
+
+/// The peers one `retry_direct` pass probes, in a fixed order.
+fn retry_candidates(
+    state: &EventLoopState,
+    rendezvous_id: EndpointId,
+    hard_edge: bool,
+    now: Instant,
+) -> Vec<iroh::EndpointAddr> {
     let mut peers: Vec<iroh::EndpointAddr> = state
         .peer_endpoints
         .values()
-        .filter(|addr| addr.id != ctx.rendezvous_id)
-        .filter(|addr| !state.linked_endpoints.contains(&addr.id))
+        .filter(|addr| addr.id != rendezvous_id)
+        .filter(|addr| hard_edge || !state.linked_endpoints.contains(&addr.id))
         .filter(|addr| {
             state.direct.get(&addr.id) != Some(&DirectState::Pending)
                 || (needs_webrtc_lane(addr)
@@ -145,16 +172,67 @@ pub(crate) async fn retry_direct(state: &mut EventLoopState, ctx: &HandlerCtx<'_
         .cloned()
         .collect();
     peers.sort_unstable_by_key(|addr| addr.id);
-    for addr in peers {
-        if ensure_direct(state, ctx, addr.id, &addr) {
-            graft_proven(state, ctx, addr.id).await;
-        }
-    }
+    peers
 }
 
 #[cfg(test)]
 mod tests {
-    use super::may_graft;
+    use iroh::EndpointAddr;
+
+    use super::{may_graft, retry_candidates};
+    use crate::daemon::state::DirectState;
+    use crate::testing::{endpoint_id, fresh_state, nick};
+    use crate::util::clock::Instant;
+
+    // After a laptop sleep every link and every proven path is stale, but
+    // `linked_endpoints` is not cleared on the resume edge and `direct`
+    // still says `Direct`. The alive-tick filters then skip exactly the
+    // peers the re-bridge exists to re-dial, so the hard edge logged
+    // "re-dialing known peers" and dialed nobody on a lookup-only mesh.
+    #[test]
+    fn a_hard_edge_re_probes_linked_and_proven_peers() {
+        let mut state = fresh_state();
+        state.relay_transport = false;
+        let rendezvous = endpoint_id(1);
+        let linked = endpoint_id(2);
+        let unlinked = endpoint_id(3);
+        for (name, id) in [
+            ("beacon", rendezvous),
+            ("linked", linked),
+            ("unlinked", unlinked),
+        ] {
+            state
+                .peer_endpoints
+                .insert(nick(name), EndpointAddr::new(id));
+        }
+        state.linked_endpoints.insert(linked);
+        state.direct.insert(linked, DirectState::Direct);
+        state.direct.insert(unlinked, DirectState::RelayOnly);
+        let now = Instant::now();
+
+        let soft: Vec<_> = retry_candidates(&state, rendezvous, false, now)
+            .into_iter()
+            .map(|addr| addr.id)
+            .collect();
+        assert_eq!(
+            soft,
+            [unlinked],
+            "the alive tick leaves a linked peer alone"
+        );
+
+        let mut hard: Vec<_> = retry_candidates(&state, rendezvous, true, now)
+            .into_iter()
+            .map(|addr| addr.id)
+            .collect();
+        hard.sort_unstable();
+        let mut expected = [linked, unlinked];
+        expected.sort_unstable();
+        assert_eq!(hard, expected, "the hard edge re-dials the linked peer too");
+        assert!(
+            !hard.contains(&rendezvous),
+            "the rendezvous accepts no unicast, so it is never a candidate"
+        );
+    }
 
     #[test]
     fn ip_peer_needs_a_proven_direct_path() {

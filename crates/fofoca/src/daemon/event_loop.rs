@@ -664,7 +664,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
                 // Same cadence for the direct-path probes a lookup-only relay
                 // holds grafts on: a peer whose punch missed the deadline, or
                 // whose session attached since, gets another look.
-                crate::transport::probe::retry_direct(&mut state, &ctx).await;
+                crate::transport::probe::retry_direct(&mut state, &ctx, false).await;
             }
             _ = intervals.sweep.tick() => {
                 state.idle.sweep += 1;

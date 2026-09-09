@@ -93,7 +93,11 @@ pub(crate) async fn tick_heal_hard(
 /// the probe is what proves the path unicast needs.
 ///
 /// [`EventLoopState::known_endpoints`]: crate::daemon::state::EventLoopState::known_endpoints
-pub(crate) async fn rebridge_known(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
+pub(crate) async fn rebridge_known(
+    state: &mut EventLoopState,
+    ctx: &HandlerCtx<'_>,
+    hard_edge: bool,
+) {
     let peers: Vec<EndpointId> = state.known_endpoints.iter().copied().collect();
     // `info`, not `debug`: this fires only on the isolation signal (rare,
     // event-driven), and a re-bridge attempt is part of the always-on
@@ -105,7 +109,7 @@ pub(crate) async fn rebridge_known(state: &mut EventLoopState, ctx: &HandlerCtx<
         "heal: rendezvous-independent re-bridge (re-dialing known peers)"
     );
     if !state.relay_transport {
-        crate::transport::probe::retry_direct(state, ctx).await;
+        crate::transport::probe::retry_direct(state, ctx, hard_edge).await;
         return;
     }
     if let Err(error) = ctx.sender.join_peers(peers).await {
@@ -142,7 +146,7 @@ pub(crate) async fn recover_from_starvation(state: &mut EventLoopState, ctx: &Ha
     state.relink.clear();
     state.peerinfo.clear();
     state.joined_reflood_at = None;
-    rebridge_known(state, ctx).await;
+    rebridge_known(state, ctx, false).await;
     super::broadcast::announce_arrival(state, ctx).await;
     let now = Instant::now();
     state.last_sent_at = now;

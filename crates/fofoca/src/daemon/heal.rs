@@ -120,7 +120,7 @@ pub(super) async fn run_heal(
     // (nothing remembered), so it adds no churn. `linked_endpoints` is
     // not cleared on the resume edge, hence the explicit `hard_edge` arm.
     if (hard_edge || state.linked_endpoints.is_empty()) && !state.known_endpoints.is_empty() {
-        gossip::heal::rebridge_known(state, ctx).await;
+        gossip::heal::rebridge_known(state, ctx, hard_edge).await;
     }
     // Starvation watchdog: links/heal can look busy while no traffic
     // flows (the roster-collapse signature), so the last word every heal
