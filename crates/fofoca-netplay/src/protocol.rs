@@ -18,6 +18,22 @@ use crate::transport::{Body, InputPacket, Message};
 /// one because a single reply only proves the path worked once.
 const SYNC_ROUNDTRIPS: u32 = 5;
 
+/// Ticks between resends of an unanswered sync request.
+///
+/// A request used to go out on every tick until it was answered, which is a
+/// feedback loop: the peer echoes each one, only the reply matching the
+/// current token advances the handshake, and the rest are discarded. When the
+/// loop ticks faster than the transport drains — a slow machine, a busy
+/// runner — the queue grows faster than the useful reply can reach the front,
+/// and the handshake stops converging at all. Measured on a two-peer
+/// loopback match: 4 discarded replies per peer on a developer laptop, 256 on
+/// a shared CI runner, and two runs that never finished inside 60s.
+///
+/// Eight ticks bounds the outstanding requests without slowing the handshake
+/// noticeably: a round trip that completes is answered immediately, because
+/// [`PeerProtocol::on_message`] clears the counter when the token rotates.
+const SYNC_RESEND_EVERY_TICKS: u32 = 8;
+
 /// Ticks without hearing anything before a peer is declared gone.
 ///
 /// Generous on purpose: a browser tab that is backgrounded has its
@@ -72,6 +88,9 @@ pub(crate) struct PeerProtocol<T: Config> {
     roundtrips_left: u32,
     /// Token echoed in the current outstanding sync request.
     sync_token: u32,
+    /// Ticks since the outstanding sync request went out, so it is resent on
+    /// a cadence rather than every tick. `0` means "send one now".
+    since_sync_request: u32,
     /// Highest frame we have a real input from this peer for.
     last_received_frame: Frame,
     /// Highest frame *they* have acked from us — everything past this is
@@ -122,6 +141,7 @@ impl<T: Config> PeerProtocol<T> {
             // Derived from our own nonce so the first request is answerable
             // without any shared randomness.
             sync_token: magic ^ 0x5bf0_3635,
+            since_sync_request: 0,
             last_received_frame: NULL_FRAME,
             last_acked_frame: NULL_FRAME,
             pending: Vec::new(),
@@ -193,9 +213,16 @@ impl<T: Config> PeerProtocol<T> {
         }
 
         match self.state {
-            PeerState::Syncing => out.push(self.wrap(Body::SyncRequest {
-                token: self.sync_token,
-            })),
+            PeerState::Syncing => {
+                // Only when one is due: see `SYNC_RESEND_EVERY_TICKS` for why
+                // sending on every tick stops the handshake converging.
+                if self.since_sync_request == 0 {
+                    out.push(self.wrap(Body::SyncRequest {
+                        token: self.sync_token,
+                    }));
+                }
+                self.since_sync_request = (self.since_sync_request + 1) % SYNC_RESEND_EVERY_TICKS;
+            }
             PeerState::Running => {
                 out.extend(self.input_message());
                 self.since_quality_report = self.since_quality_report.saturating_add(1);
@@ -292,6 +319,9 @@ impl<T: Config> PeerProtocol<T> {
                     // Fresh token each round so a duplicated reply cannot
                     // advance the handshake twice.
                     self.sync_token = self.sync_token.wrapping_mul(1_664_525).wrapping_add(1);
+                    // The next round's request is due now, not in a cadence's
+                    // time: this reply is the proof the last one arrived.
+                    self.since_sync_request = 0;
                     tracing::debug!(
                         handle = self.handle,
                         roundtrips_left = self.roundtrips_left,
@@ -382,5 +412,74 @@ impl<T: Config> PeerProtocol<T> {
             }
         }
         (inputs, events)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Body, PeerProtocol, PeerState, SYNC_RESEND_EVERY_TICKS};
+    use crate::frame::NULL_FRAME;
+    use crate::testutil::TestGame;
+    use crate::transport::Message;
+
+    fn syncing_peer() -> PeerProtocol<TestGame> {
+        PeerProtocol::<TestGame>::new("peer".to_owned(), 1, 0xabcd_1234)
+    }
+
+    /// How many sync requests one tick produced.
+    fn requests(peer: &mut PeerProtocol<TestGame>) -> usize {
+        let (out, _) = peer.tick(NULL_FRAME);
+        out.iter()
+            .filter(|message| matches!(message.body, Body::SyncRequest { .. }))
+            .count()
+    }
+
+    /// A request on every tick is a feedback loop: the peer echoes each one,
+    /// every reply but the newest is discarded, and on a machine that ticks
+    /// faster than the transport drains the handshake stops converging. See
+    /// [`SYNC_RESEND_EVERY_TICKS`].
+    #[test]
+    fn a_syncing_peer_resends_on_a_cadence_not_every_tick() {
+        let mut peer = syncing_peer();
+        assert_eq!(requests(&mut peer), 1, "the first request goes out at once");
+        for tick in 1..SYNC_RESEND_EVERY_TICKS {
+            assert_eq!(
+                requests(&mut peer),
+                0,
+                "tick {tick} resent while one was still outstanding"
+            );
+        }
+        assert_eq!(requests(&mut peer), 1, "the unanswered request is resent");
+    }
+
+    /// The cadence is a ceiling on *unanswered* requests, not a floor on the
+    /// handshake: an answered round trip is proof the path works, so the next
+    /// request is due immediately rather than a cadence later.
+    #[test]
+    fn an_answered_round_trip_releases_the_next_request_at_once() {
+        let mut peer = syncing_peer();
+        let (out, _) = peer.tick(NULL_FRAME);
+        let Some(Body::SyncRequest { token }) = out.first().map(|message| message.body.clone())
+        else {
+            panic!("a syncing peer opens with a request")
+        };
+
+        // Silent while the request is outstanding.
+        assert_eq!(requests(&mut peer), 0);
+
+        let mut replies = Vec::new();
+        peer.on_message(
+            &Message {
+                magic: peer.magic,
+                body: Body::SyncReply { token },
+            },
+            &mut replies,
+        );
+        assert_eq!(
+            requests(&mut peer),
+            1,
+            "the next round trip must not wait out the resend cadence"
+        );
+        assert_eq!(peer.state(), PeerState::Syncing, "one trip of several");
     }
 }
