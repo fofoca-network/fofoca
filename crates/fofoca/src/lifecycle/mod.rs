@@ -181,21 +181,13 @@ pub(crate) async fn handle_presence(
         // them; a rejoin across a beacon epoch may have lost it the same way
         // (both observed native↔browser in the mesh matrix: a roster entry
         // with no endpoint binding reads "unreachable" forever).
-        // Cooldown-gated per endpoint like the `NeighborUp` re-send, so an
-        // N-member join burst — everyone re-announces, everyone hears every
-        // re-announce — stays N floods, not N²; a first sighting (no
-        // endpoint binding yet, the case the re-flood exists for) always
-        // floods.
+        // Self-keyed cooldown, not per triggering endpoint: one newcomer
+        // makes every member re-announce, and a per-endpoint key would let
+        // each member flood once per re-announce it hears (N²). A first
+        // sighting (the case the re-flood exists for) always floods.
         let now = Instant::now();
-        let known = state
-            .peer_endpoints
-            .get(message.author.as_str())
-            .map(|addr| addr.id);
-        if known.is_none_or(|id| !state.peerinfo_on_cooldown(id, now)) {
+        if state.joined_refloods_peerinfo(update.joined_new, now) {
             gossip::broadcast_peer_info(ctx).await;
-            if let Some(id) = known {
-                state.note_peerinfo(id, now);
-            }
             state.last_sent_at = now;
         }
         if update.joined_new {

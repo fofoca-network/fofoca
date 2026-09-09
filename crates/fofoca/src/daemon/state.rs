@@ -167,6 +167,10 @@ pub struct EventLoopState {
     /// stay independently reasoned (and a new neighbor still gets exactly one
     /// re-flood).
     pub(crate) peerinfo: Cooldown<EndpointId>,
+    /// When a received `joined` last re-flooded our `PeerInfo`. Self-keyed,
+    /// unlike `peerinfo`: one newcomer makes every member re-announce, so a
+    /// per-trigger key would let each member flood once per member (N²).
+    pub(crate) joined_reflood_at: Option<Instant>,
     /// When each author's digest was last served. Keyed on the pubkey rather
     /// than the nickname, which an author picks freely.
     digest_serves: Cooldown<String>,
@@ -592,6 +596,7 @@ impl EventLoopState {
             known_endpoints: BoundedFifoSet::new(KNOWN_ENDPOINTS_CAP),
             relink: Cooldown::new(RELINK_COOLDOWN),
             peerinfo: Cooldown::new(RELINK_COOLDOWN),
+            joined_reflood_at: None,
             digest_serves: Cooldown::new(Duration::from_secs(
                 fofoca_util::tuning::ANTIENTROPY_SERVE_COOLDOWN_SECS,
             )),
@@ -754,6 +759,22 @@ impl EventLoopState {
     /// Record a `PeerInfo` re-flood triggered by `peer` at `now`.
     pub(crate) fn note_peerinfo(&mut self, peer: EndpointId, now: Instant) {
         self.peerinfo.note(peer, now);
+    }
+
+    /// Whether a `joined` received at `now` re-floods our `PeerInfo`, and if
+    /// so records the flood. A first sighting (`joined_new`) always does: the
+    /// newcomer linked to the rendezvous, so no `NeighborUp` on this loop will
+    /// send it our address. A re-announce does at most once per window (see
+    /// `joined_reflood_at`).
+    pub(crate) fn joined_refloods_peerinfo(&mut self, joined_new: bool, now: Instant) -> bool {
+        let on_cooldown = self
+            .joined_reflood_at
+            .is_some_and(|at| now.duration_since(at) < RELINK_COOLDOWN);
+        if !joined_new && on_cooldown {
+            return false;
+        }
+        self.joined_reflood_at = Some(now);
+        true
     }
 
     /// Record `message` as seen and report whether it was *already* seen.
@@ -1620,6 +1641,36 @@ mod tests {
         // Past the window the flapping peer may re-flood once more (no permanent silence).
         let later = start + Duration::from_secs(RELINK_COOLDOWN_SECS + 1);
         assert!(!state.peerinfo_on_cooldown(peer, later));
+    }
+
+    // A received `joined` re-floods our `PeerInfo` so the joiner binds our
+    // endpoint. One newcomer makes every member re-announce, so each member
+    // hears N-1 `joined` from N-1 distinct endpoints inside one window. Keyed
+    // per triggering peer that was N-1 floods per member, N² mesh-wide. The
+    // gate is self-keyed instead: one flood per window whoever triggered it,
+    // while a first sighting (the case the re-flood exists for) still floods.
+    #[test]
+    fn joined_refloods_peerinfo_once_per_window() {
+        let start = Instant::now();
+        let mut state = fresh_state();
+
+        let refloods = (0..20u64)
+            .filter(|index| {
+                let now = start + Duration::from_millis(index * 10);
+                state.joined_refloods_peerinfo(false, now)
+            })
+            .count();
+        assert_eq!(
+            refloods, 1,
+            "a burst of re-announces re-floods once per window, not once per peer"
+        );
+
+        // A first sighting inside the window is not throttled.
+        assert!(state.joined_refloods_peerinfo(true, start + Duration::from_secs(1)));
+
+        // Past the window a re-announce floods once more (no permanent silence).
+        let later = start + Duration::from_secs(1 + RELINK_COOLDOWN_SECS + 1);
+        assert!(state.joined_refloods_peerinfo(false, later));
     }
 
     // Under a long flap storm against a steady peer set, every collection *we*

@@ -141,6 +141,7 @@ pub(crate) async fn recover_from_starvation(state: &mut EventLoopState, ctx: &Ha
     state.note_degraded();
     state.relink.clear();
     state.peerinfo.clear();
+    state.joined_reflood_at = None;
     rebridge_known(state, ctx).await;
     super::broadcast::announce_arrival(state, ctx).await;
     let now = Instant::now();
