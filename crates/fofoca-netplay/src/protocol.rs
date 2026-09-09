@@ -88,6 +88,13 @@ pub(crate) struct PeerProtocol<T: Config> {
     time_sync: TimeSync,
     /// Checksums we have advertised, so a mismatch can be attributed.
     local_checksums: Vec<(Frame, u128)>,
+    /// Packets discarded for carrying a foreign session nonce, and sync
+    /// replies discarded for echoing a spent token. Both are silent drops
+    /// that leave a session stuck in `Synchronizing` with traffic flowing
+    /// both ways, which is indistinguishable from a dead peer without a
+    /// count. Diagnostic only — nothing reads them but the log.
+    foreign_magic_drops: u32,
+    stale_token_drops: u32,
 }
 
 impl<T: Config> std::fmt::Debug for PeerProtocol<T> {
@@ -123,6 +130,8 @@ impl<T: Config> PeerProtocol<T> {
             remote_advantage: 0,
             time_sync: TimeSync::default(),
             local_checksums: Vec::new(),
+            foreign_magic_drops: 0,
+            stale_token_drops: 0,
         }
     }
 
@@ -172,6 +181,12 @@ impl<T: Config> PeerProtocol<T> {
 
         self.silent_ticks = self.silent_ticks.saturating_add(1);
         if self.state != PeerState::Disconnected && self.silent_ticks > DISCONNECT_TIMEOUT_TICKS {
+            tracing::debug!(
+                handle = self.handle,
+                silent_ticks = self.silent_ticks,
+                was = ?self.state,
+                "peer went silent past the disconnect timeout"
+            );
             self.state = PeerState::Disconnected;
             events.push(PeerEvent::Disconnected);
             return (out, events);
@@ -240,9 +255,30 @@ impl<T: Config> PeerProtocol<T> {
         let mut events = Vec::new();
 
         match self.remote_magic {
-            Some(known) if known != message.magic => return (inputs, events),
+            Some(known) if known != message.magic => {
+                self.foreign_magic_drops = self.foreign_magic_drops.saturating_add(1);
+                // Powers of two: the drop that matters is the first one, and a
+                // wedged handshake produces thousands a second.
+                if self.foreign_magic_drops.is_power_of_two() {
+                    tracing::debug!(
+                        handle = self.handle,
+                        expected = known,
+                        received = message.magic,
+                        drops = self.foreign_magic_drops,
+                        "dropped a packet from a foreign session"
+                    );
+                }
+                return (inputs, events);
+            }
             Some(_) => {}
-            None => self.remote_magic = Some(message.magic),
+            None => {
+                tracing::debug!(
+                    handle = self.handle,
+                    remote_magic = message.magic,
+                    "latched the peer's session nonce"
+                );
+                self.remote_magic = Some(message.magic);
+            }
         }
         self.silent_ticks = 0;
 
@@ -256,9 +292,30 @@ impl<T: Config> PeerProtocol<T> {
                     // Fresh token each round so a duplicated reply cannot
                     // advance the handshake twice.
                     self.sync_token = self.sync_token.wrapping_mul(1_664_525).wrapping_add(1);
+                    tracing::debug!(
+                        handle = self.handle,
+                        roundtrips_left = self.roundtrips_left,
+                        "sync round trip"
+                    );
                     if self.roundtrips_left == 0 {
                         self.state = PeerState::Running;
                         events.push(PeerEvent::Synchronized);
+                    }
+                } else if self.state == PeerState::Syncing {
+                    // Every request is resent until it is answered, so a few
+                    // spent echoes are normal. A count that keeps climbing
+                    // while `roundtrips_left` does not is the handshake
+                    // failing to converge.
+                    self.stale_token_drops = self.stale_token_drops.saturating_add(1);
+                    if self.stale_token_drops.is_power_of_two() {
+                        tracing::debug!(
+                            handle = self.handle,
+                            expected = self.sync_token,
+                            received = *token,
+                            roundtrips_left = self.roundtrips_left,
+                            drops = self.stale_token_drops,
+                            "dropped a sync reply echoing a spent token"
+                        );
                     }
                 }
             }
@@ -278,6 +335,12 @@ impl<T: Config> PeerProtocol<T> {
                 if self.last_received_frame != NULL_FRAME
                     && packet.start_frame > self.last_received_frame + 1
                 {
+                    tracing::trace!(
+                        handle = self.handle,
+                        start_frame = packet.start_frame,
+                        last_received_frame = self.last_received_frame,
+                        "dropped an input packet that would leave a hole"
+                    );
                     return (inputs, events);
                 }
                 for (offset, input) in packet.inputs.iter().enumerate() {

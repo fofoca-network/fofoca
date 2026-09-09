@@ -203,6 +203,10 @@ impl<T: Config> NodeDriver for RollbackDriver<T> {
                     // We have never heard from this peer, so we cannot
                     // address it. The lobby only admits peers we have heard
                     // from, so this means they left mid-match.
+                    tracing::debug!(
+                        peer = %to,
+                        "dropped a rollback packet for a peer with no known nickname"
+                    );
                     return false;
                 };
                 send(state, ctx, ROLLBACK_TAG, Some(nickname), payload).await

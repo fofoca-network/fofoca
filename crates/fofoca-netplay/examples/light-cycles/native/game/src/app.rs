@@ -104,6 +104,10 @@ pub struct Game {
     /// iterate — see the determinism contract.
     nicks: BTreeMap<String, String>,
     match_number: u64,
+    /// The session id the live session was built against. The epoch alone
+    /// cannot say: the lobby's tie-break can settle on another match at the
+    /// same epoch, and then this is what disagrees with `Lobby::started`.
+    playing_session_id: Option<u64>,
     /// The direction the player is steering toward. Sticky: it is held
     /// state, not an event, which is what makes the session's "predict by
     /// repeating the last input" guess the right one.
@@ -129,6 +133,7 @@ impl Game {
             my_nick,
             nicks: BTreeMap::new(),
             match_number: 0,
+            playing_session_id: None,
             steer: None,
             ticks: 0,
             decided_since: None,
@@ -243,6 +248,23 @@ impl Game {
             return;
         };
         if agreed.epoch <= self.match_number {
+            // The lobby's tie-break can swap the agreed match at the *same*
+            // epoch, and this declines to follow it: the session is already
+            // built against the old id. Logged because the result is a pair
+            // that never synchronizes while both sides look healthy.
+            if self
+                .session
+                .as_ref()
+                .is_some_and(|session| session.state() != SessionState::Running)
+                && self.playing_session_id != Some(agreed.session_id)
+            {
+                tracing::debug!(
+                    epoch = agreed.epoch,
+                    agreed = agreed.session_id,
+                    playing = self.playing_session_id,
+                    "the lobby moved to another match at this epoch; keeping the built one"
+                );
+            }
             return;
         }
         let agreed = agreed.clone();
@@ -276,6 +298,7 @@ impl Game {
         self.descriptor = Some(descriptor);
         self.session = Some(session);
         self.match_number = agreed.epoch;
+        self.playing_session_id = Some(agreed.session_id);
         self.decided_since = None;
         self.desynced = false;
         self.steer = None;

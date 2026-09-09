@@ -46,6 +46,11 @@ serde_json.workspace = true
 # `sync` only: the outbound mailbox is a `Node::sender()` channel. No
 # runtime, no timers — wasm32 has no thread pool and needs neither.
 tokio = { workspace = true, default-features = false, features = ["sync"] }
+# The handshake drops packets silently by design — a foreign session's nonce,
+# a stale sync token, a peer we cannot address. When a session then sits in
+# `Synchronizing` forever the drop is the whole story, and without this there
+# is nothing to read. Off unless the consumer asks for it.
+tracing.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

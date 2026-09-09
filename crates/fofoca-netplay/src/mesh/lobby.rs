@@ -280,6 +280,21 @@ impl Lobby {
         let Some(local_handle) = players.iter().position(|key| *key == self.my_pubkey) else {
             return;
         };
+        // A replacement at the *same* epoch is the tie-break resolving a
+        // proposal race, and it is the one transition a consumer can miss:
+        // it changes the agreed session id without changing the epoch, so a
+        // consumer that only re-arms on a new epoch keeps the old match.
+        tracing::debug!(
+            epoch,
+            session_id,
+            local_handle,
+            players = players.len(),
+            replaced = self
+                .started
+                .as_ref()
+                .is_some_and(|current| current.epoch == epoch),
+            "adopted a match"
+        );
         self.epoch = epoch;
         self.started = Some(StartedMatch {
             epoch,

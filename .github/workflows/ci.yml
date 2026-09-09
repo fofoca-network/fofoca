@@ -266,14 +266,22 @@ jobs:
       #
       # `pubprobe.rs` is ignored: it needs the public relay ladder and a
       # hole-punchable network. What runs here is `two_bots.rs`, offline and
-      # deterministic; it wires the engine's tracing to `RUST_LOG`, so a
-      # failure prints the captured timeline. Keep this at `info` — `debug`
-      # turns on the per-peer `conn_path` census, which is N actor
-      # round-trips per tick.
+      # deterministic; it wires both crates' tracing to `RUST_LOG`, so a
+      # failure prints the captured timeline.
+      #
+      # The engine stays at `info`: `fofoca=debug` turns on the per-peer
+      # `conn_path` census, which is N actor round-trips per tick. The
+      # netplay half is at `debug` because that is where a stuck match
+      # actually shows — a session that never leaves `Synchronizing` looks
+      # identical to a dead peer from outside, and the packets it discards
+      # (a foreign session nonce, a spent sync token, an address in no
+      # peer) are the whole story. Each of those is counted and logged on
+      # powers of two, so a wedged run costs a few dozen lines, not one per
+      # packet.
       - name: Test
         run: cargo test --workspace
         env:
-          RUST_LOG: fofoca=info
+          RUST_LOG: fofoca=info,fofoca_netplay=debug,light_cycles_native=debug
 
   # `crates/fofoca-netplay/examples/light-cycles/web/wasm/` is its own cargo
   # workspace (an empty `[workspace]` table, same trick chat-web uses —
