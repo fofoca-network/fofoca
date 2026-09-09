@@ -792,6 +792,19 @@ impl EventLoopState {
         self.linked_endpoints.remove(&peer);
     }
 
+    /// A probe reported no direct path to `peer`. A peer that proved itself
+    /// another way while the probe ran (its inbound graft landed), or that
+    /// left meanwhile, keeps what it has.
+    pub(crate) fn demote_unproven(&mut self, peer: EndpointId) -> bool {
+        match self.direct.get_mut(&peer) {
+            Some(verdict @ DirectState::Pending) => {
+                *verdict = DirectState::RelayOnly;
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Record `message` as seen and report whether it was *already* seen.
     /// `true` => this is a duplicate delivery the caller must drop. Keys on
     /// the author-bound [`Message::dedup_key`], so a forgery reusing a
@@ -1694,6 +1707,23 @@ mod tests {
         state.unlink(bob);
         assert!(state.linked_endpoints.is_empty());
         assert_eq!(state.direct.get(&bob), Some(&DirectState::Direct));
+    }
+
+    #[test]
+    fn a_late_unproven_verdict_only_demotes_a_pending_peer() {
+        let mut state = fresh_state();
+        let pending = endpoint_id(1);
+        let proven = endpoint_id(2);
+        let gone = endpoint_id(3);
+        state.direct.insert(pending, DirectState::Pending);
+        state.direct.insert(proven, DirectState::Direct);
+
+        assert!(state.demote_unproven(pending));
+        assert_eq!(state.direct.get(&pending), Some(&DirectState::RelayOnly));
+        assert!(!state.demote_unproven(proven));
+        assert_eq!(state.direct.get(&proven), Some(&DirectState::Direct));
+        assert!(!state.demote_unproven(gone));
+        assert!(!state.direct.contains_key(&gone));
     }
 
     #[test]

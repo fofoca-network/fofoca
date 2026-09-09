@@ -85,7 +85,8 @@ pub(crate) fn ensure_direct(
 }
 
 /// Apply a probe's verdict: a proven peer is grafted, an unproven one is
-/// recorded `RelayOnly` for the alive tick to retry.
+/// recorded `RelayOnly` for the alive tick to retry, unless it proved itself
+/// another way while the probe ran.
 pub(crate) async fn on_outcome(
     outcome: DirectOutcome,
     state: &mut EventLoopState,
@@ -94,9 +95,10 @@ pub(crate) async fn on_outcome(
     let DirectOutcome { peer, direct } = outcome;
     if direct {
         graft_proven(state, ctx, peer).await;
-    } else {
-        state.direct.insert(peer, DirectState::RelayOnly);
+    } else if state.demote_unproven(peer) {
         tracing::info!(target: super::LOG_TARGET, %peer, "no direct path within the probe deadline; peer stays relay-only");
+    } else {
+        tracing::debug!(target: super::LOG_TARGET, %peer, "late probe verdict ignored; the peer is no longer pending");
     }
 }
 
