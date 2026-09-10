@@ -619,12 +619,13 @@ fn handle_link_state(message: &Message, state: &mut EventLoopState) {
 /// Auto-respond to a probe with a pong addressed to the pinger. The daemon
 /// owns this — no agent involvement.
 ///
-/// Over a warm connection only. Anyone who reaches this mesh can ping, and a
-/// pinger advertising an address nothing answers on used to buy a full dial
-/// timeout here — on the sole event loop, so every timer, IPC call and other
-/// peer's traffic waited with it, once per identity the pinger cared to mint.
-/// A pong nobody receives is the right outcome: the pinger's round misses us
-/// and tries again.
+/// Over a warm connection, or a background dial to a linked neighbor — never
+/// an inline dial. Anyone who reaches this mesh can ping, and a pinger
+/// advertising an address nothing answers on used to buy a full dial timeout
+/// here — on the sole event loop, so every timer, IPC call and other peer's
+/// traffic waited with it, once per identity the pinger cared to mint. A pong
+/// nobody receives is the right outcome: the pinger's round misses us and
+/// tries again.
 async fn auto_pong(message: &Message, state: &EventLoopState, ctx: &HandlerCtx<'_>) {
     let pong = Message::new_pong(ctx.mesh, ctx.author, message.author.clone()).signed(ctx.identity);
     crate::logging::messages::log_out(&pong);

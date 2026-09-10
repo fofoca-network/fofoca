@@ -183,16 +183,32 @@ async fn send_unicast(eid: EndpointId, bytes: Bytes, state: &EventLoopState) -> 
 /// message's problem but every other arm's: the daemon runs one `select!`, so
 /// whatever the receive path waits on, nothing else is being served meanwhile.
 ///
-/// Returns whether it went out. A reply nobody gets is the right outcome here —
-/// the peer's next round simply misses us.
+/// Returns whether it went out, or was handed to a background dial. A reply
+/// nobody gets is the right outcome here — the peer's next round simply misses
+/// us.
 pub(crate) async fn send_best_effort(
     eid: EndpointId,
     bytes: Bytes,
     state: &EventLoopState,
 ) -> bool {
-    // Warm connections only. Dialing here would let anyone who can be pinged
-    // back choose how long this daemon stops answering, once per identity.
-    state.unicast_pool.send_if_warm(eid, bytes).await == WarmSend::Sent
+    // Never dial inline: that would let anyone who can be pinged back choose
+    // how long this daemon stops answering, once per identity. A linked
+    // neighbor still gets a dial, off the loop — its address is proven by the
+    // link, and a link can come up with neither side holding a unicast
+    // connection, which left a peer linked only by gossip unanswerable.
+    match state.unicast_pool.send_if_warm(eid, bytes.clone()).await {
+        WarmSend::Sent => true,
+        WarmSend::Cold if state.linked_endpoints.contains(&eid) => {
+            let pool = state.unicast_pool.clone();
+            n0_future::task::spawn(async move {
+                if let Err(error) = pool.dial_and_send(eid, bytes).await {
+                    tracing::debug!(target: super::LOG_TARGET, %eid, %error, "courtesy reply to a linked neighbor not delivered");
+                }
+            });
+            true
+        }
+        WarmSend::Cold | WarmSend::Refused => false,
+    }
 }
 
 async fn broadcast(sender: &MeshSender, bytes: Bytes) -> Result<()> {
@@ -277,6 +293,32 @@ mod tests {
             0,
             "the receive path entered the inline-dial path; on a live peer that \
              is a full dial timeout with the whole event loop waiting on it"
+        );
+    }
+
+    /// **A linked neighbor is still answered, off the loop.**
+    ///
+    /// A gossip link can come up with neither side holding a unicast
+    /// connection, so a warm-only reply left a peer linked only by gossip
+    /// unanswerable. The link proves its address, so it gets a dial — spawned,
+    /// never awaited by the receive path.
+    #[tokio::test]
+    async fn a_courtesy_reply_to_a_cold_linked_neighbor_dials_off_the_loop() {
+        let (mut state, bob) = state_knowing_bob();
+        state.linked_endpoints.insert(bob);
+        let sent = super::send_best_effort(bob, Bytes::from_static(b"pong"), &state).await;
+
+        assert!(sent, "a linked neighbor is answered even with a cold pool");
+        assert_eq!(
+            state.unicast_pool.dial_attempts(),
+            0,
+            "the receive path entered the inline-dial path itself"
+        );
+        tokio::task::yield_now().await;
+        assert_eq!(
+            state.unicast_pool.dial_attempts(),
+            1,
+            "the dial runs in the background"
         );
     }
 
