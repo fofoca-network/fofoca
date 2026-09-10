@@ -146,7 +146,9 @@ async fn spawn(topic: &str, nick: &str, sink: Arc<Joined>) -> Node<Pinger> {
 
 async fn ping(node: &Node<Pinger>) -> Rtts {
     let (tx, rx) = oneshot::channel();
-    node.send(tx).await.expect("the ping request reaches the loop");
+    node.send(tx)
+        .await
+        .expect("the ping request reaches the loop");
     rx.await.expect("the round is finalized")
 }
 
@@ -161,8 +163,14 @@ async fn each_peer_linked_only_by_gossip_answers_the_others_ping() {
     let deadline = Duration::from_secs(45);
     let alice_nick = Nickname::new("alice").expect("valid");
     let bob_nick = Nickname::new("bob").expect("valid");
-    assert!(alice_saw.wait_for(&bob_nick, deadline).await, "alice never saw bob join");
-    assert!(bob_saw.wait_for(&alice_nick, deadline).await, "bob never saw alice join");
+    assert!(
+        alice_saw.wait_for(&bob_nick, deadline).await,
+        "alice never saw bob join"
+    );
+    assert!(
+        bob_saw.wait_for(&alice_nick, deadline).await,
+        "bob never saw alice join"
+    );
 
     let (alice_rtts, bob_rtts) = tokio::join!(ping(&alice), ping(&bob));
     let answered = |rtts: &Rtts, nick: &Nickname| rtts.iter().any(|(peer, _)| peer == nick);

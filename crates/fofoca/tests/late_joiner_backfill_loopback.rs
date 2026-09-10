@@ -203,9 +203,9 @@ async fn read(node: &Node<Store>) -> serde_json::Value {
 }
 
 fn key_count(document: &serde_json::Value) -> usize {
-    document
-        .as_object()
-        .map_or(0, |fields| fields.keys().filter(|key| key.starts_with('k')).count())
+    document.as_object().map_or(0, |fields| {
+        fields.keys().filter(|key| key.starts_with('k')).count()
+    })
 }
 
 /// How many of the log's changes `node` holds once it has a full answer, or
@@ -231,7 +231,9 @@ async fn a_late_joiner_backfills_on_meeting_its_only_peer() {
 
     let (bob, bob_saw) = spawn(&topic, "bob").await;
     assert!(
-        bob_saw.wait_for(&nick("alice"), Duration::from_secs(45)).await,
+        bob_saw
+            .wait_for(&nick("alice"), Duration::from_secs(45))
+            .await,
         "bob never saw alice join"
     );
 
@@ -262,14 +264,18 @@ async fn a_late_joiner_backfills_on_meeting_a_meshed_pair() {
     write_log(&alice).await;
     let (early, early_saw) = spawn(&topic, "early").await;
     assert!(
-        early_saw.wait_for(&nick("alice"), Duration::from_secs(45)).await,
+        early_saw
+            .wait_for(&nick("alice"), Duration::from_secs(45))
+            .await,
         "early never saw alice join"
     );
 
     let (late, late_saw) = spawn(&topic, "late").await;
     for peer in ["alice", "early"] {
         assert!(
-            late_saw.wait_for(&nick(peer), Duration::from_secs(45)).await,
+            late_saw
+                .wait_for(&nick(peer), Duration::from_secs(45))
+                .await,
             "late never saw {peer} join"
         );
     }
