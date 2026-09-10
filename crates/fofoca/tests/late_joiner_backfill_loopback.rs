@@ -222,7 +222,7 @@ async fn held_after_first_answer(node: &Node<Store>) -> usize {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "some loopback joins never complete: the rendezvous can forward no frame between its neighbors"]
+#[ignore = "some loopback joins never complete: the rendezvous can forward no frame between its neighbors; remove with the rendezvous-forwards-nothing fix"]
 async fn a_late_joiner_backfills_on_meeting_its_only_peer() {
     pin_antientropy_tick();
     let topic = format!("late-joiner-pair-{}", rand::random::<u64>());
@@ -249,9 +249,12 @@ async fn a_late_joiner_backfills_on_meeting_its_only_peer() {
 /// The agent-gossip shape: the late joiner meets two peers that already hold
 /// the log. Before the fix whether it passed turned on which frame each peer's
 /// first one happened to be, so it failed only some of the time; with the
-/// digest sent on any first frame it must pass every run.
+/// digest sent on any first frame the digest itself goes out every run. Under
+/// heavy load it can still miss: alice's first-link flush of the changes she
+/// queued while alone overflows the joiner's orphan buffer, and with the tick
+/// pinned nothing repairs it (follow-up: flush-outruns-its-deps).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "some loopback joins never complete: the rendezvous can forward no frame between its neighbors"]
+#[ignore = "some loopback joins never complete: the rendezvous can forward no frame between its neighbors; remove with the rendezvous-forwards-nothing fix"]
 async fn a_late_joiner_backfills_on_meeting_a_meshed_pair() {
     pin_antientropy_tick();
     let topic = format!("late-joiner-trio-{}", rand::random::<u64>());
