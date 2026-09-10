@@ -261,8 +261,10 @@ pub fn unicast_farewell(state: &EventLoopState, bytes: &Bytes) {
 /// dial us directly. Unlike `joined`, `PeerInfo` never enters the
 /// message log (`handle_peer_info` returns before the log push), so
 /// re-sending it is invisible to `poll`/`fetch_messages` consumers —
-/// safe to repeat on every new neighbor.
-pub(super) async fn broadcast_peer_info(ctx: &HandlerCtx<'_>) {
+/// safe to repeat on every new neighbor. Stamps `peerinfo_flooded_at`, the
+/// window the `joined` re-flood gate reads.
+pub(crate) async fn broadcast_peer_info(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
+    state.peerinfo_flooded_at = Some(crate::util::clock::Instant::now());
     let our_addr = ctx.endpoint.addr();
     let addr_data = serde_json::to_string(&crate::protocol::peer_addr::endpoint_addr_to_json(
         &our_addr,
@@ -288,5 +290,5 @@ pub(super) async fn announce_arrival(state: &mut EventLoopState, ctx: &HandlerCt
     let joined = Message::new_joined(ctx.mesh, ctx.author).signed(ctx.identity);
     broadcast_msg(ctx.sender, &joined).await;
     super::recv::retain_own_broadcast(state, &joined);
-    broadcast_peer_info(ctx).await;
+    broadcast_peer_info(state, ctx).await;
 }

@@ -94,7 +94,7 @@ async fn spawn(topic: &str, nick: &str, sink: Arc<Joined>) -> Node<Probe> {
     let mesh =
         derive_topic_mesh_with(topic, LookupOpts::loopback()).expect("derive a loopback mesh");
     assert!(
-        !mesh.transport().relay,
+        !mesh.transport().relay_transport,
         "the default policy keeps the relay for lookup only"
     );
     let author = Nickname::new(nick).expect("valid nickname");

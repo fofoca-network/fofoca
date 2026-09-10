@@ -5,16 +5,20 @@
  *
  * ```c
  * typedef struct {
- *   const char *mesh;    // offset  0
- *   const char *topic;   // offset  8
- *   const char *nick;    // offset 16
- *   const char *name;    // offset 24
- *   int is_public;       // offset 32
- *   int mdns;            // offset 36
- *   int dht;             // offset 40
- *   int relay;           // offset 44
- *   size_t max_peers;    // offset 48
- * } fofoca_opts;         // 56 bytes
+ *   const char *mesh;        // offset  0
+ *   const char *topic;       // offset  8
+ *   const char *nick;        // offset 16
+ *   const char *name;        // offset 24
+ *   int is_public;           // offset 32
+ *   int mdns;                // offset 36
+ *   int dht;                 // offset 40
+ *   int relay_lookup;        // offset 44
+ *   int relay_transport;     // offset 48, then 4 bytes of padding
+ *   const char *relay_urls;  // offset 56
+ *   int disable_ip;          // offset 64
+ *   int disable_webrtc;      // offset 68
+ *   size_t max_peers;        // offset 72
+ * } fofoca_opts;             // 80 bytes
  * ```
  *
  * 64-bit little-endian only, the same scope `frame.ts` claims for the same
@@ -30,10 +34,14 @@ const NAME_OFFSET = 24
 const IS_PUBLIC_OFFSET = 32
 const MDNS_OFFSET = 36
 const DHT_OFFSET = 40
-const RELAY_OFFSET = 44
-const MAX_PEERS_OFFSET = 48
+const RELAY_LOOKUP_OFFSET = 44
+const RELAY_TRANSPORT_OFFSET = 48
+const RELAY_URLS_OFFSET = 56
+const DISABLE_IP_OFFSET = 64
+const DISABLE_WEBRTC_OFFSET = 68
+const MAX_PEERS_OFFSET = 72
 
-export const OPTS_BYTES = 56
+export const OPTS_BYTES = 80
 
 const LITTLE_ENDIAN = new Uint8Array(new Uint32Array([1]).buffer)[0] === 1
 
@@ -86,7 +94,11 @@ export function encodeOpts(opts: WireOpts, pointerOf: (buffer: Uint8Array) => bi
   view.setInt32(IS_PUBLIC_OFFSET, opts.isPublic ? 1 : 0, LITTLE_ENDIAN)
   view.setInt32(MDNS_OFFSET, opts.mdns ? 1 : 0, LITTLE_ENDIAN)
   view.setInt32(DHT_OFFSET, opts.dht ? 1 : 0, LITTLE_ENDIAN)
-  view.setInt32(RELAY_OFFSET, opts.relay ? 1 : 0, LITTLE_ENDIAN)
+  view.setInt32(RELAY_LOOKUP_OFFSET, opts.relayLookup ? 1 : 0, LITTLE_ENDIAN)
+  view.setInt32(RELAY_TRANSPORT_OFFSET, opts.relayTransport ? 1 : 0, LITTLE_ENDIAN)
+  field(RELAY_URLS_OFFSET, opts.relayUrls)
+  view.setInt32(DISABLE_IP_OFFSET, opts.disableIp ? 1 : 0, LITTLE_ENDIAN)
+  view.setInt32(DISABLE_WEBRTC_OFFSET, opts.disableWebrtc ? 1 : 0, LITTLE_ENDIAN)
   view.setBigUint64(MAX_PEERS_OFFSET, BigInt(opts.maxPeers), LITTLE_ENDIAN)
 
   return { struct, keepAlive }

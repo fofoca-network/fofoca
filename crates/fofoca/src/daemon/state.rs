@@ -21,8 +21,8 @@ use crate::util::clock::Instant;
 use crate::util::cooldown::Cooldown;
 
 use crate::util::tuning::{
-    KNOWN_ENDPOINTS_CAP, MESSAGE_LOG_SIZE, PENDING_OUTBOUND_CAP, QUIET_CAP, RELINK_COOLDOWN_SECS,
-    SEEN_IDS_CAP,
+    KNOWN_ENDPOINTS_CAP, MESSAGE_LOG_SIZE, PENDING_OUTBOUND_CAP, QUIET_CAP, RECLAIM_WINDOW_SECS,
+    RELINK_COOLDOWN_SECS, SEEN_IDS_CAP,
 };
 
 /// `RELINK_COOLDOWN_SECS` as a `Duration` — the window both per-endpoint
@@ -82,13 +82,16 @@ pub(crate) enum DirectState {
 }
 
 impl DirectState {
-    /// From a `conn_path` reading; `None` when it reported no path at all.
+    /// From a `conn_path` reading; `None` when the reading proves nothing.
+    /// `Mixed` is such a reading: iroh keeps the relay path open beside a
+    /// punched one, and `conn_path` cannot tell which is selected, so a mixed
+    /// link is neither proven direct nor known relay-only.
     pub(crate) fn from_summary(summary: crate::gossip::PathSummary) -> Option<Self> {
         use crate::gossip::PathSummary;
         match summary {
-            PathSummary::Direct | PathSummary::Mixed => Some(Self::Direct),
+            PathSummary::Direct => Some(Self::Direct),
             PathSummary::Relay => Some(Self::RelayOnly),
-            PathSummary::Unknown => None,
+            PathSummary::Mixed | PathSummary::Unknown => None,
         }
     }
 }
@@ -128,11 +131,13 @@ pub struct EventLoopState {
     /// Distinct from `peers` — links are asymmetric and node-id
     /// keyed; the roster is symmetric and nickname keyed.
     pub(crate) linked_endpoints: HashSet<EndpointId>,
-    /// Whether each linked peer's data path is direct or relay-only, taken
-    /// from the same `conn_path` snapshot `NeighborUp` logs. Written by
-    /// `NeighborUp`/`NeighborDown` like `linked_endpoints`. Feeds the census
-    /// and the roster; when the relay is lookup only it is also what the send
-    /// lanes consult before carrying payload.
+    /// Whether each known peer's data path is direct or relay-only: the
+    /// `conn_path` snapshot `NeighborUp` logs, or a probe verdict. Keyed like
+    /// `peer_endpoints` and pruned with it (`forget_peer_endpoint`), not on
+    /// `NeighborDown`: the verdict describes the pooled connection, which
+    /// outlives the gossip link. Feeds the census and the roster; when the
+    /// relay is lookup only it is also what the send lanes consult before
+    /// carrying payload.
     pub(crate) direct: HashMap<EndpointId, DirectState>,
     /// Mirrors `TransportPolicy::relay`, set once at loop start.
     pub(crate) relay_transport: bool,
@@ -164,6 +169,9 @@ pub struct EventLoopState {
     /// stay independently reasoned (and a new neighbor still gets exactly one
     /// re-flood).
     pub(crate) peerinfo: Cooldown<EndpointId>,
+    /// When we last flooded our `PeerInfo`, whatever triggered it. Stamped by
+    /// `broadcast_peer_info`; read by the `joined` re-flood gate.
+    pub(crate) peerinfo_flooded_at: Option<Instant>,
     /// When each author's digest was last served. Keyed on the pubkey rather
     /// than the nickname, which an author picks freely.
     digest_serves: Cooldown<String>,
@@ -238,6 +246,28 @@ pub struct EventLoopState {
     /// drops — one rendezvous-link flap per heal tick, forever (the
     /// 2026-05-30 soak's residual flap).
     pub(crate) rendezvous_linked: bool,
+    /// Whether the held rendezvous `WebRTC` session has already survived one
+    /// heal tick without producing a link — the arming half of the stale
+    /// detach in `negotiate_rendezvous_session`.
+    pub(crate) rendezvous_session_stale: bool,
+    /// Whether an IP-capable node's rendezvous JSEP offer is armed. IP
+    /// capability normally means the punch inside the bootstrap connection
+    /// reaches the rendezvous — but it says nothing about the *beacon*: a
+    /// browser-held rendezvous has no UDP to punch to. The first linkless
+    /// heal tick sets this instead of offering; the second offers. Cleared
+    /// on the rendezvous `NeighborUp`, so a healthy mesh never offers.
+    pub(crate) rendezvous_offer_fallback: bool,
+    /// Whether the previous rival probe read the public rendezvous as free.
+    /// A claim needs two: a single free verdict may have landed inside a
+    /// live beacon's rival-re-check release window, and claiming on it is
+    /// what created rival copies that shed each other indefinitely. Both
+    /// must fall in one arbitration, so every reopen or settle of the
+    /// rendezvous identity clears it (`forget_rendezvous_verdict`).
+    pub(crate) rendezvous_probe_read_free: bool,
+    /// Whether grafting the rendezvous must wait for an attached `WebRTC`
+    /// session — true for a webrtc-shaped node on a lookup-only mesh; see
+    /// `transport::webrtc::rendezvous_graftable`.
+    pub(crate) rendezvous_graft_needs_session: bool,
     /// Set once we've broadcast our arrival (`joined` + `PeerInfo`).
     /// The announce is deferred to the first `NeighborUp` so it isn't
     /// lost into an unconnected overlay; subsequent neighbors only get
@@ -292,10 +322,10 @@ pub struct EventLoopState {
     #[cfg(feature = "host")]
     pub(crate) link_state_seq: u64,
     /// When `Some(deadline)` and not yet elapsed, the event loop runs
-    /// a fast `beacon::ensure` burst (event-driven failover). Armed
-    /// on `NeighborDown` — the beacon may have just died — so a
-    /// survivor claims the freed rendezvous port in ~1s rather than
-    /// waiting for the next 15s heal tick.
+    /// a fast `beacon::ensure` burst (event-driven failover). Armed by
+    /// `arm_reclaim`, mostly on `NeighborDown` — the beacon may have just
+    /// died — so a survivor claims the freed rendezvous port in ~1s rather
+    /// than waiting for the next 15s heal tick.
     pub(crate) reclaim_until: Option<Instant>,
     /// When `Some(deadline)`, the next rival re-check *shed* of an
     /// `EagerProbed` public beacon: at the deadline the holder drops its
@@ -569,6 +599,7 @@ impl EventLoopState {
             known_endpoints: BoundedFifoSet::new(KNOWN_ENDPOINTS_CAP),
             relink: Cooldown::new(RELINK_COOLDOWN),
             peerinfo: Cooldown::new(RELINK_COOLDOWN),
+            peerinfo_flooded_at: None,
             digest_serves: Cooldown::new(Duration::from_secs(
                 fofoca_util::tuning::ANTIENTROPY_SERVE_COOLDOWN_SECS,
             )),
@@ -583,6 +614,10 @@ impl EventLoopState {
             joined_at: crate::util::clock::unix_secs(),
             gossip_open: true,
             rendezvous_linked: false,
+            rendezvous_session_stale: false,
+            rendezvous_offer_fallback: false,
+            rendezvous_probe_read_free: false,
+            rendezvous_graft_needs_session: false,
             announced: false,
             meshed: false,
             unicast_pool: crate::transport::UnicastPool::disconnected(),
@@ -729,6 +764,63 @@ impl EventLoopState {
         self.peerinfo.note(peer, now);
     }
 
+    /// Whether a `joined` received at `now` re-floods our `PeerInfo`. A first
+    /// sighting (`joined_new`) always does: the newcomer linked to the
+    /// rendezvous, so no `NeighborUp` on this loop will send it our address.
+    /// A re-announce does only once per window since any flood: one newcomer
+    /// makes every member re-announce, and a per-trigger key would let each
+    /// member flood once per re-announce it hears (N²).
+    pub(crate) fn joined_refloods_peerinfo(&self, joined_new: bool, now: Instant) -> bool {
+        joined_new
+            || self
+                .peerinfo_flooded_at
+                .is_none_or(|at| now.duration_since(at) >= RELINK_COOLDOWN)
+    }
+
+    /// Drop `nick`'s dial hint and, with it, the path verdict keyed on that
+    /// endpoint. The two share a key space: the verdict describes the pooled
+    /// connection, which outlives a gossip link but not the peer.
+    pub(crate) fn forget_peer_endpoint(&mut self, nick: &str) -> Option<EndpointAddr> {
+        let addr = self.peer_endpoints.remove(nick)?;
+        self.direct.remove(&addr.id);
+        Some(addr)
+    }
+
+    /// A `NeighborDown` for `peer`: the gossip link is gone, the path verdict
+    /// stays. It describes the pooled unicast connection, which outlives the
+    /// link; erasing it parked every directed frame on a link flap until the
+    /// alive tick re-probed (about 40 s with the relink cooldown).
+    pub(crate) fn unlink(&mut self, peer: EndpointId) {
+        self.linked_endpoints.remove(&peer);
+    }
+
+    /// Open the fast `beacon::ensure` burst; the only writer of
+    /// [`Self::reclaim_until`].
+    pub(crate) fn arm_reclaim(&mut self, now: Instant) {
+        self.reclaim_until = Some(now + Duration::from_secs(RECLAIM_WINDOW_SECS));
+    }
+
+    /// The rendezvous arbitration was reopened or settled, so the previous
+    /// probe's free reading describes a world that is gone. Pairing it with
+    /// one fresh reading claims on what is effectively a single probe, which
+    /// is the rival copy the two-verdict rule exists to stop.
+    pub(crate) fn forget_rendezvous_verdict(&mut self) {
+        self.rendezvous_probe_read_free = false;
+    }
+
+    /// A probe reported no direct path to `peer`. A peer that proved itself
+    /// another way while the probe ran (its inbound graft landed), or that
+    /// left meanwhile, keeps what it has.
+    pub(crate) fn demote_unproven(&mut self, peer: EndpointId) -> bool {
+        match self.direct.get_mut(&peer) {
+            Some(verdict @ DirectState::Pending) => {
+                *verdict = DirectState::RelayOnly;
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Record `message` as seen and report whether it was *already* seen.
     /// `true` => this is a duplicate delivery the caller must drop. Keys on
     /// the author-bound [`Message::dedup_key`], so a forgery reusing a
@@ -801,16 +893,21 @@ impl EventLoopState {
         ))
     }
 
-    /// Record a `conn_path` reading for `peer`; a reading with no path at all
-    /// clears what was known.
+    /// Record a `conn_path` reading for `peer`; a reading that proves nothing
+    /// leaves what was known — a probe verdict or a gated link — in place.
+    ///
+    /// When the relay is lookup only, a `Relay` reading is one of those: the
+    /// lanes never ride the relay, so what admitted this peer was the accept
+    /// gate or the probe, and `conn_path` cannot see which path iroh selected
+    /// underneath. Demoting on it would stop every payload lane to a peer that
+    /// is proven direct. `gossip::recv` gates its own call for this reason;
+    /// the census tick in `daemon::timers` does not, so the gate lives here.
     pub(crate) fn observe_path(&mut self, peer: EndpointId, summary: crate::gossip::PathSummary) {
-        match DirectState::from_summary(summary) {
-            Some(state) => {
-                self.direct.insert(peer, state);
-            }
-            None => {
-                self.direct.remove(&peer);
-            }
+        if !self.relay_transport && summary == crate::gossip::PathSummary::Relay {
+            return;
+        }
+        if let Some(state) = DirectState::from_summary(summary) {
+            self.direct.insert(peer, state);
         }
     }
 
@@ -1342,21 +1439,74 @@ mod tests {
     fn direct_state_follows_conn_path_readings_and_counts() {
         use crate::gossip::PathSummary;
         let mut state = fresh_state();
+        // The mapping only reaches `RelayOnly` on a mesh whose relay may carry
+        // payload; the lookup-only half is
+        // `a_relay_reading_never_demotes_a_proven_peer_on_a_lookup_only_mesh`.
+        state.relay_transport = true;
         state.observe_path(endpoint_id(1), PathSummary::Direct);
-        state.observe_path(endpoint_id(2), PathSummary::Mixed);
-        state.observe_path(endpoint_id(3), PathSummary::Relay);
-        state.direct.insert(endpoint_id(4), DirectState::Pending);
+        state.observe_path(endpoint_id(2), PathSummary::Relay);
+        state.direct.insert(endpoint_id(3), DirectState::Pending);
         assert_eq!(
             state.direct_counts(),
             DirectCounts {
-                direct: 2,
+                direct: 1,
                 relay_only: 1,
                 pending: 1
             }
         );
-        // A reading with no path clears the entry rather than inventing one.
+    }
+
+    /// A mixed or empty reading proves nothing about the selected path, so
+    /// it must neither promote an unproven peer nor demote a proven one.
+    #[test]
+    fn a_mixed_or_unknown_reading_never_changes_what_is_known() {
+        use crate::gossip::PathSummary;
+        let mut state = fresh_state();
+        state.observe_path(endpoint_id(1), PathSummary::Mixed);
+        state.observe_path(endpoint_id(2), PathSummary::Unknown);
+        assert!(state.direct.is_empty());
+        state.direct.insert(endpoint_id(3), DirectState::Direct);
+        state.observe_path(endpoint_id(3), PathSummary::Mixed);
         state.observe_path(endpoint_id(3), PathSummary::Unknown);
-        assert_eq!(state.direct.get(&endpoint_id(3)), None);
+        assert_eq!(
+            state.direct.get(&endpoint_id(3)),
+            Some(&DirectState::Direct)
+        );
+        state.direct.insert(endpoint_id(4), DirectState::RelayOnly);
+        state.observe_path(endpoint_id(4), PathSummary::Mixed);
+        assert_eq!(
+            state.direct.get(&endpoint_id(4)),
+            Some(&DirectState::RelayOnly)
+        );
+    }
+
+    /// On a lookup-only mesh the census reading cannot demote a proven peer.
+    /// `gossip::recv` gates its own `observe_path` for the same reason — a link
+    /// up *is* the proof there, and `conn_path` cannot see which path is
+    /// selected — but the census tick (`daemon::timers`) calls it ungated, so
+    /// the gate belongs here. A `Relay` reading on a peer the accept gate and
+    /// the probe both admitted would otherwise stop every payload lane to it.
+    #[test]
+    fn a_relay_reading_never_demotes_a_proven_peer_on_a_lookup_only_mesh() {
+        use crate::gossip::PathSummary;
+        let mut state = fresh_state();
+        state.relay_transport = false;
+        state.direct.insert(endpoint_id(1), DirectState::Direct);
+        state.observe_path(endpoint_id(1), PathSummary::Relay);
+        assert_eq!(
+            state.direct.get(&endpoint_id(1)),
+            Some(&DirectState::Direct),
+            "the relay may not carry payload, so a relayed reading proves nothing"
+        );
+
+        // With the relay allowed as transport the reading is real news: the
+        // peer is reachable, over the relay, and the lanes may use it.
+        state.relay_transport = true;
+        state.observe_path(endpoint_id(1), PathSummary::Relay);
+        assert_eq!(
+            state.direct.get(&endpoint_id(1)),
+            Some(&DirectState::RelayOnly)
+        );
     }
 
     #[test]
@@ -1400,6 +1550,7 @@ mod tests {
         state
             .peer_endpoints
             .insert(nick("dialable"), iroh::EndpointAddr::new(endpoint_id(1)));
+        state.direct.insert(endpoint_id(1), DirectState::Direct);
         // No PeerInfo yet → nothing to dial → unreachable for directed frames.
         state.peers.insert(nick("unknown"));
 
@@ -1577,6 +1728,93 @@ mod tests {
         // Past the window the flapping peer may re-flood once more (no permanent silence).
         let later = start + Duration::from_secs(RELINK_COOLDOWN_SECS + 1);
         assert!(!state.peerinfo_on_cooldown(peer, later));
+    }
+
+    #[test]
+    fn joined_refloods_peerinfo_once_per_window() {
+        let start = Instant::now();
+        let mut state = fresh_state();
+
+        // Twenty re-announces from twenty peers inside one window.
+        let mut refloods = 0;
+        for index in 0..20u64 {
+            let now = start + Duration::from_millis(index * 10);
+            if state.joined_refloods_peerinfo(false, now) {
+                state.peerinfo_flooded_at = Some(now);
+                refloods += 1;
+            }
+        }
+        assert_eq!(refloods, 1, "once per window, not once per peer");
+
+        // A first sighting inside the window is not throttled.
+        assert!(state.joined_refloods_peerinfo(true, start + Duration::from_secs(1)));
+
+        // Past the window a re-announce floods once more (no permanent silence).
+        let later = start + Duration::from_secs(RELINK_COOLDOWN_SECS + 1);
+        assert!(state.joined_refloods_peerinfo(false, later));
+    }
+
+    // A `NeighborDown` drops the gossip link, not the pooled unicast
+    // connection the verdict describes. Erasing the verdict with the link
+    // parked every directed frame on a flap until the alive tick re-probed.
+    #[test]
+    fn unlinking_a_peer_keeps_its_path_verdict() {
+        let mut state = fresh_state();
+        let bob = endpoint_id(1);
+        state.linked_endpoints.insert(bob);
+        state.direct.insert(bob, DirectState::Direct);
+        state.unlink(bob);
+        assert!(state.linked_endpoints.is_empty());
+        assert_eq!(state.direct.get(&bob), Some(&DirectState::Direct));
+    }
+
+    #[test]
+    fn a_late_unproven_verdict_only_demotes_a_pending_peer() {
+        let mut state = fresh_state();
+        let pending = endpoint_id(1);
+        let proven = endpoint_id(2);
+        let gone = endpoint_id(3);
+        state.direct.insert(pending, DirectState::Pending);
+        state.direct.insert(proven, DirectState::Direct);
+
+        assert!(state.demote_unproven(pending));
+        assert_eq!(state.direct.get(&pending), Some(&DirectState::RelayOnly));
+        assert!(!state.demote_unproven(proven));
+        assert_eq!(state.direct.get(&proven), Some(&DirectState::Direct));
+        assert!(!state.demote_unproven(gone));
+        assert!(!state.direct.contains_key(&gone));
+    }
+
+    #[test]
+    fn forgetting_a_peer_endpoint_drops_its_path_verdict() {
+        let mut state = fresh_state();
+        let bob = endpoint_id(1);
+        state
+            .peer_endpoints
+            .insert(nick("bob"), iroh::EndpointAddr::new(bob));
+        state.direct.insert(bob, DirectState::Direct);
+        assert_eq!(
+            state.forget_peer_endpoint("bob").map(|addr| addr.id),
+            Some(bob)
+        );
+        assert!(state.direct.is_empty());
+        assert!(state.forget_peer_endpoint("bob").is_none());
+    }
+
+    // `arms_reclaim` fires on any peer loss while the mesh is beaconless, and
+    // the two probe rounds are ~5 s apart: clearing the verdict there lets
+    // ordinary churn starve the two-verdict rule until nobody claims.
+    #[test]
+    fn only_a_rendezvous_change_drops_a_free_verdict() {
+        let mut state = fresh_state();
+        state.rendezvous_probe_read_free = true;
+
+        state.arm_reclaim(Instant::now());
+        assert!(state.rendezvous_probe_read_free);
+        assert!(state.reclaim_until.is_some());
+
+        state.forget_rendezvous_verdict();
+        assert!(!state.rendezvous_probe_read_free);
     }
 
     // Under a long flap storm against a steady peer set, every collection *we*

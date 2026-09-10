@@ -10,7 +10,11 @@ const BASE: WireOpts = {
   isPublic: false,
   mdns: false,
   dht: false,
-  relay: false,
+  relayLookup: false,
+  relayTransport: false,
+  relayUrls: null,
+  disableIp: false,
+  disableWebrtc: false,
   maxPeers: 0,
 }
 
@@ -27,6 +31,14 @@ function fakePointers() {
 }
 
 describe('encodeOpts', () => {
+  // The literal, not OPTS_BYTES against itself. The other side of this number
+  // is the layout assert on `FofocaOpts` in crates/fofoca-ffi/src/ffi.rs; a
+  // linked C consumer keeps passing the old struct when it moves, so both
+  // sides must be edited together.
+  test('the struct is the 80 bytes the C header lays out', () => {
+    expect(OPTS_BYTES).toBe(80)
+  })
+
   test('null selectors encode as NULL pointers', () => {
     const { struct } = encodeOpts(BASE, fakePointers().pointerOf)
     expect(struct.byteLength).toBe(OPTS_BYTES)
@@ -56,15 +68,36 @@ describe('encodeOpts', () => {
 
   test('flags and max_peers', () => {
     const { struct } = encodeOpts(
-      { ...BASE, isPublic: true, dht: true, maxPeers: 12 },
+      { ...BASE, isPublic: true, dht: true, disableWebrtc: true, maxPeers: 12 },
       fakePointers().pointerOf,
     )
     const view = new DataView(struct.buffer)
     expect(view.getInt32(32, true)).toBe(1) // is_public
     expect(view.getInt32(36, true)).toBe(0) // mdns
     expect(view.getInt32(40, true)).toBe(1) // dht
-    expect(view.getInt32(44, true)).toBe(0) // relay
-    expect(view.getBigUint64(48, true)).toBe(12n)
+    expect(view.getInt32(44, true)).toBe(0) // relay_lookup
+    expect(view.getInt32(48, true)).toBe(0) // relay_transport
+    expect(view.getBigUint64(56, true)).toBe(0n) // relay_urls
+    expect(view.getInt32(64, true)).toBe(0) // disable_ip
+    expect(view.getInt32(68, true)).toBe(1) // disable_webrtc
+    expect(view.getBigUint64(72, true)).toBe(12n)
+  })
+
+  test('relay transport and a custom ladder', () => {
+    const pointers = fakePointers()
+    const { struct, keepAlive } = encodeOpts(
+      { ...BASE, relayLookup: true, relayTransport: true, relayUrls: 'http://a/,http://b/' },
+      pointers.pointerOf,
+    )
+    const view = new DataView(struct.buffer)
+    expect(view.getInt32(44, true)).toBe(1) // relay_lookup
+    expect(view.getInt32(48, true)).toBe(1) // relay_transport
+    expect(view.getBigUint64(56, true)).toBe(0x1000n) // relay_urls
+    expect(keepAlive.length).toBe(1)
+    expect(Array.from(pointers.buffers[0] ?? [])).toEqual([
+      ...new TextEncoder().encode('http://a/,http://b/'),
+      0,
+    ])
   })
 
   test('keepAlive roots every encoded string', () => {

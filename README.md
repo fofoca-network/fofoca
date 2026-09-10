@@ -24,7 +24,9 @@ fofoca-util          host helpers, no deps of consequence   (13 crates resolved)
         ├── fofoca-doc          shared-state CRDT channels
         ├── fofoca-logging      tracing sink + filter
         └── fofoca         the engine, + iroh, iroh-gossip (436 crates)
-              ├── fofoca-ffi                    the C ABI
+              ├── fofoca-pipe                   the byte pipe, tab and terminal
+              │     ├── fofoca-ffi              the C ABI
+              │     └── fofoca-wasm             the browser peer (wasm32 only)
               ├── fofoca-netplay                rollback netcode for p2p games
               ├── fofoca-iroh-webrtc-transport  QUIC over a WebRTC data channel
               └── fofoca-iroh-multihop-transport  QUIC relayed through peers
@@ -169,12 +171,13 @@ a CLI runs, not a reduced stand-in. What it loses is the control socket, the
 session state file, the process helpers and the log sink, none of which have a
 wasm32 equivalent.
 
-Three crates reach that target, each at its own feature position, and CI checks
-and lints every one:
+Six crates reach that target — `fofoca-wasm` is the browser peer itself,
+behind `packages/fofoca-wasm` — each at its own feature position, and CI
+checks and lints every one:
 
 ```bash
 rustup target add wasm32-unknown-unknown
-cargo task wasm                              # all three
+cargo task wasm                              # all six
 cargo task wasm -p fofoca-chunks             # or one
 ```
 
@@ -196,6 +199,15 @@ CC=$(brew --prefix llvm)/bin/clang CC_wasm32_unknown_unknown=$(brew --prefix llv
 Neither is the WebRTC transport's browser suite, which drives real browsers over
 a build-profile and main-thread-pressure sweep: `cargo task e2e`, or
 `cargo task e2e --quick` for the fast single-browser pass.
+
+The native↔browser matrix — the one that proves a terminal and a tab exchange
+payload on every lane under every relay policy — is
+`cargo task e2e --suite mesh` (`--quick` for the four-cell pass). It needs the
+wasm glue built first (`cargo task wasm-peer` — the mesh suite also builds
+it itself), bun, and
+`agent-browse` with Chrome for Testing. The suite runs with the task runner's
+`mesh` feature, which it turns on by re-running itself through cargo, so the
+first run builds the engine a second time with its test relay.
 
 [`chat-webrtc`](crates/fofoca-iroh-webrtc-transport/examples/chat-webrtc) is a
 runnable demonstration of the browser leg on its own: a chat room a tab and a

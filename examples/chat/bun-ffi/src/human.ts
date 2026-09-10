@@ -35,6 +35,18 @@ export async function runHuman(mesh: Mesh): Promise<void> {
         case 'left':
           console.log(`* ${event.nick} left`)
           break
+        case 'quiet':
+          console.log(`* ${event.nick} went quiet`)
+          break
+        case 'returned':
+          console.log(`* ${event.nick} returned`)
+          break
+        case 'fork':
+          console.log(`! ${event.nick} forked their history (seq ${event.seq})`)
+          break
+        case 'info':
+          console.log(`* ${event.message}`)
+          break
         case 'error':
           console.log(`! ${event.message}`)
           break

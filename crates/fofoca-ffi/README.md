@@ -17,6 +17,11 @@ the other.
   `fofoca_close`.
 - Every entry point catches panics, so an engine panic returns an error
   code instead of unwinding across `extern "C"`.
+- `fofoca_opts` names the relay's two roles apart: `relay_lookup` finds peers
+  through it, `relay_transport` lets payload ride it. Leave
+  `relay_transport` at 0 and every byte of data goes peer to peer.
+  `relay_urls` swaps in a custom ladder (comma-separated, NULL for the
+  default), and `disable_ip` / `disable_webrtc` switch transports off.
 
 Test with `cargo test -p fofoca-ffi`. CI builds the staticlib and makes
 sure that every function in the header is exported.

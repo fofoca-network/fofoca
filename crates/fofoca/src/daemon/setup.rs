@@ -83,13 +83,14 @@ fn rendezvous_params(
     // beacon's own liveness self-monitor correct it off the event loop
     // via `rung_tx` if rung 0 turns out to be unreachable. Empty for
     // private / relay-disabled ⇒ `None`.
-    let bootstrap_relay = relay_ladder(&lookups.relay).first().cloned();
+    let bootstrap_relay = relay_ladder(&lookups.relay_lookup).first().cloned();
     RendezvousParams {
         topic_id,
         secret: mesh.rendezvous_secret(),
         bind_ports,
         id: mesh.rendezvous_id(),
         lookups: lookups.clone(),
+        relay_transport: mesh.config.transport.relay_transport,
         bootstrap_relay,
         rung_tx,
     }
@@ -178,12 +179,17 @@ pub(crate) fn register_rendezvous(endpoint: &Endpoint, params: &RendezvousParams
 /// received `UNICAST_ALPN` frames to the returned receiver, which the event
 /// loop drains into `gossip::ingest`. Bounded so a flooding peer can't
 /// back-pressure the loop (a dropped frame heals via anti-entropy).
-fn unicast_inbox() -> (
+fn unicast_inbox(
+    relay_transport: bool,
+) -> (
     mpsc::Receiver<bytes::Bytes>,
     crate::transport::UnicastAcceptor,
 ) {
     let (tx, rx) = mpsc::channel::<bytes::Bytes>(crate::util::consts::UNICAST_INBOX_CAP);
-    (rx, crate::transport::UnicastAcceptor::new(tx))
+    (
+        rx,
+        crate::transport::UnicastAcceptor::new(tx, relay_transport),
+    )
 }
 
 /// Build this member's peer endpoint, registering the multi-hop transport
@@ -363,6 +369,8 @@ struct SetupBuild<'a> {
     /// `Mutex` is bought purely for the `Sync` it carries.
     protocols: std::sync::Mutex<CallerProtocols>,
     rung_tx: &'a watch::Sender<Option<RelayUrl>>,
+    /// The mesh's `transport.relay_transport`, for the accept gates.
+    relay_transport: bool,
 }
 
 impl SetupBuild<'_> {
@@ -448,18 +456,21 @@ pub async fn setup_mesh(kind: SetupKind, params: SetupParams) -> Result<EventLoo
         SetupKind::Create { config, .. } => config,
         SetupKind::Join { mesh, .. } | SetupKind::Topic { mesh, .. } => &mesh.config,
     };
+    // Decode already validated a joined id; a minted config has had no check
+    // yet, and an invalid one would produce an id every joiner rejects.
+    mesh_config.validate()?;
     let lookups = mesh_config.lookups.clone();
-    let relay_transport = mesh_config.transport.relay;
+    let relay_transport = mesh_config.transport.relay_transport;
 
     // The off-loop rung channel: the backgrounded startup probe and the
     // beacon's liveness self-monitor publish a chosen rung here; the
     // event loop applies it (re-register + re-home) without ever running
     // a ladder walk on the sole loop. Initialized to the optimistic
     // rung 0 (empty ladder ⇒ `None`).
-    let ladder = relay_ladder(&lookups.relay);
+    let ladder = relay_ladder(&lookups.relay_lookup);
     let (rung_tx, rung_rx) = watch::channel(ladder.first().cloned());
 
-    let (unicast_rx, unicast_acceptor) = unicast_inbox();
+    let (unicast_rx, unicast_acceptor) = unicast_inbox(relay_transport);
 
     // This member's per-author signing identity. Hoisted above the match so it is
     // available to both attach paths.
@@ -476,6 +487,7 @@ pub async fn setup_mesh(kind: SetupKind, params: SetupParams) -> Result<EventLoo
         injected,
         protocols: std::sync::Mutex::new(protocols),
         rung_tx: &rung_tx,
+        relay_transport,
     };
     let Assembled {
         mesh_id,
@@ -552,6 +564,11 @@ pub async fn setup_mesh(kind: SetupKind, params: SetupParams) -> Result<EventLoo
         #[cfg(feature = "host")]
         multihop: multihop_handle,
         webrtc,
+        webrtc_enabled: transports.webrtc,
+        rendezvous_graft_needs_session: crate::transport::webrtc::node_graft_needs_session(
+            relay_transport,
+            transports.ip,
+        ),
         webrtc_admission,
         webrtc_ice,
         unicast_rx,
@@ -593,8 +610,12 @@ fn build_overlay(
         endpoint.clone(),
         build.max_peers,
         Some(build.unicast_acceptor.clone()),
-        Some((webrtc.clone(), admission.clone(), ice)),
+        build
+            .transports
+            .webrtc
+            .then(|| (webrtc.clone(), admission.clone(), ice)),
         build.take_protocols(),
+        build.relay_transport,
     );
     (gossip, router, admission, ice)
 }
@@ -785,7 +806,16 @@ async fn setup_join(build: &SetupBuild<'_>, kind: SetupKind) -> Result<Assembled
     // the shared pinned relay that could capture our own bootstrap dial. A
     // topic instead claims eagerly (probe-first) so the first peer beacons.
     // See `EventLoopConfig::cohost`.
-    let topic = gossip.subscribe(topic_id, vec![rdv.id]).await?;
+    // A webrtc-shaped lookup-only node must not bootstrap-dial the
+    // rendezvous yet: the graft waits for its session (see
+    // `transport::webrtc::rendezvous_graftable`); the heal tick grafts once
+    // it is attached.
+    let needs_session = crate::transport::webrtc::node_graft_needs_session(
+        build.relay_transport,
+        build.transports.ip,
+    );
+    let bootstrap = if needs_session { vec![] } else { vec![rdv.id] };
+    let topic = gossip.subscribe(topic_id, bootstrap).await?;
 
     // `ready` is emitted by `run`, once the IPC socket accepts — not here.
     lifecycle::log_ready(

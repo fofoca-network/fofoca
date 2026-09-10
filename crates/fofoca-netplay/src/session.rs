@@ -85,6 +85,11 @@ pub struct P2PSession<T: Config, X: Transport<T>> {
     /// input for the *same* frame again next tick. Filing on receipt would
     /// add that frame twice.
     local_input: Option<T::Input>,
+    /// Packets received for an address this match has no peer for. A session
+    /// that never leaves `Synchronizing` while the transport is busy is
+    /// either this or a nonce mismatch, and the two look identical from
+    /// outside. Diagnostic only — nothing reads it but the log.
+    unaddressed_drops: u64,
 }
 
 impl<T: Config, X: Transport<T>> std::fmt::Debug for P2PSession<T, X> {
@@ -127,6 +132,14 @@ impl<T: Config, X: Transport<T>> P2PSession<T, X> {
             return Err(RollbackError::InvalidPlayer(local_handle));
         }
         let num_players = players.len();
+        tracing::debug!(
+            local_handle,
+            num_players,
+            magic,
+            input_delay,
+            max_prediction,
+            "session built, synchronizing"
+        );
         let peers = players
             .into_iter()
             .enumerate()
@@ -143,6 +156,7 @@ impl<T: Config, X: Transport<T>> P2PSession<T, X> {
             skip_frames: 0,
             last_checksum_frame: NULL_FRAME,
             local_input: None,
+            unaddressed_drops: 0,
         })
     }
 
@@ -172,9 +186,14 @@ impl<T: Config, X: Transport<T>> P2PSession<T, X> {
         let current = self.sync.current_frame();
         let mut replies: Vec<(T::Address, Message<T::Input>)> = Vec::new();
 
+        let mut unaddressed = 0u32;
         for (addr, message) in self.transport.receive_all() {
             let Some(peer) = self.peers.iter_mut().find(|peer| peer.addr == addr) else {
-                // Not a participant in this match.
+                // Not a participant in this match. Counted rather than
+                // ignored: if the roster's addresses and the transport's
+                // disagree, *every* packet lands here and the session sits in
+                // `Synchronizing` while traffic flows both ways.
+                unaddressed = unaddressed.saturating_add(1);
                 continue;
             };
             let handle = peer.handle;
@@ -188,6 +207,21 @@ impl<T: Config, X: Transport<T>> P2PSession<T, X> {
                 let _ = self.sync.add_remote_input(handle, frame, input);
             }
             self.record_events(&addr, events);
+        }
+
+        if unaddressed > 0 {
+            self.unaddressed_drops = self
+                .unaddressed_drops
+                .saturating_add(u64::from(unaddressed));
+            // Powers of two: one poll's worth says little, a climbing total
+            // while the state stays `Synchronizing` says everything.
+            if self.unaddressed_drops.is_power_of_two() {
+                tracing::debug!(
+                    dropped = self.unaddressed_drops,
+                    state = ?self.state,
+                    "packets arrived for an address in no peer of this match"
+                );
+            }
         }
 
         for (addr, message) in &replies {
@@ -247,6 +281,7 @@ impl<T: Config, X: Transport<T>> P2PSession<T, X> {
             .iter()
             .all(|peer| peer.state() == PeerState::Running);
         if all_ready {
+            tracing::debug!(peers = self.peers.len(), "every peer synchronized, running");
             self.state = SessionState::Running;
             self.events.push(Event::Running);
         }

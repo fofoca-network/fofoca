@@ -7,11 +7,15 @@ use iroh::{Endpoint, EndpointId};
 
 use crate::daemon::ctx::HandlerCtx;
 use crate::daemon::state::EventLoopState;
-use crate::util::bounded_fifo_set::BoundedFifoSet;
 use crate::util::clock::Instant;
 use crate::util::tuning::HEAL_HARD_PROBE_SECS;
 
 /// Re-graft the rendezvous. `join_peers` is a cheap enqueue.
+///
+/// Not probed for a direct path first, unlike a member graft: the rendezvous
+/// accepts no unicast, so the probe's connection could never open. On a mesh
+/// whose relay is lookup only the beacon's accept gate holds this link until
+/// iroh selects a direct path on it, so nothing crosses the relay either way.
 ///
 /// A failing re-graft is the recovery path failing — it must be loud. The 11h
 /// roster-collapse soak ran 2,596 of these with zero log signal.
@@ -83,9 +87,15 @@ pub(crate) async fn tick_heal_hard(
 /// it adds no steady-state churn; `join_peers` is a cheap enqueue and
 /// iroh reuses the addresses cached when each peer was first linked.
 ///
+/// With the relay lookup only, the re-dial is the direct-path probe
+/// (`transport::probe`) rather than a bulk graft: a graft dialed over the
+/// relay would only be held and closed by the far side's accept gate, and
+/// the probe is what proves the path unicast needs. Every caller has
+/// decided the link view is void, so the probe distrusts it too.
+///
 /// [`EventLoopState::known_endpoints`]: crate::daemon::state::EventLoopState::known_endpoints
-pub(crate) async fn rebridge_known(sender: &MeshSender, known: &BoundedFifoSet<EndpointId>) {
-    let peers: Vec<EndpointId> = known.iter().copied().collect();
+pub(crate) async fn rebridge_known(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
+    let peers: Vec<EndpointId> = state.known_endpoints.iter().copied().collect();
     // `info`, not `debug`: this fires only on the isolation signal (rare,
     // event-driven), and a re-bridge attempt is part of the always-on
     // connectivity story we keep at `info` for post-incident diagnosis —
@@ -95,7 +105,11 @@ pub(crate) async fn rebridge_known(sender: &MeshSender, known: &BoundedFifoSet<E
         count = peers.len(),
         "heal: rendezvous-independent re-bridge (re-dialing known peers)"
     );
-    if let Err(error) = sender.join_peers(peers).await {
+    if !state.relay_transport {
+        crate::transport::probe::retry_direct(state, ctx, true).await;
+        return;
+    }
+    if let Err(error) = ctx.sender.join_peers(peers).await {
         tracing::warn!(
             target: "fofoca::gossip",
             %error,
@@ -128,7 +142,7 @@ pub(crate) async fn recover_from_starvation(state: &mut EventLoopState, ctx: &Ha
     state.note_degraded();
     state.relink.clear();
     state.peerinfo.clear();
-    rebridge_known(ctx.sender, &state.known_endpoints).await;
+    rebridge_known(state, ctx).await;
     super::broadcast::announce_arrival(state, ctx).await;
     let now = Instant::now();
     state.last_sent_at = now;

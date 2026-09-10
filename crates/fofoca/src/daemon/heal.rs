@@ -58,6 +58,9 @@ pub(super) async fn run_heal(
     ctx: &HandlerCtx<'_>,
     params: &beacon::RendezvousParams,
 ) {
+    // A browser-shaped peer's rendezvous link can only ever be admitted on
+    // a data channel; keep offering one while the link is down.
+    crate::transport::webrtc::negotiate_rendezvous_session(state, ctx);
     let threshold = Duration::from_secs(heal_stall_threshold_secs());
     let hard_edge = is_resume(gap.mono, threshold) || is_wall_resume(gap.wall, gap.mono, threshold);
     if hard_edge {
@@ -71,6 +74,9 @@ pub(super) async fn run_heal(
         // The frozen-era link view is stale by definition; clearing this
         // re-arms the regular tick's probe until a fresh NeighborUp.
         state.rendezvous_linked = false;
+        // A free reading taken before the freeze is stale for the same
+        // reason, across the widest gap any of these deadlines can span.
+        state.forget_rendezvous_verdict();
         // A rival re-check deadline that "matured" while the process was
         // frozen would shed the beacon into a mesh that is still
         // re-forming; push it out a steady interval so the re-bootstrap
@@ -85,7 +91,9 @@ pub(super) async fn run_heal(
         // so a rung that died during the freeze self-corrects — no inline
         // ladder walk on the event loop here.
         setup::register_rendezvous(ctx.endpoint, params);
-        gossip::heal::tick_heal_hard(ctx.endpoint, params.id, ctx.sender).await;
+        if crate::transport::webrtc::rendezvous_graftable(state) {
+            gossip::heal::tick_heal_hard(ctx.endpoint, params.id, ctx.sender).await;
+        }
     } else if state.rendezvous_linked {
         // A live rendezvous link has nothing to heal — and healing it
         // anyway is what flapped it once per tick (both heal legs dial
@@ -96,8 +104,15 @@ pub(super) async fn run_heal(
             target: "fofoca::gossip",
             "heal tick: rendezvous linked; idle"
         );
-    } else {
+    } else if crate::transport::webrtc::rendezvous_graftable(state) {
         gossip::heal::tick_heal(params.id, ctx.sender).await;
+    } else {
+        // The JSEP offer fired at the top of this tick; the graft waits for
+        // the session it needs to survive the beacon's accept gate.
+        tracing::debug!(
+            target: "fofoca::gossip",
+            "heal tick: rendezvous graft held until a webrtc session attaches"
+        );
     }
     // Rendezvous-independent re-bridge. Fires on the hard (resume) edge —
     // where a reused endpoint id can be stuck behind a stale *accepted*
@@ -108,7 +123,7 @@ pub(super) async fn run_heal(
     // (nothing remembered), so it adds no churn. `linked_endpoints` is
     // not cleared on the resume edge, hence the explicit `hard_edge` arm.
     if (hard_edge || state.linked_endpoints.is_empty()) && !state.known_endpoints.is_empty() {
-        gossip::heal::rebridge_known(ctx.sender, &state.known_endpoints).await;
+        gossip::heal::rebridge_known(state, ctx).await;
     }
     // Starvation watchdog: links/heal can look busy while no traffic
     // flows (the roster-collapse signature), so the last word every heal
@@ -208,7 +223,10 @@ pub(super) async fn try_resubscribe(
     state: &EventLoopState,
     attempts: &mut u32,
 ) -> Resubscribe {
-    let mut bootstrap = vec![env.params.id];
+    let mut bootstrap = Vec::new();
+    if !state.rendezvous_graft_needs_session {
+        bootstrap.push(env.params.id);
+    }
     bootstrap.extend(state.known_endpoints.iter().copied());
     match env.gossip.subscribe(env.params.topic_id, bootstrap).await {
         Ok(topic) => {
@@ -282,6 +300,9 @@ pub(super) fn apply_rung_change(
         // branch — the deterministic tie-break that exists precisely so two
         // simultaneous claimants shed in a decidable order.
         state.rival_recheck_rounds = 0;
+        // The rendezvous now answers at a different rung, so a free reading
+        // taken against the old one is not about this identity at all.
+        state.forget_rendezvous_verdict();
     }
 }
 

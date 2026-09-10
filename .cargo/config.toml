@@ -8,6 +8,9 @@
 # from inside this directory, not the crates themselves.
 [target.wasm32-unknown-unknown]
 rustflags = ["--cfg", 'getrandom_backend="wasm_js"']
+# So `cargo test --target wasm32-unknown-unknown` executes rather than
+# printing an artifact path — `wasm_runtime.rs` documents that command.
+runner = "wasm-bindgen-test-runner"
 
 # `cargo task <task>` — the quality gate and the browser sweep, runnable
 # without transcribing `.github/workflows/ci.yml`.

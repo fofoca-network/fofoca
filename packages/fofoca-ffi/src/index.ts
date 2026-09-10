@@ -191,7 +191,11 @@ export function joinWire(opts: JoinOpts): WireOpts {
     isPublic: false,
     mdns: false,
     dht: false,
-    relay: false,
+    relayLookup: false,
+    relayTransport: opts.relayTransport ?? false,
+    relayUrls: relayUrlsWire(opts.relayUrls),
+    disableIp: false,
+    disableWebrtc: false,
     maxPeers: opts.maxPeers ?? 0,
   }
 }
@@ -205,9 +209,21 @@ export function createWire(opts: CreateOpts): WireOpts {
     isPublic: opts.public ?? false,
     mdns: opts.mdns ?? false,
     dht: opts.dht ?? false,
-    relay: opts.relay ?? false,
+    relayLookup: opts.relayLookup ?? false,
+    relayTransport: opts.relayTransport ?? false,
+    relayUrls: relayUrlsWire(opts.relayUrls),
+    disableIp: opts.transports?.ip === false,
+    disableWebrtc: opts.transports?.webrtc === false,
     maxPeers: opts.maxPeers ?? 0,
   }
+}
+
+/** The C ABI takes the ladder as one comma-separated string, NULL for the default. */
+function relayUrlsWire(urls: string[] | undefined): string | null {
+  if (urls === undefined || urls.length === 0) {
+    return null
+  }
+  return urls.join(',')
 }
 
 export async function join(opts: JoinOpts = {}): Promise<Mesh> {

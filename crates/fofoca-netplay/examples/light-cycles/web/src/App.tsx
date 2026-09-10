@@ -13,7 +13,8 @@ export const App = component(function* () {
     error.value = null
     try {
       const { LightCyclesPeer: PeerCtor } = await loadWasm()
-      peer.value = await PeerCtor.join(room, nick)
+      // Relay as lookup only: every input goes peer to peer.
+      peer.value = await PeerCtor.join(room, nick, false)
     } catch (cause) {
       error.value = String(cause)
     }

@@ -12,7 +12,11 @@ const OPTS: WireOpts = {
   isPublic: false,
   mdns: false,
   dht: false,
-  relay: false,
+  relayLookup: false,
+  relayTransport: false,
+  relayUrls: null,
+  disableIp: false,
+  disableWebrtc: false,
   maxPeers: 0,
 }
 

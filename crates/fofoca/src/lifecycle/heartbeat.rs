@@ -72,7 +72,7 @@ pub(crate) fn tick_sweep(state: &mut EventLoopState, sink: &dyn NodeSink) {
                 });
                 tracing::debug!(nickname = %nick, age_secs = age, "peer evicted (silence timeout)");
             } else {
-                state.peer_endpoints.remove(nick.as_str());
+                state.forget_peer_endpoint(nick.as_str());
                 tracing::trace!(
                     nickname = %nick,
                     age_secs = age,

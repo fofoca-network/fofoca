@@ -12,6 +12,11 @@ use tokio::sync::mpsc;
 use crate::util::consts::MAX_MESSAGE_SIZE;
 
 use super::LOG_TARGET;
+use super::path::{PROBE_DEADLINE, refuse_unless_direct};
+
+/// Close code an inbound unicast connection gets when the relay is lookup
+/// only and no direct path was selected within the deadline.
+const UNICAST_RELAY_REFUSED_CODE: u32 = 5;
 
 /// Per-frame read cap: one wire message plus gossip's envelope headroom (the
 /// same slack the size assertion reserves). Bounds allocation against a peer
@@ -21,11 +26,15 @@ const MAX_UNICAST_FRAME: usize = MAX_MESSAGE_SIZE + 256;
 #[derive(Debug, Clone)]
 pub(crate) struct UnicastAcceptor {
     tx: mpsc::Sender<Bytes>,
+    relay_transport: bool,
 }
 
 impl UnicastAcceptor {
-    pub(crate) fn new(tx: mpsc::Sender<Bytes>) -> Self {
-        Self { tx }
+    pub(crate) fn new(tx: mpsc::Sender<Bytes>, relay_transport: bool) -> Self {
+        Self {
+            tx,
+            relay_transport,
+        }
     }
 }
 
@@ -52,6 +61,18 @@ impl UnicastAcceptor {
 
 impl ProtocolHandler for UnicastAcceptor {
     async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
+        // The sender checks its own selected path, but an old build or a
+        // hostile peer may not: hold until this side has proof too.
+        if !refuse_unless_direct(
+            &conn,
+            self.relay_transport,
+            PROBE_DEADLINE,
+            UNICAST_RELAY_REFUSED_CODE,
+        )
+        .await
+        {
+            return Ok(());
+        }
         // Each accepted uni-stream carries exactly one message; loop until the
         // peer closes the connection (`accept_uni` errors).
         while let Ok(mut recv) = conn.accept_uni().await {

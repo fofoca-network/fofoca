@@ -19,8 +19,8 @@ use tokio::time::MissedTickBehavior;
 
 use fofoca::embed::SilentSink;
 use fofoca::net::TransportOpts;
-use fofoca::protocol::{LookupOpts, MeshName, Nickname};
-use fofoca::runtime::{Node, SetupKind, SetupParams, derive_topic_mesh_with, setup_mesh};
+use fofoca::protocol::{LookupOpts, MeshConfig, MeshName, Nickname, TransportPolicy};
+use fofoca::runtime::{Node, SetupKind, SetupParams, derive_topic_mesh_config, setup_mesh};
 
 use fofoca_netplay::RollbackDriver;
 
@@ -61,6 +61,13 @@ struct Cli {
     /// one are looking for each other in different places.
     #[arg(long, global = true)]
     local: bool,
+    /// Let game traffic fall back to the relay when no direct path opens.
+    ///
+    /// Without it the relay is a meeting point only and every input goes
+    /// peer to peer. Both sides must pass it: it is mixed into the mesh id.
+    /// Meaningless with `--local`, which has no relay.
+    #[arg(long, global = true, conflicts_with = "local")]
+    relay_transport: bool,
 }
 
 #[derive(Subcommand)]
@@ -92,7 +99,7 @@ async fn main() -> Result<()> {
         start_logging(&path)?;
     }
 
-    run(&room, &nick, cli.local).await
+    run(&room, &nick, cli.local, cli.relay_transport).await
 }
 
 /// Point `tracing` at `path`, filtered by `RUST_LOG`.
@@ -148,7 +155,7 @@ fn prompt_for_room() -> Result<(String, Option<String>)> {
     }
 }
 
-async fn run(room: &str, nick: &str, local: bool) -> Result<()> {
+async fn run(room: &str, nick: &str, local: bool, relay_transport: bool) -> Result<()> {
     let lookups = if local {
         // Zero external network calls: peers find each other on a
         // seed-derived loopback port ladder. The same setting the
@@ -158,7 +165,15 @@ async fn run(room: &str, nick: &str, local: bool) -> Result<()> {
     } else {
         LookupOpts::public_preset()
     };
-    let mesh = derive_topic_mesh_with(room, lookups)?;
+    let mesh = derive_topic_mesh_config(
+        room,
+        MeshConfig {
+            lookups,
+            password: None,
+            issuer_pubkey: None,
+            transport: TransportPolicy { relay_transport },
+        },
+    )?;
     let author = Nickname::new(nick)?;
     let kind = SetupKind::Topic {
         mesh,

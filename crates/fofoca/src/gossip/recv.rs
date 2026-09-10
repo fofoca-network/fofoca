@@ -7,13 +7,12 @@
 //! `lifecycle::observe` and dispatches by kind.
 
 use std::ops::ControlFlow;
-use std::time::Duration;
 
 use bytes::Bytes;
 use iroh_gossip::api::{ApiError, Event};
 
 use crate::daemon::ctx::HandlerCtx;
-use crate::daemon::state::EventLoopState;
+use crate::daemon::state::{DirectState, EventLoopState};
 use crate::gossip::event::NodeEvent;
 use crate::lifecycle;
 use crate::lookup::add_peer_addr;
@@ -23,7 +22,6 @@ use crate::protocol::{Channel, Message, MessageKind, Nickname};
 use crate::util::clock::Instant;
 // The timer-driver clock the ping round's deadlines are kept in — distinct from
 // `clock::Instant` off wasm32. See `daemon::state`.
-use crate::util::tuning::RECLAIM_WINDOW_SECS;
 use n0_future::time::Instant as TokioInstant;
 
 use super::app::{AppClass, InboundApp, NodeApp};
@@ -66,7 +64,7 @@ pub(crate) async fn handle_gossip_event(
                 if state.peerinfo_on_cooldown(node_id, now) {
                     tracing::debug!(target: "fofoca::gossip", endpoint_id = %node_id, "skipped PeerInfo re-flood (cooldown)");
                 } else {
-                    broadcast_peer_info(ctx).await;
+                    broadcast_peer_info(state, ctx).await;
                     state.note_peerinfo(node_id, now);
                     state.last_sent_at = now;
                 }
@@ -87,6 +85,11 @@ pub(crate) async fn handle_gossip_event(
                 // heal tick must not connect-probe the rendezvous (the
                 // probe would supersede this very link on the beacon).
                 state.rendezvous_linked = true;
+                state.rendezvous_session_stale = false;
+                state.rendezvous_offer_fallback = false;
+                // This link settles the arbitration: someone holds the port
+                // a pending free verdict read as free.
+                state.forget_rendezvous_verdict();
             } else {
                 // `NeighborUp`/`NeighborDown` are the only writers of
                 // `linked_endpoints`: it must mirror the *live* overlay
@@ -96,7 +99,14 @@ pub(crate) async fn handle_gossip_event(
                 // formed — leaving permanent ghosts that suppressed
                 // both; see the 2026-06-12 roster-collapse review.)
                 state.linked_endpoints.insert(node_id);
-                state.observe_path(node_id, conn);
+                if state.relay_transport {
+                    state.observe_path(node_id, conn);
+                } else {
+                    // The accept gate and the graft probe both admit a link
+                    // only on a selected non-relay path, so a link up is the
+                    // proof; `conn_path` cannot see which path is selected.
+                    state.direct.insert(node_id, DirectState::Direct);
+                }
                 // First link to a *real* peer: now (and only now) can
                 // user content actually be delivered. Flush anything
                 // buffered while we were unmeshed, in order.
@@ -115,17 +125,32 @@ pub(crate) async fn handle_gossip_event(
             tracing::info!(target: "fofoca::gossip", endpoint_id = %node_id, is_rendezvous, "gossip neighbor down");
             if is_rendezvous {
                 state.rendezvous_linked = false;
+                // The holder is gone, so the identity is up for arbitration
+                // again and any earlier reading of it is spent.
+                state.forget_rendezvous_verdict();
+                // A shed beacon takes its session table with it (the rival
+                // re-check releases and re-claims the rendezvous on a fresh
+                // endpoint), so a held session is stale the moment the link
+                // drops — and admission would refuse every re-offer with
+                // `HaveSession`. Drop it so the next heal tick offers anew.
+                if let Some(handle) = state.webrtc.as_ref()
+                    && handle.detach(&node_id)
+                {
+                    tracing::debug!(target: "fofoca::gossip", "detached the stale rendezvous webrtc session");
+                }
+                // Re-offer now rather than on the next heal tick: every
+                // saved interval halves the relink cycle a beacon shed costs
+                // a webrtc-shaped peer.
+                crate::transport::webrtc::negotiate_rendezvous_session(state, ctx);
             } else {
-                state.linked_endpoints.remove(&node_id);
-                state.direct.remove(&node_id);
+                state.unlink(node_id);
             }
             if arms_reclaim(
                 is_rendezvous,
                 state.linked_endpoints.len(),
                 state.rendezvous_linked,
             ) {
-                state.reclaim_until =
-                    Some(Instant::now() + Duration::from_secs(RECLAIM_WINDOW_SECS));
+                state.arm_reclaim(Instant::now());
                 tracing::info!(target: "fofoca::gossip",
                     reason = if is_rendezvous {
                         "rendezvous-loss"

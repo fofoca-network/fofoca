@@ -19,6 +19,17 @@ export interface JoinOpts {
   id?: string
   /** Defaults to a random `word-word` nickname. */
   nick?: string
+  /**
+   * Topic only: let payload fall back to the relay. Mixed into the derived
+   * id, so every member must pass the same value. Ignored when joining by id
+   * (the id carries it).
+   */
+  relayTransport?: boolean
+  /**
+   * Topic only: a custom relay ladder replacing the default. Mixed into the
+   * derived id like `relayTransport`. Ignored when joining by id.
+   */
+  relayUrls?: string[]
   /** Active-view cap. Omit for the engine default. */
   maxPeers?: number
 }
@@ -36,7 +47,24 @@ export interface CreateOpts {
   public?: boolean
   mdns?: boolean
   dht?: boolean
-  relay?: boolean
+  /** The relay as a lookup: peers find each other through it. */
+  relayLookup?: boolean
+  /**
+   * The relay as a transport: payload may fall back to it. Off by default,
+   * so all data is peer to peer and the relay is a meeting point only. Needs
+   * `relayLookup` (or `public`). Baked into the mesh id, so joiners inherit it.
+   */
+  relayTransport?: boolean
+  /**
+   * A custom relay ladder (ordered URLs, first preferred), replacing the
+   * default. Implies the relay lookup, and is part of the mesh id.
+   */
+  relayUrls?: string[]
+  /**
+   * This node's transport switches. Per node, not part of the id; everything
+   * the target has is on by default.
+   */
+  transports?: { ip?: boolean; webrtc?: boolean }
   maxPeers?: number
 }
 
@@ -44,11 +72,12 @@ export interface CreateOpts {
  * The lane a directed frame to a peer would take right now. Mirrors
  * `fofoca::transport::Lane`.
  *
- * A hint, not an observation: the engine derives it from its own send decision,
- * and iroh picks the real path at connect time. It cannot tell you whether a
- * peer is carried over a WebRTC data channel or a relay hop.
+ * `relay-only` is the one observation among the hints: on a mesh whose relay
+ * is lookup only (the default), it names a peer no payload can reach until a
+ * direct path is proven. The rest are derived from the engine's own send
+ * decision; iroh picks the real path at connect time.
  */
-export type Lane = 'unicast' | 'multihop' | 'unreachable'
+export type Lane = 'unicast' | 'multihop' | 'relay-only' | 'unreachable'
 
 /** How near a peer is. Mirrors `fofoca::embed::Reach`. */
 export type Reach = 'direct' | 'gossip'
@@ -85,6 +114,12 @@ export type MeshEvent =
   | { kind: 'ready' }
   | { kind: 'joined'; nick: string }
   | { kind: 'left'; nick: string }
+  /** Heartbeat-evicted but still in the roster (`quiet: true`) — not `left`. */
+  | { kind: 'quiet'; nick: string }
+  | { kind: 'returned'; nick: string }
+  /** A peer's per-author hash chain forked: two signed messages at one seq. */
+  | { kind: 'fork'; nick: string; pubkey: string; seq: number }
+  | { kind: 'info'; message: string }
   | { kind: 'error'; message: string }
   | { kind: 'closed'; reason: string }
 

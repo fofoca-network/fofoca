@@ -54,7 +54,12 @@ typedef struct {
   int is_public;    /* create a public mesh (the all-on discovery preset) */
   int mdns;         /* discoverable over mDNS */
   int dht;          /* discoverable over the mainline DHT */
-  int relay;        /* reachable via the default relay ladder */
+  int relay_lookup; /* relay as lookup: reachable via the default relay ladder */
+  int relay_transport; /* relay as transport: payload may fall back to it.
+                          0 keeps all data peer to peer; needs `relay_lookup` */
+  const char *relay_urls; /* comma-separated custom relay ladder; NULL = default */
+  int disable_ip;         /* nonzero: no direct UDP / hole-punched paths */
+  int disable_webrtc;     /* nonzero: no WebRTC lane */
   size_t max_peers;
 } fofoca_opts;
 

@@ -111,6 +111,8 @@ The engine meets the WebRTC transport in a consumer, through injected transport 
 | `fofoca-logging` | Tracing sink and directive filter. |
 | `fofoca` | The engine. The only crate that names `iroh` and `iroh-gossip`. |
 | `fofoca-ffi` | A C-ABI shim, so a non-Rust process joins a mesh in-process. |
+| `fofoca-pipe` | The byte pipe: one `Opts`-to-`Session` contract a tab and a terminal share. Reaches wasm32. |
+| `fofoca-wasm` | The browser peer — that pipe as a wasm-bindgen class. Builds only for wasm32. |
 | `fofoca-chunks` | Content-addressed chunk store: BLAKE3 leaf rows over data the crate does not own. Replaced `fofoca-blobs`. |
 | `fofoca-iroh-webrtc-transport` | An iroh custom transport: QUIC datagrams over a WebRTC data channel. |
 | `fofoca-iroh-multihop-transport` | An iroh custom transport: source-routed relaying through peers. |
@@ -214,13 +216,16 @@ sequenceDiagram
     J->>J: decode join id, derive topic and rendezvous
     J->>R: register own endpoint at the rung
     J->>M: subscribe to the topic on iroh-gossip
-    J->>B: dial the rendezvous endpoint id
+    J->>B: dial the rendezvous endpoint id (over the relay)
+    B->>B: hold the connection until iroh selects a direct path
     B->>J: accept, graft into HyParView views
     J->>M: broadcast Presence(joined)
     M->>J: PeerInfo and digests flow back
 ```
 
 The beacon shuffles the joiner into the full mesh through HyParView membership.
+On a mesh whose relay is lookup only, the beacon reads nothing from the joiner's connection until iroh has punched a direct path inside it (section 9.1).
+A joiner that never punches one never links.
 On the first gossip link the joiner announces itself once.
 Later links only re-send `PeerInfo`, behind a cooldown, so a flapping link cannot re-flood the mesh.
 
@@ -247,6 +252,7 @@ The split keeps bootstrap alive after the creator leaves: any member can take th
 Two members can claim the beacon role inside each other's probe window.
 A periodic re-arbitration sheds the rival copy, so the single-beacon invariant holds eventually, not at claim time.
 The rendezvous endpoint never authors application messages, and it is never a directed target.
+It accepts no unicast, so a member cannot probe it for a direct path; its accept gate is what keeps its link off the relay.
 
 ## 6. The engine at run time
 
@@ -423,11 +429,18 @@ Transport *policy* is part of the mesh id, beside the lookups.
 `MeshConfig::transport` says what the relay may carry.
 By default the relay is lookup only: it carries the bootstrap dial, JSEP signalling, and the NAT-traversal frames of a new connection, and no payload.
 A payload lane (gossip graft, unicast, blob) sends to a peer only after iroh selected a non-relay path to it, or a WebRTC session is attached.
-A gossip graft waits for that proof (`transport::probe`), so a pair never links through the relay.
+A gossip graft waits for that proof (`transport::probe`), so a pair never dials a link through the relay.
+The accept side holds too: every inbound gossip, unicast and blob connection is held, unread, until iroh selects a direct path on it, and closed with a coded reason if none arrives in `PROBE_DEADLINE` (`transport::path::refuse_unless_direct`).
+The rendezvous link is gated the same way on the beacon, so no gossip frame ever crosses the relay.
 A pair that cannot hole-punch and has no WebRTC session stays unlinked for payload.
-`transport.relay = true` lets payload fall back to the relay, as before the policy existed.
+`transport.relay_transport = true` lets payload fall back to the relay, as before the policy existed.
 The policy is in the id so that every member enforces the same rule; one relaying member would undo the saving for everyone it links.
 An id minted before the policy existed keeps its bytes and topic and reads as lookup only.
+
+Every create surface names the relay's two roles apart: `relay_lookup` (`relayLookup` in JSON and TypeScript, `--relay-lookup` on a CLI) and `relay_transport` (`relayTransport`, `--relay-transport`).
+The second needs the first; a config that sets it with the relay disabled is rejected before any network, along with a custom ladder that would not survive the wire (`MeshConfig::validate`).
+Per-node capability is a different thing and stays out of the id: `TransportOpts` says whether *this* node has IP, WebRTC or a relay transport at all.
+The policy is validated end to end by `cargo task e2e --suite mesh`: a real native peer and a real browser tab on a local relay, swept over the policy, the native transport set, and the join mode.
 
 ### 9.2 WebRTC transport
 

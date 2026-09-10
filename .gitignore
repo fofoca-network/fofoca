@@ -6,3 +6,7 @@ target/
 # Unanchored, so it also covers the per-package installs the root Bun workspace
 # hoists into. `bun.lock` is committed — CI installs `--frozen-lockfile`.
 node_modules/
+
+# wasm-bindgen output of `cargo task wasm-peer`; the package type-checks
+# without it and the mesh e2e suite rebuilds it.
+packages/fofoca-wasm/wasm/

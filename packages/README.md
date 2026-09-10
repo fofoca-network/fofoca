@@ -28,15 +28,39 @@ for await (const message of mesh.messages()) {
 ## Two things that surprise people
 
 **`join({ topic })` is always public.** A topic mesh is reached over mDNS, the
-mainline DHT and the pinned relay ladder, and that is not a default you can
-change. The engine mixes the lookup set into the mesh id, so two peers reaching
-the same string over different discovery legs derive two different meshes and
-never meet. `JoinOpts` therefore carries no discovery flags at all.
+mainline DHT and the relay ladder, and that is not a default you can change.
+The engine mixes the lookup set into the mesh id, so two peers reaching the
+same string over different discovery legs derive two different meshes and
+never meet. `JoinOpts` therefore carries almost no discovery flags — the two
+it does carry, `relayUrls` and `relayTransport`, are exactly the two that are
+mixed into the id, and every member must pass the same values.
 
 **`create({})` is machine-local.** Naming no discovery option is not "the
 default set" — it resolves to a loopback mesh nothing off this machine can
 reach. That is what makes the offline two-peer test possible, and it is
 surprising everywhere else. Pass `public: true`, or name the legs you want.
+
+**The relay carries no data unless you say so.** `relayLookup` (and `public`) use
+the relay as a *lookup*: a meeting point where peers find each other. Payload
+then goes peer to peer, and a pair that cannot open a direct path stays
+unlinked for data. `relayTransport: true` lets payload fall back to the relay.
+It is part of the mesh id, so joiners inherit whatever the creator chose.
+
+## The harness page
+
+`fofoca-wasm` ships a driverless test page: build the wasm
+(`cargo task wasm-peer`), serve it
+(`bun run harness -- 3000`), and open
+
+```
+http://127.0.0.1:3000/?topic=room&relayTransport=0&log=fofoca=info
+```
+
+The page joins the mesh the query names and mirrors the roster, every frame,
+every event and the shared state into the DOM; `window.harness` exposes
+`send`/`sendEof`/`stateMerge`/`close`. `cargo task e2e --suite mesh` drives
+this page against a real native peer and a local relay — the native↔web
+matrix.
 
 ## The workspace
 

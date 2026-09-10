@@ -217,12 +217,28 @@ describe('wire opts', () => {
       isPublic: false,
       mdns: false,
       dht: false,
-      relay: false,
+      relayLookup: false,
+      relayTransport: false,
+      relayUrls: null,
+      disableIp: false,
+      disableWebrtc: false,
       maxPeers: 0,
     })
     expect(createWire({ public: true, name: 'salon' })).toMatchObject({
       isPublic: true,
       name: 'salon',
+    })
+  })
+
+  test('relay ladder, relay transport and transport switches', () => {
+    expect(joinWire({ topic: 't', relayTransport: true, relayUrls: ['http://a/', 'http://b/'] })).toMatchObject({
+      relayTransport: true,
+      relayUrls: 'http://a/,http://b/',
+    })
+    expect(createWire({ relayUrls: [] })).toMatchObject({ relayUrls: null })
+    expect(createWire({ transports: { webrtc: false } })).toMatchObject({
+      disableIp: false,
+      disableWebrtc: true,
     })
   })
 })

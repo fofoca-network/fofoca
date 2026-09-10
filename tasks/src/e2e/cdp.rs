@@ -41,7 +41,7 @@ impl Drop for Browser {
 }
 
 impl Browser {
-    fn launch() -> Result<Self, Skip> {
+    pub(super) fn launch() -> Result<Self, Skip> {
         let folder = std::env::temp_dir().join(format!(
             "fofoca-matrix-{}-{:?}",
             std::process::id(),
@@ -81,6 +81,15 @@ impl Browser {
         Ok(Self { folder })
     }
 
+    /// Open `url` in the launched window.
+    #[cfg(feature = "mesh")]
+    pub(super) fn navigate(&self, url: &str) {
+        self.cdp(
+            "Page.navigate",
+            &serde_json::json!({ "url": url }).to_string(),
+        );
+    }
+
     /// One raw CDP call, as JSON.
     fn cdp(&self, method: &str, params: &str) -> Option<serde_json::Value> {
         let output = Command::new("agent-browse")
@@ -98,7 +107,7 @@ impl Browser {
     }
 
     /// `Runtime.evaluate`, flattened to the string the expression produced.
-    fn evaluate(&self, expression: &str) -> String {
+    pub(super) fn evaluate(&self, expression: &str) -> String {
         let params = serde_json::json!({ "expression": expression, "returnByValue": true });
         self.cdp("Runtime.evaluate", &params.to_string())
             .and_then(|reply| reply.pointer("/result/value").map(super::json_to_string))
@@ -106,7 +115,7 @@ impl Browser {
     }
 
     /// What actually answered, never the name we gave it.
-    fn version(&self) -> String {
+    pub(super) fn version(&self) -> String {
         self.cdp("Browser.getVersion", "{}")
             .and_then(|reply| {
                 reply

@@ -4,7 +4,7 @@
 //! cargo run -p fofoca --example mesh_peer              # create, print the id
 //! cargo run -p fofoca --example mesh_peer -- <id>    # join that mesh
 //! MESH_TRANSPORT=webrtc cargo run … --example mesh_peer -- <id>  # WebRTC-only data plane
-//! MESH_RELAY_TRANSPORT=on cargo run -p fofoca --example mesh_peer   # create: relay may carry payload
+//! MESH_RELAY_TRANSPORT=on cargo run -p fofoca --example mesh_peer   # create: relay may carry payload (the `relay_transport` create option)
 //! ```
 //!
 //! `MESH_TRANSPORT=webrtc` clears IP transports, so any data path that is not
@@ -69,7 +69,7 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "agent_habilis_mesh=info".into()),
+                .unwrap_or_else(|_| "fofoca=info".into()),
         )
         .with_writer(std::io::stderr)
         .init();
@@ -84,6 +84,49 @@ async fn main() -> anyhow::Result<()> {
         }
         _ => TransportOpts::default(),
     };
+
+    // A topic mesh, for pairing with a browser peer: the harness page joins
+    // by topic, so the two sides meet on one string. `MESH_RELAY_URLS`
+    // (comma-separated) swaps the default ladder — with a topic it is part
+    // of the derived id, so both sides must pass the same list.
+    let relay_urls = std::env::var("MESH_RELAY_URLS")
+        .ok()
+        .filter(|urls| !urls.is_empty());
+    if let Ok(topic) = std::env::var("MESH_TOPIC") {
+        let ladder = match &relay_urls {
+            Some(urls) => fofoca::protocol::RelayChoice::Custom(
+                urls.split(',')
+                    .map(|url| url.trim().parse())
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
+            None => fofoca::protocol::RelayChoice::Pinned,
+        };
+        let mesh = fofoca::runtime::derive_topic_mesh_config(
+            &topic,
+            MeshConfig {
+                lookups: LookupOpts {
+                    mdns: true,
+                    dht: true,
+                    relay_lookup: ladder,
+                },
+                password: None,
+                issuer_pubkey: None,
+                transport: TransportPolicy {
+                    relay_transport: std::env::var_os("MESH_RELAY_TRANSPORT")
+                        .is_some_and(|value| value == "on"),
+                },
+            },
+        )?;
+        return run_peer(
+            fofoca::runtime::SetupKind::Topic {
+                mesh,
+                topic_string: topic,
+            },
+            fofoca::protocol::Nickname::random(),
+            transports,
+        )
+        .await;
+    }
 
     let arg = std::env::args().nth(1);
     let Resolved { kind, author, .. } = match arg {
@@ -106,7 +149,7 @@ async fn main() -> anyhow::Result<()> {
                 // Baked into the id, so a joiner inherits it: only the
                 // creator reads the env var.
                 transport: TransportPolicy {
-                    relay: std::env::var_os("MESH_RELAY_TRANSPORT")
+                    relay_transport: std::env::var_os("MESH_RELAY_TRANSPORT")
                         .is_some_and(|value| value == "on"),
                 },
             },
@@ -117,6 +160,15 @@ async fn main() -> anyhow::Result<()> {
         .resolve()?,
     };
 
+    run_peer(kind, author, transports).await
+}
+
+/// Stand the peer up and print its per-second status until ctrl-c.
+async fn run_peer(
+    kind: fofoca::runtime::SetupKind,
+    author: fofoca::protocol::Nickname,
+    transports: TransportOpts,
+) -> anyhow::Result<()> {
     // The live peer count, mirrored out of the loop on every roster change and
     // on the periodic refresh. Lock-free, so reading it per second costs
     // nothing and needs no request/response hop into the loop.

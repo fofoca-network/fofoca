@@ -26,8 +26,8 @@ use std::cell::RefCell;
 
 use fofoca::embed::SilentSink;
 use fofoca::net::TransportOpts;
-use fofoca::protocol::{LookupOpts, MeshName, Nickname};
-use fofoca::runtime::{Node, SetupKind, SetupParams, derive_topic_mesh_with, setup_mesh};
+use fofoca::protocol::{LookupOpts, MeshConfig, MeshName, Nickname, TransportPolicy};
+use fofoca::runtime::{Node, SetupKind, SetupParams, derive_topic_mesh_config, setup_mesh};
 use fofoca::util::clock::Instant;
 use fofoca_netplay::RollbackDriver;
 use serde::Serialize;
@@ -138,16 +138,32 @@ impl LightCyclesPeer {
     /// first has created nothing special, the mesh id is a pure function
     /// of the string (see the plan's "Create / join screen").
     ///
+    /// `relay_transport` lets game traffic fall back to the relay; off, the
+    /// relay is a meeting point only and every input goes peer to peer. It
+    /// is mixed into the mesh id, so both tabs must pass the same value.
+    ///
     /// # Errors
     /// An invalid `nick`, or anything that fails while standing up the
     /// mesh (a malformed `room_code`, or the underlying `setup_mesh` call
     /// itself failing) — surfaced as its `Display` string, not a typed
     /// error, since the only consumer is JS.
-    pub async fn join(room_code: String, nick: String) -> Result<LightCyclesPeer, JsValue> {
+    pub async fn join(
+        room_code: String,
+        nick: String,
+        relay_transport: bool,
+    ) -> Result<LightCyclesPeer, JsValue> {
         console_error_panic_hook::set_once();
 
-        let mesh =
-            derive_topic_mesh_with(&room_code, LookupOpts::public_preset()).map_err(to_js_error)?;
+        let mesh = derive_topic_mesh_config(
+            &room_code,
+            MeshConfig {
+                lookups: LookupOpts::public_preset(),
+                password: None,
+                issuer_pubkey: None,
+                transport: TransportPolicy { relay_transport },
+            },
+        )
+        .map_err(to_js_error)?;
         let author = Nickname::new(&nick).map_err(to_js_error)?;
         let kind = SetupKind::Topic {
             mesh,

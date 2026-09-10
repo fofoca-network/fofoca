@@ -11,23 +11,13 @@
 //! peer that never proves a direct path stays `RelayOnly`, retried on the
 //! alive tick, and is never grafted through the relay.
 
-use std::time::Duration;
-
-use futures_util::StreamExt as _;
 use iroh::EndpointId;
-use iroh::endpoint::Connection;
 
-use super::path::selected_is_direct;
+use super::path::{PROBE_DEADLINE, wait_direct};
 use super::webrtc::needs_webrtc_lane;
 use crate::daemon::ctx::HandlerCtx;
 use crate::daemon::state::{DirectState, EventLoopState};
 use crate::util::clock::Instant;
-
-/// How long a probe waits for iroh to select a non-relay path. Hole punching
-/// starts as soon as the connection has both sides' candidates, and a first
-/// round lands within seconds; a punch that has not landed by now is
-/// retried on the alive tick rather than waited on.
-pub(crate) const PROBE_DEADLINE: Duration = Duration::from_secs(15);
 
 /// A probe's verdict, reported back to the event loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,28 +84,9 @@ pub(crate) fn ensure_direct(
     false
 }
 
-/// Wait until `conn`'s selected path is not the relay, or `deadline` passes.
-/// Every path event is a reason to re-read the path list: the event's own
-/// address may be stale by the time it is handled.
-async fn wait_direct(conn: &Connection, deadline: Duration) -> bool {
-    let mut events = conn.path_events();
-    let proven = async {
-        loop {
-            if selected_is_direct(conn) {
-                return true;
-            }
-            if events.next().await.is_none() {
-                return false;
-            }
-        }
-    };
-    n0_future::time::timeout(deadline, proven)
-        .await
-        .unwrap_or(false)
-}
-
 /// Apply a probe's verdict: a proven peer is grafted, an unproven one is
-/// recorded `RelayOnly` for the alive tick to retry.
+/// recorded `RelayOnly` for the alive tick to retry, unless it proved itself
+/// another way while the probe ran.
 pub(crate) async fn on_outcome(
     outcome: DirectOutcome,
     state: &mut EventLoopState,
@@ -124,9 +95,10 @@ pub(crate) async fn on_outcome(
     let DirectOutcome { peer, direct } = outcome;
     if direct {
         graft_proven(state, ctx, peer).await;
-    } else {
-        state.direct.insert(peer, DirectState::RelayOnly);
+    } else if state.demote_unproven(peer) {
         tracing::info!(target: super::LOG_TARGET, %peer, "no direct path within the probe deadline; peer stays relay-only");
+    } else {
+        tracing::debug!(target: super::LOG_TARGET, %peer, "late probe verdict ignored; the peer is no longer pending");
     }
 }
 
@@ -151,32 +123,104 @@ pub(crate) async fn graft_proven(
 
 /// The alive-tick retry: every known peer that is neither linked nor mid-probe
 /// gets another `ensure_direct`, subject to the relink cooldown. A no-op while
-/// the relay may carry payload.
-pub(crate) async fn retry_direct(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
+/// the relay may carry payload. The rendezvous is skipped: it accepts no
+/// unicast, so it cannot be probed; its link is gated on the beacon's side.
+///
+/// With `distrust_links` (the re-bridge after a resume or starvation) every
+/// link and proven path is stale by definition, so linked peers are retried
+/// too and their `Direct` verdicts are forgotten first, or `ensure_direct`
+/// would trust the pre-sleep answer.
+pub(crate) async fn retry_direct(
+    state: &mut EventLoopState,
+    ctx: &HandlerCtx<'_>,
+    distrust_links: bool,
+) {
     if state.relay_transport {
         return;
     }
-    let now = Instant::now();
-    let mut peers: Vec<iroh::EndpointAddr> = state
-        .peer_endpoints
-        .values()
-        .filter(|addr| addr.id != ctx.rendezvous_id)
-        .filter(|addr| !state.linked_endpoints.contains(&addr.id))
-        .filter(|addr| state.direct.get(&addr.id) != Some(&DirectState::Pending))
-        .filter(|addr| !state.relink_on_cooldown(addr.id, now))
-        .cloned()
-        .collect();
-    peers.sort_unstable_by_key(|addr| addr.id);
-    for addr in peers {
+    for addr in retry_candidates(state, ctx.rendezvous_id, distrust_links) {
+        if distrust_links {
+            state.direct.remove(&addr.id);
+        }
         if ensure_direct(state, ctx, addr.id, &addr) {
             graft_proven(state, ctx, addr.id).await;
         }
     }
 }
 
+/// The peers one `retry_direct` pass probes, in a fixed order.
+fn retry_candidates(
+    state: &EventLoopState,
+    rendezvous_id: EndpointId,
+    distrust_links: bool,
+) -> Vec<iroh::EndpointAddr> {
+    let now = Instant::now();
+    let mut peers: Vec<iroh::EndpointAddr> = state
+        .peer_endpoints
+        .values()
+        .filter(|addr| addr.id != rendezvous_id)
+        .filter(|addr| distrust_links || !state.linked_endpoints.contains(&addr.id))
+        .filter(|addr| {
+            state.direct.get(&addr.id) != Some(&DirectState::Pending)
+                || (needs_webrtc_lane(addr)
+                    && state
+                        .webrtc
+                        .as_ref()
+                        .is_some_and(|handle| handle.has_session(&addr.id)))
+        })
+        .filter(|addr| !state.relink_on_cooldown(addr.id, now))
+        .cloned()
+        .collect();
+    peers.sort_unstable_by_key(|addr| addr.id);
+    peers
+}
+
 #[cfg(test)]
 mod tests {
-    use super::may_graft;
+    use iroh::EndpointAddr;
+
+    use super::{may_graft, retry_candidates};
+    use crate::testing::{endpoint_id, fresh_state, nick};
+
+    // `linked_endpoints` is not cleared on the resume edge, so a re-bridge
+    // that trusted it skipped exactly the peers it exists to re-dial.
+    #[test]
+    fn a_re_bridge_keeps_linked_peers_as_candidates() {
+        let mut state = fresh_state();
+        state.relay_transport = false;
+        let rendezvous = endpoint_id(1);
+        let linked = endpoint_id(2);
+        let unlinked = endpoint_id(3);
+        for (name, id) in [
+            ("beacon", rendezvous),
+            ("linked", linked),
+            ("unlinked", unlinked),
+        ] {
+            state
+                .peer_endpoints
+                .insert(nick(name), EndpointAddr::new(id));
+        }
+        state.linked_endpoints.insert(linked);
+        let ids = |distrust_links: bool| -> Vec<_> {
+            retry_candidates(&state, rendezvous, distrust_links)
+                .into_iter()
+                .map(|addr| addr.id)
+                .collect()
+        };
+
+        assert_eq!(
+            ids(false),
+            [unlinked],
+            "the alive tick leaves a linked peer alone"
+        );
+        let mut expected = [linked, unlinked];
+        expected.sort_unstable();
+        assert_eq!(
+            ids(true),
+            expected,
+            "the re-bridge re-dials the linked peer too"
+        );
+    }
 
     #[test]
     fn ip_peer_needs_a_proven_direct_path() {

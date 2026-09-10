@@ -16,9 +16,13 @@ use clap::{Args as ClapArgs, ValueEnum};
 use crate::TaskOutcome;
 use crate::util::output;
 
-mod build;
+pub(crate) mod build;
 mod cdp;
+#[cfg(feature = "mesh")]
+mod chat;
 mod loopback;
+#[cfg(feature = "mesh")]
+mod mesh;
 mod server;
 mod webdriver;
 
@@ -109,6 +113,13 @@ enum Suite {
     Matrix,
     /// The fast four-test regression suite, on one browser.
     Loopback,
+    /// The native↔browser matrix: a real native peer, a real tab, a local
+    /// relay, swept over the relay-transport policy, the native transport
+    /// set and the join mode.
+    Mesh,
+    /// The chat example end to end: the native terminal chat in robot mode
+    /// against the browser chat page, over a local relay.
+    Chat,
 }
 
 /// Which wasm build a cell runs.
@@ -241,7 +252,52 @@ impl Row {
     }
 }
 
+/// The mesh and chat suites, which need the engine (`--features mesh`).
+#[cfg(feature = "mesh")]
+fn run_engine_suite(args: &Args) -> TaskOutcome {
+    if !args.list {
+        build::check_tooling()?;
+    }
+    if args.suite == Suite::Mesh {
+        mesh::run(args)
+    } else {
+        chat::run(args)
+    }
+}
+
+/// Without the feature the suites are not compiled in, so re-run this same
+/// invocation through cargo with it on. Only this path pays for the engine
+/// build; a plain `--workspace` build never sees `iroh-test-utils`.
+#[cfg(not(feature = "mesh"))]
+fn run_engine_suite(_: &Args) -> TaskOutcome {
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    output::status("Rerunning", "with `--features mesh` (the engine suites)");
+    let status = std::process::Command::new(cargo)
+        .current_dir(crate::util::repo_root())
+        .args([
+            "run",
+            "--quiet",
+            "--package",
+            "tasks",
+            "--features",
+            "mesh",
+            "--",
+        ])
+        .args(std::env::args_os().skip(1))
+        .status()
+        .map_err(|error| format!("could not re-run cargo: {error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("the engine suite failed: {status}").into())
+    }
+}
+
 pub(crate) fn run(args: &Args) -> TaskOutcome {
+    if matches!(args.suite, Suite::Mesh | Suite::Chat) {
+        return run_engine_suite(args);
+    }
+
     let env = if args.list {
         BTreeMap::new()
     } else {

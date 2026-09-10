@@ -154,7 +154,7 @@ pub(crate) async fn handle_presence(
         // A graceful goodbye, unlike a silence timeout, drops the dial hint —
         // and with it the warm unicast connection and any dial cooldown, so a
         // rejoin re-dials cold.
-        if let Some(endpoint_id) = state.peer_endpoints.remove(message.author.as_str()) {
+        if let Some(endpoint_id) = state.forget_peer_endpoint(message.author.as_str()) {
             state.unicast_pool.forget(endpoint_id.id).await;
         }
         state.quiet.remove(message.author.as_str());
@@ -174,29 +174,44 @@ pub(crate) async fn handle_presence(
         if surfaceable {
             app.on_peer_left(&message.author, state, ctx).await;
         }
-    } else if subtype == PresenceSubtype::Joined && update.joined_new {
-        // Re-announce so late joiners seed their roster. Retained locally: a
-        // re-announce mints a fresh id, so without this each one becomes
-        // another message we can never acknowledge and every peer re-sends to
-        // us forever (see `gossip::recv::retain_own_broadcast`).
-        let joined = Message::new_joined(ctx.mesh, ctx.author).signed(ctx.identity);
-        gossip::broadcast_msg(ctx.sender, &joined).await;
-        gossip::retain_own_broadcast(state, &joined);
-        state.last_sent_at = Instant::now();
-        // Advertise our document heads now rather than on the next
-        // anti-entropy tick: the newcomer's first digest may have gone out
-        // before it saw us, and ours lets it ask for what it lacks within one
-        // round trip instead of up to an interval later.
-        gossip::antientropy::broadcast_state_digests(state, ctx.sender, ctx.mesh, ctx.author).await;
-        // Suppress "has joined" when we already printed "came back"
-        // from the quiet check, or when this `joined` predates
-        // our own join (relayed backlog).
-        if surfaceable && !update.returned {
-            state.surfaced.insert(message.author.clone());
-            ctx.sink.emit(NodeEvent::Presence {
-                msg: Box::new(message.clone()),
-            });
-            tracing::info!(target: "fofoca::lifecycle", nickname = %message.author, "peer joined (announced)");
+    } else if subtype == PresenceSubtype::Joined {
+        // Every `joined` re-floods our `PeerInfo`, newcomer and rejoin
+        // alike. A newcomer linked to the *rendezvous*, so no `NeighborUp`
+        // fires on this loop to re-send it and our arrival flood predates
+        // them; a rejoin across a beacon epoch may have lost it the same way
+        // (both observed native↔browser in the mesh matrix: a roster entry
+        // with no endpoint binding reads "unreachable" forever). Throttled
+        // by `joined_refloods_peerinfo`.
+        let now = Instant::now();
+        if state.joined_refloods_peerinfo(update.joined_new, now) {
+            gossip::broadcast_peer_info(state, ctx).await;
+            state.last_sent_at = now;
+        }
+        if update.joined_new {
+            // Re-announce so late joiners seed their roster. Retained locally: a
+            // re-announce mints a fresh id, so without this each one becomes
+            // another message we can never acknowledge and every peer re-sends to
+            // us forever (see `gossip::recv::retain_own_broadcast`).
+            let joined = Message::new_joined(ctx.mesh, ctx.author).signed(ctx.identity);
+            gossip::broadcast_msg(ctx.sender, &joined).await;
+            gossip::retain_own_broadcast(state, &joined);
+            state.last_sent_at = Instant::now();
+            // Advertise our document heads now rather than on the next
+            // anti-entropy tick: the newcomer's first digest may have gone out
+            // before it saw us, and ours lets it ask for what it lacks within one
+            // round trip instead of up to an interval later.
+            gossip::antientropy::broadcast_state_digests(state, ctx.sender, ctx.mesh, ctx.author)
+                .await;
+            // Suppress "has joined" when we already printed "came back"
+            // from the quiet check, or when this `joined` predates
+            // our own join (relayed backlog).
+            if surfaceable && !update.returned {
+                state.surfaced.insert(message.author.clone());
+                ctx.sink.emit(NodeEvent::Presence {
+                    msg: Box::new(message.clone()),
+                });
+                tracing::info!(target: "fofoca::lifecycle", nickname = %message.author, "peer joined (announced)");
+            }
         }
     }
 }

@@ -30,7 +30,11 @@ fn create_opts(nick: &CStr) -> FofocaOpts {
         is_public: 0,
         mdns: 0,
         dht: 0,
-        relay: 0,
+        relay_lookup: 0,
+        relay_transport: 0,
+        relay_urls: std::ptr::null(),
+        disable_ip: 0,
+        disable_webrtc: 0,
         max_peers: 0,
     }
 }
@@ -318,7 +322,11 @@ fn create_opts_for_join(id: &CStr, nick: &CStr) -> FofocaOpts {
         is_public: 0,
         mdns: 0,
         dht: 0,
-        relay: 0,
+        relay_lookup: 0,
+        relay_transport: 0,
+        relay_urls: std::ptr::null(),
+        disable_ip: 0,
+        disable_webrtc: 0,
         max_peers: 0,
     }
 }
@@ -333,7 +341,7 @@ fn four_peers_converge(public: bool) {
         opts.is_public = 1;
         opts.mdns = 1;
         opts.dht = 1;
-        opts.relay = 1;
+        opts.relay_lookup = 1;
     }
     let creator = open(&opts);
     assert!(

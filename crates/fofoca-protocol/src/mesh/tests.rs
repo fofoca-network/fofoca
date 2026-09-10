@@ -1,4 +1,5 @@
 use super::{LookupOpts, Mesh, MeshConfig, MeshName, RelayChoice, SEED_LEN, TransportPolicy};
+use crate::mesh::lookup::MAX_RELAY_URL_BYTES;
 
 fn dummy_seed() -> [u8; SEED_LEN] {
     [7u8; SEED_LEN]
@@ -13,7 +14,7 @@ fn custom_config() -> MeshConfig {
         lookups: LookupOpts {
             mdns: true,
             dht: false,
-            relay: RelayChoice::Custom(vec![
+            relay_lookup: RelayChoice::Custom(vec![
                 "https://a.example".parse().unwrap(),
                 "https://b.example".parse().unwrap(),
             ]),
@@ -58,6 +59,59 @@ fn round_trip_custom_relay_ladder() {
     let mesh = Mesh::new(dummy_seed(), dummy_name(), custom_config());
     let decoded: Mesh = mesh.to_string().parse().unwrap();
     assert_eq!(decoded.config, custom_config());
+}
+
+/// A config whose custom ladder holds `count` distinct relay URLs.
+fn ladder_config(count: usize) -> MeshConfig {
+    let ladder = (0..count)
+        .map(|index| format!("https://r{index}.example").parse().unwrap())
+        .collect();
+    MeshConfig {
+        lookups: LookupOpts {
+            mdns: false,
+            dht: false,
+            relay_lookup: RelayChoice::Custom(ladder),
+        },
+        password: None,
+        issuer_pubkey: None,
+        transport: TransportPolicy::default(),
+    }
+}
+
+#[test]
+fn validate_rejects_a_ladder_over_the_wire_ceiling() {
+    // One past `MAX_RELAY_LADDER`: encodes fine, then no joiner can decode it.
+    let error = ladder_config(17).validate().unwrap_err();
+    assert!(error.to_string().contains("relay ladder"), "got: {error}");
+    ladder_config(16)
+        .validate()
+        .expect("the ceiling itself fits");
+}
+
+#[test]
+fn validate_rejects_a_ladder_the_count_byte_cannot_hold() {
+    // Past 255 the count no longer fits a `u8` and the encoder panics.
+    let error = ladder_config(300).validate().unwrap_err();
+    assert!(error.to_string().contains("relay ladder"), "got: {error}");
+}
+
+#[test]
+fn validate_rejects_a_relay_url_over_the_wire_ceiling() {
+    let host = "a".repeat(MAX_RELAY_URL_BYTES);
+    let config = MeshConfig {
+        lookups: LookupOpts {
+            mdns: false,
+            dht: false,
+            relay_lookup: RelayChoice::Custom(vec![
+                format!("https://{host}.example").parse().unwrap(),
+            ]),
+        },
+        password: None,
+        issuer_pubkey: None,
+        transport: TransportPolicy::default(),
+    };
+    let error = config.validate().unwrap_err();
+    assert!(error.to_string().contains("relay URL"), "got: {error}");
 }
 
 #[test]

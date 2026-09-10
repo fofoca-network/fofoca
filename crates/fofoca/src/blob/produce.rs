@@ -295,16 +295,23 @@ async fn serve_connection(
     // authorizes this fetch is inside the request we are waiting for, so none
     // of it can be gated on the peer having proved anything.
     let deadline = tokio::time::Instant::now() + limits.pre_auth;
-    let (conn, send, recv) = tokio::time::timeout_at(deadline, async {
-        let conn = incoming.await?;
-        // Before the request is read, so a refused fetch costs no spool read
-        // and the consumer sees the coded close instead of a size.
-        crate::transport::refuse_relayed(&conn, relay_transport, RELAY_REFUSED_CODE)?;
-        let (send, recv) = conn.accept_bi().await?;
-        anyhow::Ok((conn, send, recv))
-    })
-    .await
-    .context("no fetch request within the pre-authentication deadline")??;
+    let conn = tokio::time::timeout_at(deadline, incoming)
+        .await
+        .context("no connection within the pre-authentication deadline")??;
+    // Before the request is read, so a refused fetch costs no spool read and
+    // the consumer sees the coded close instead of a size. The punch wait gets
+    // what is left of the deadline: nested under the outer timer it could
+    // outlive it, and a drop closes as `DONE`, not as a refusal.
+    crate::transport::refuse_relayed(
+        &conn,
+        relay_transport,
+        deadline.saturating_duration_since(tokio::time::Instant::now()),
+        RELAY_REFUSED_CODE,
+    )
+    .await?;
+    let (send, recv) = tokio::time::timeout_at(deadline, conn.accept_bi())
+        .await
+        .context("no fetch request within the pre-authentication deadline")??;
     serve_stream(&conn, send, recv, store, deadline).await
 }
 

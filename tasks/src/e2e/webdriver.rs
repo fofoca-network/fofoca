@@ -25,7 +25,7 @@ use super::{Harvest, Skip, server};
 /// Binding to port 0 and immediately releasing leaves a window where something
 /// else could take it. That window is microseconds and the alternative is a
 /// collision that lasts as long as the stale process does.
-fn free_port() -> Result<u16, Skip> {
+pub(super) fn free_port() -> Result<u16, Skip> {
     std::net::TcpListener::bind("127.0.0.1:0")
         .and_then(|listener| listener.local_addr())
         .map(|addr| addr.port())
@@ -234,6 +234,78 @@ pub(super) fn run(
         .call();
 
     Ok(harvest)
+}
+
+/// A live `WebDriver` session on one browser, for a suite that drives the page
+/// itself rather than harvesting a published table. The driver dies with the
+/// session (its `Drop` kills the process), which also closes the window.
+#[cfg(feature = "mesh")]
+#[derive(Debug)]
+pub(super) struct Session {
+    driver: Driver,
+    id: String,
+    version: String,
+}
+
+#[cfg(feature = "mesh")]
+impl Session {
+    pub(super) fn open(browser: &str, binary: &str) -> Result<Self, Skip> {
+        let driver = Driver::start(browser)?;
+        let created = driver
+            .post("/session", &capabilities(browser, binary))
+            .map_err(|error| session_refused(browser, &error))?;
+        let id = created
+            .pointer("/value/sessionId")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                let detail = created
+                    .pointer("/value/message")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("no message");
+                session_refused(browser, detail)
+            })?
+            .to_owned();
+        let capability = |key: &str| {
+            created
+                .pointer(&format!("/value/capabilities/{key}"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("?")
+                .to_owned()
+        };
+        let version = format!(
+            "{}/{}",
+            capability("browserName"),
+            capability("browserVersion")
+        );
+        Ok(Self {
+            driver,
+            id,
+            version,
+        })
+    }
+
+    pub(super) fn navigate(&self, url: &str) {
+        let _ = self.driver.post(
+            &format!("/session/{}/url", self.id),
+            &serde_json::json!({ "url": url }),
+        );
+    }
+
+    /// Run a script body (`return …;`) and read its value as a string.
+    pub(super) fn execute(&self, script: &str) -> String {
+        self.driver
+            .post(
+                &format!("/session/{}/execute/sync", self.id),
+                &serde_json::json!({ "script": script, "args": [] }),
+            )
+            .ok()
+            .and_then(|reply| reply.get("value").map(super::json_to_string))
+            .unwrap_or_default()
+    }
+
+    pub(super) fn version(&self) -> String {
+        self.version.clone()
+    }
 }
 
 /// A refusal and a hang want different fixes, so they get different messages —

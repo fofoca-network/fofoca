@@ -1292,7 +1292,7 @@ checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
 
 [[package]]
 name = "fofoca"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -1328,7 +1328,7 @@ dependencies = [
 
 [[package]]
 name = "fofoca-doc"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "automerge",
@@ -1344,7 +1344,7 @@ dependencies = [
 
 [[package]]
 name = "fofoca-iroh-multihop-transport"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1362,14 +1362,14 @@ dependencies = [
 
 [[package]]
 name = "fofoca-iroh-transport-util"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "iroh",
 ]
 
 [[package]]
 name = "fofoca-iroh-webrtc-transport"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1394,7 +1394,7 @@ dependencies = [
 
 [[package]]
 name = "fofoca-logging"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "fofoca-protocol",
@@ -1406,18 +1406,19 @@ dependencies = [
 
 [[package]]
 name = "fofoca-netplay"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "fofoca",
  "serde",
  "serde_json",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
 name = "fofoca-protocol"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -1441,7 +1442,7 @@ dependencies = [
 
 [[package]]
 name = "fofoca-util"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "libc",
  "tokio",
@@ -2297,7 +2298,7 @@ dependencies = [
 [[package]]
 name = "iroh-mainline-address-lookup"
 version = "0.4.0"
-source = "git+https://github.com/fofoca-network/iroh-address-lookups?rev=53cf1ee6cc10a9b8c4805a5f7fe4d39570d86aa1#53cf1ee6cc10a9b8c4805a5f7fe4d39570d86aa1"
+source = "git+https://github.com/fofoca-network/iroh-address-lookups?rev=a5a77c6ff26fa2dcbb2b650bd0d095b7c94e2990#a5a77c6ff26fa2dcbb2b650bd0d095b7c94e2990"
 dependencies = [
  "derive_more",
  "iroh",
@@ -2314,7 +2315,7 @@ dependencies = [
 [[package]]
 name = "iroh-mdns-address-lookup"
 version = "0.4.0"
-source = "git+https://github.com/fofoca-network/iroh-address-lookups?rev=53cf1ee6cc10a9b8c4805a5f7fe4d39570d86aa1#53cf1ee6cc10a9b8c4805a5f7fe4d39570d86aa1"
+source = "git+https://github.com/fofoca-network/iroh-address-lookups?rev=a5a77c6ff26fa2dcbb2b650bd0d095b7c94e2990#a5a77c6ff26fa2dcbb2b650bd0d095b7c94e2990"
 dependencies = [
  "data-encoding",
  "derive_more",
@@ -2588,6 +2589,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tracing",
  "tracing-subscriber",
  "visage-rust-tui",
 ]
@@ -4338,8 +4340,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 [[package]]
 name = "swarm-discovery"
 version = "0.6.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1b4877f20f064de34b77d79237c9caa37c393590af8ef5a2f3253d59be5a338b"
+source = "git+https://github.com/rkuhn/swarm-discovery?rev=b41dbcc431f419ad0cd91f786d4d7c71ec6be9ce#b41dbcc431f419ad0cd91f786d4d7c71ec6be9ce"
 dependencies = [
  "acto",
  "hickory-proto",

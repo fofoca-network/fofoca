@@ -16,6 +16,10 @@ bun run start --create --mdns --nick ana       # or create; share the printed id
 bun run start --id <base58> --nick bo          # and join it by id
 ```
 
+`--relay-url <url>` (repeatable) swaps in a custom relay ladder on `--topic`
+and `--create`. The ladder is part of the mesh id, so every member must pass
+the same list; the relay stays a lookup — payload never rides it.
+
 Human mode: type to chat, `/who`, `/state`, `/merge {json}`, `/quit`.
 
 ## Automation (`--json`)

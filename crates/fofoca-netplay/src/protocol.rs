@@ -18,6 +18,22 @@ use crate::transport::{Body, InputPacket, Message};
 /// one because a single reply only proves the path worked once.
 const SYNC_ROUNDTRIPS: u32 = 5;
 
+/// Ticks between resends of an unanswered sync request.
+///
+/// A request used to go out on every tick until it was answered, which is a
+/// feedback loop: the peer echoes each one, only the reply matching the
+/// current token advances the handshake, and the rest are discarded. When the
+/// loop ticks faster than the transport drains — a slow machine, a busy
+/// runner — the queue grows faster than the useful reply can reach the front,
+/// and the handshake stops converging at all. Measured on a two-peer
+/// loopback match: 4 discarded replies per peer on a developer laptop, 256 on
+/// a shared CI runner, and two runs that never finished inside 60s.
+///
+/// Eight ticks bounds the outstanding requests without slowing the handshake
+/// noticeably: a round trip that completes is answered immediately, because
+/// [`PeerProtocol::on_message`] clears the counter when the token rotates.
+const SYNC_RESEND_EVERY_TICKS: u32 = 8;
+
 /// Ticks without hearing anything before a peer is declared gone.
 ///
 /// Generous on purpose: a browser tab that is backgrounded has its
@@ -72,6 +88,9 @@ pub(crate) struct PeerProtocol<T: Config> {
     roundtrips_left: u32,
     /// Token echoed in the current outstanding sync request.
     sync_token: u32,
+    /// Ticks since the outstanding sync request went out, so it is resent on
+    /// a cadence rather than every tick. `0` means "send one now".
+    since_sync_request: u32,
     /// Highest frame we have a real input from this peer for.
     last_received_frame: Frame,
     /// Highest frame *they* have acked from us — everything past this is
@@ -88,6 +107,13 @@ pub(crate) struct PeerProtocol<T: Config> {
     time_sync: TimeSync,
     /// Checksums we have advertised, so a mismatch can be attributed.
     local_checksums: Vec<(Frame, u128)>,
+    /// Packets discarded for carrying a foreign session nonce, and sync
+    /// replies discarded for echoing a spent token. Both are silent drops
+    /// that leave a session stuck in `Synchronizing` with traffic flowing
+    /// both ways, which is indistinguishable from a dead peer without a
+    /// count. Diagnostic only — nothing reads them but the log.
+    foreign_magic_drops: u32,
+    stale_token_drops: u32,
 }
 
 impl<T: Config> std::fmt::Debug for PeerProtocol<T> {
@@ -115,6 +141,7 @@ impl<T: Config> PeerProtocol<T> {
             // Derived from our own nonce so the first request is answerable
             // without any shared randomness.
             sync_token: magic ^ 0x5bf0_3635,
+            since_sync_request: 0,
             last_received_frame: NULL_FRAME,
             last_acked_frame: NULL_FRAME,
             pending: Vec::new(),
@@ -123,6 +150,8 @@ impl<T: Config> PeerProtocol<T> {
             remote_advantage: 0,
             time_sync: TimeSync::default(),
             local_checksums: Vec::new(),
+            foreign_magic_drops: 0,
+            stale_token_drops: 0,
         }
     }
 
@@ -172,15 +201,28 @@ impl<T: Config> PeerProtocol<T> {
 
         self.silent_ticks = self.silent_ticks.saturating_add(1);
         if self.state != PeerState::Disconnected && self.silent_ticks > DISCONNECT_TIMEOUT_TICKS {
+            tracing::debug!(
+                handle = self.handle,
+                silent_ticks = self.silent_ticks,
+                was = ?self.state,
+                "peer went silent past the disconnect timeout"
+            );
             self.state = PeerState::Disconnected;
             events.push(PeerEvent::Disconnected);
             return (out, events);
         }
 
         match self.state {
-            PeerState::Syncing => out.push(self.wrap(Body::SyncRequest {
-                token: self.sync_token,
-            })),
+            PeerState::Syncing => {
+                // Only when one is due: see `SYNC_RESEND_EVERY_TICKS` for why
+                // sending on every tick stops the handshake converging.
+                if self.since_sync_request == 0 {
+                    out.push(self.wrap(Body::SyncRequest {
+                        token: self.sync_token,
+                    }));
+                }
+                self.since_sync_request = (self.since_sync_request + 1) % SYNC_RESEND_EVERY_TICKS;
+            }
             PeerState::Running => {
                 out.extend(self.input_message());
                 self.since_quality_report = self.since_quality_report.saturating_add(1);
@@ -240,9 +282,30 @@ impl<T: Config> PeerProtocol<T> {
         let mut events = Vec::new();
 
         match self.remote_magic {
-            Some(known) if known != message.magic => return (inputs, events),
+            Some(known) if known != message.magic => {
+                self.foreign_magic_drops = self.foreign_magic_drops.saturating_add(1);
+                // Powers of two: the drop that matters is the first one, and a
+                // wedged handshake produces thousands a second.
+                if self.foreign_magic_drops.is_power_of_two() {
+                    tracing::debug!(
+                        handle = self.handle,
+                        expected = known,
+                        received = message.magic,
+                        drops = self.foreign_magic_drops,
+                        "dropped a packet from a foreign session"
+                    );
+                }
+                return (inputs, events);
+            }
             Some(_) => {}
-            None => self.remote_magic = Some(message.magic),
+            None => {
+                tracing::debug!(
+                    handle = self.handle,
+                    remote_magic = message.magic,
+                    "latched the peer's session nonce"
+                );
+                self.remote_magic = Some(message.magic);
+            }
         }
         self.silent_ticks = 0;
 
@@ -256,9 +319,33 @@ impl<T: Config> PeerProtocol<T> {
                     // Fresh token each round so a duplicated reply cannot
                     // advance the handshake twice.
                     self.sync_token = self.sync_token.wrapping_mul(1_664_525).wrapping_add(1);
+                    // The next round's request is due now, not in a cadence's
+                    // time: this reply is the proof the last one arrived.
+                    self.since_sync_request = 0;
+                    tracing::debug!(
+                        handle = self.handle,
+                        roundtrips_left = self.roundtrips_left,
+                        "sync round trip"
+                    );
                     if self.roundtrips_left == 0 {
                         self.state = PeerState::Running;
                         events.push(PeerEvent::Synchronized);
+                    }
+                } else if self.state == PeerState::Syncing {
+                    // Every request is resent until it is answered, so a few
+                    // spent echoes are normal. A count that keeps climbing
+                    // while `roundtrips_left` does not is the handshake
+                    // failing to converge.
+                    self.stale_token_drops = self.stale_token_drops.saturating_add(1);
+                    if self.stale_token_drops.is_power_of_two() {
+                        tracing::debug!(
+                            handle = self.handle,
+                            expected = self.sync_token,
+                            received = *token,
+                            roundtrips_left = self.roundtrips_left,
+                            drops = self.stale_token_drops,
+                            "dropped a sync reply echoing a spent token"
+                        );
                     }
                 }
             }
@@ -278,6 +365,12 @@ impl<T: Config> PeerProtocol<T> {
                 if self.last_received_frame != NULL_FRAME
                     && packet.start_frame > self.last_received_frame + 1
                 {
+                    tracing::trace!(
+                        handle = self.handle,
+                        start_frame = packet.start_frame,
+                        last_received_frame = self.last_received_frame,
+                        "dropped an input packet that would leave a hole"
+                    );
                     return (inputs, events);
                 }
                 for (offset, input) in packet.inputs.iter().enumerate() {
@@ -319,5 +412,74 @@ impl<T: Config> PeerProtocol<T> {
             }
         }
         (inputs, events)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Body, PeerProtocol, PeerState, SYNC_RESEND_EVERY_TICKS};
+    use crate::frame::NULL_FRAME;
+    use crate::testutil::TestGame;
+    use crate::transport::Message;
+
+    fn syncing_peer() -> PeerProtocol<TestGame> {
+        PeerProtocol::<TestGame>::new("peer".to_owned(), 1, 0xabcd_1234)
+    }
+
+    /// How many sync requests one tick produced.
+    fn requests(peer: &mut PeerProtocol<TestGame>) -> usize {
+        let (out, _) = peer.tick(NULL_FRAME);
+        out.iter()
+            .filter(|message| matches!(message.body, Body::SyncRequest { .. }))
+            .count()
+    }
+
+    /// A request on every tick is a feedback loop: the peer echoes each one,
+    /// every reply but the newest is discarded, and on a machine that ticks
+    /// faster than the transport drains the handshake stops converging. See
+    /// [`SYNC_RESEND_EVERY_TICKS`].
+    #[test]
+    fn a_syncing_peer_resends_on_a_cadence_not_every_tick() {
+        let mut peer = syncing_peer();
+        assert_eq!(requests(&mut peer), 1, "the first request goes out at once");
+        for tick in 1..SYNC_RESEND_EVERY_TICKS {
+            assert_eq!(
+                requests(&mut peer),
+                0,
+                "tick {tick} resent while one was still outstanding"
+            );
+        }
+        assert_eq!(requests(&mut peer), 1, "the unanswered request is resent");
+    }
+
+    /// The cadence is a ceiling on *unanswered* requests, not a floor on the
+    /// handshake: an answered round trip is proof the path works, so the next
+    /// request is due immediately rather than a cadence later.
+    #[test]
+    fn an_answered_round_trip_releases_the_next_request_at_once() {
+        let mut peer = syncing_peer();
+        let (out, _) = peer.tick(NULL_FRAME);
+        let Some(Body::SyncRequest { token }) = out.first().map(|message| message.body.clone())
+        else {
+            panic!("a syncing peer opens with a request")
+        };
+
+        // Silent while the request is outstanding.
+        assert_eq!(requests(&mut peer), 0);
+
+        let mut replies = Vec::new();
+        peer.on_message(
+            &Message {
+                magic: peer.magic,
+                body: Body::SyncReply { token },
+            },
+            &mut replies,
+        );
+        assert_eq!(
+            requests(&mut peer),
+            1,
+            "the next round trip must not wait out the resend cadence"
+        );
+        assert_eq!(peer.state(), PeerState::Syncing, "one trip of several");
     }
 }

@@ -28,6 +28,41 @@ use iroh_gossip::proto::HyparviewConfig;
 use crate::protocol::mesh::{LookupOpts, RelayChoice};
 use crate::util::clock::millis_saturating;
 
+/// A local relay server every side of a test can reach: plain HTTP, so the
+/// engine dials `ws://` with no TLS — and so can a **browser**, which owns
+/// its own trust store and refuses a self-signed certificate with no
+/// override (`iroh::test_utils::run_relay_server` is https-only). No QUIC
+/// address discovery: a tab has no UDP, and the tests that use this force
+/// the relay to be the only path anyway.
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+pub mod test_relay {
+    use anyhow::Context as _;
+
+    /// Spawn the relay; the URL is `http://127.0.0.1:<port>/`. Dropping the
+    /// server stops it.
+    ///
+    /// # Errors
+    /// Binding or spawning the relay server fails.
+    pub async fn spawn_plain() -> anyhow::Result<(iroh::RelayUrl, iroh_relay::server::Server)> {
+        let mut config = iroh_relay::server::ServerConfig::default();
+        config.relay = Some(iroh_relay::server::RelayConfig::new((
+            std::net::Ipv4Addr::LOCALHOST,
+            0,
+        )));
+        config.quic = None;
+        let server = iroh_relay::server::Server::spawn(config)
+            .await
+            .context("spawning the local relay server")?;
+        let addr = server
+            .http_addr()
+            .context("the local relay server bound no HTTP address")?;
+        let url = format!("http://{addr}/")
+            .parse()
+            .context("the local relay address is not a relay URL")?;
+        Ok((url, server))
+    }
+}
+
 #[cfg(feature = "host")]
 pub use capability::{NetworkCapability, probe as capability_probe};
 pub(crate) use relay::RungRefresh;
@@ -106,8 +141,15 @@ pub struct TransportOpts {
     /// The relay. **Never cleared by `webrtc`-only**, because the relay is the
     /// rendezvous: it carries the bootstrap dial and the JSEP exchange. Clearing
     /// it would sever the very thing that lets a `WebRTC` session be negotiated.
+    ///
+    /// Not the mesh policy: this says whether *this node* registers a relay
+    /// transport at all, the way `ip` and `webrtc` do. Whether the relay may
+    /// carry payload is mesh-wide and lives in the id, as
+    /// `protocol::TransportPolicy::relay_transport`.
     pub relay: bool,
-    /// QUIC over a `WebRTC` data channel.
+    /// QUIC over a `WebRTC` data channel. Off, the transport is not registered
+    /// on the endpoint, no offer is answered and none is made — so a pair
+    /// with IP cleared too has the relay as its only path.
     pub webrtc: bool,
     /// Source-routed multi-hop. Host-only.
     pub multihop: bool,
@@ -186,7 +228,7 @@ pub async fn build_endpoint(
     let network = lookups.network_label();
     let mut builder = if lookups.is_loopback() {
         debug_assert!(
-            !lookups.mdns && !lookups.dht && lookups.relay == RelayChoice::Disabled,
+            !lookups.mdns && !lookups.dht && lookups.relay_lookup == RelayChoice::Disabled,
             "loopback-only mesh must resolve to all-off lookups"
         );
         // Loopback-only = strictly loopback, **zero external network calls**.
@@ -220,7 +262,7 @@ pub async fn build_endpoint(
         // rustls crypto provider. The mDNS / DHT address-lookups are
         // wired **after** bind (below) — in iroh 1.0 they live in
         // companion crates and need the bound endpoint's id.
-        Endpoint::builder(presets::Minimal).relay_mode(relay::relay_mode(&lookups.relay))
+        Endpoint::builder(presets::Minimal).relay_mode(relay::relay_mode(&lookups.relay_lookup))
     };
 
     if let Some(secret_key) = secret_key {
@@ -247,7 +289,9 @@ pub async fn build_endpoint(
     // rather than replacing them. Two native peers are better served by iroh's
     // own hole-punching; this is the browser's only path, and a fallback for
     // NATs that defeat hole-punching but not ICE.
-    if let Some(handle) = transports.webrtc {
+    if let Some(handle) = transports.webrtc
+        && transports.opts.webrtc
+    {
         builder = builder.add_custom_transport(handle.transport());
         // MUST come after `builder.preset(handle)` for multihop above: there is
         // a single `path_selector` slot and the last call wins. Safe only
@@ -316,7 +360,7 @@ pub async fn build_endpoint(
         network,
         mdns = lookups.mdns,
         dht = lookups.dht,
-        relay = ?lookups.relay,
+        relay = ?lookups.relay_lookup,
         role = if is_beacon { "beacon" } else { "peer" },
         endpoint_id = %endpoint.id(),
         "endpoint bound"
@@ -376,7 +420,7 @@ pub fn check_injected_identity(
         .addrs
         .iter()
         .any(|addr| matches!(addr, iroh::TransportAddr::Relay(_)));
-    let mesh_wants_relay = mesh_lookups.relay != RelayChoice::Disabled;
+    let mesh_wants_relay = mesh_lookups.relay_lookup != RelayChoice::Disabled;
     if mesh_wants_relay && !endpoint_has_relay {
         tracing::warn!(
             "injected endpoint advertises no relay address but the mesh rendezvous \
@@ -458,14 +502,18 @@ pub(crate) fn detached_webrtc_handle(
 /// a `RTCPeerConnection` hub in a tab — but the handle type does not, so this is
 /// the one place the split shows.
 #[cfg(not(target_arch = "wasm32"))]
-fn new_webrtc_handle(local: iroh::EndpointId) -> fofoca_iroh_webrtc_transport::WebRtcHandle {
+pub(crate) fn new_webrtc_handle(
+    local: iroh::EndpointId,
+) -> fofoca_iroh_webrtc_transport::WebRtcHandle {
     fofoca_iroh_webrtc_transport::WebRtcHandle::new(
         fofoca_iroh_webrtc_transport::WebRtcTransport::new(local),
     )
 }
 
 #[cfg(target_arch = "wasm32")]
-fn new_webrtc_handle(local: iroh::EndpointId) -> fofoca_iroh_webrtc_transport::WebRtcHandle {
+pub(crate) fn new_webrtc_handle(
+    local: iroh::EndpointId,
+) -> fofoca_iroh_webrtc_transport::WebRtcHandle {
     fofoca_iroh_webrtc_transport::WebRtcHandle::hub(local)
 }
 
@@ -513,7 +561,10 @@ pub fn add_peer_addr(endpoint: &Endpoint, addr: EndpointAddr) -> Result<()> {
     Ok(())
 }
 
-/// Bounded `GOSSIP_ALPN` connect-probe. Dialing forces iroh to
+/// Bounded `GOSSIP_ALPN` connect-probe. On a mesh whose relay is lookup
+/// only the far side's accept gate holds and finally closes this connection;
+/// the probe wants only the resolution side effect, so that is harmless.
+/// Dialing forces iroh to
 /// (re)resolve and (re)path `target` via the configured
 /// address-lookups; the connection is only ever wanted for that side
 /// effect. `true` iff a connection was established within `timeout`
@@ -579,6 +630,9 @@ pub(crate) fn build_mesh(
         crate::transport::IceProfile,
     )>,
     protocols: Vec<(Vec<u8>, Box<dyn iroh::protocol::DynProtocolHandler>)>,
+    // The mesh's `transport.relay_transport`: with it off, every inbound gossip
+    // connection is held until iroh selects a direct path on it.
+    relay_transport: bool,
 ) -> (Gossip, Router) {
     // `active_view_capacity` is the live direct-neighbor cap (`--max-peers`),
     // raised above iroh-gossip's default (5) so meshes up to it form a full mesh
@@ -594,7 +648,13 @@ pub(crate) fn build_mesh(
         .membership_config(membership)
         .spawn(endpoint.clone());
     let local = endpoint.id();
-    let mut builder = Router::builder(endpoint).accept(GOSSIP_ALPN, gossip.clone());
+    // Cloned before the Router consumes the endpoint; the signal acceptor
+    // registers webrtc transport addresses on attach.
+    let endpoint_for_acceptor = endpoint.clone();
+    let mut builder = Router::builder(endpoint).accept(
+        GOSSIP_ALPN,
+        crate::transport::DirectOnlyGossip::new(gossip.clone(), relay_transport),
+    );
     // A peer also accepts inbound unicast; the rendezvous/beacon endpoint
     // passes `None` (it is not a peer and carries no unicast traffic).
     if let Some(acceptor) = unicast {
@@ -607,7 +667,13 @@ pub(crate) fn build_mesh(
     if let Some((handle, admission, ice)) = webrtc {
         builder = builder.accept(
             crate::transport::MESH_WEBRTC_SIGNAL_ALPN,
-            crate::transport::WebRtcSignalAcceptor::new(handle, local, admission, ice),
+            crate::transport::WebRtcSignalAcceptor::new(
+                handle,
+                endpoint_for_acceptor,
+                local,
+                admission,
+                ice,
+            ),
         );
     }
     // The caller's own protocols, if it shares this endpoint with us.

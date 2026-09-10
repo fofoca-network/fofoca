@@ -119,6 +119,7 @@ export async function openMesh(open: Opener): Promise<Mesh> {
     state: applyState,
     presence: (event) => events.push(event),
     failed: (message) => events.push({ kind: 'error', message }),
+    event: (event) => events.push(event),
     closed: close,
   }
 
