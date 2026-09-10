@@ -375,6 +375,12 @@ pub(crate) async fn ingest(
     crate::logging::messages::log_in(&message);
     let observed = lifecycle::observe(&message, state, ctx);
     let surfaceable = observed.surfaceable;
+    // Our heads go out on the first frame from any new peer, not only on its
+    // `joined`: a digest is how a newcomer gets backfilled, and which frame a
+    // peer sends first depends on its version and its links.
+    if observed.update.joined_new {
+        antientropy::broadcast_state_digests(state, ctx.sender, ctx.mesh, ctx.author).await;
+    }
 
     // A shard of a split body never surfaces as a raw slice — see
     // `handle_shard` for the retain/reassemble/gate/surface sequence.

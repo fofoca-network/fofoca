@@ -196,12 +196,6 @@ pub(crate) async fn handle_presence(
             gossip::broadcast_msg(ctx.sender, &joined).await;
             gossip::retain_own_broadcast(state, &joined);
             state.last_sent_at = Instant::now();
-            // Advertise our document heads now rather than on the next
-            // anti-entropy tick: the newcomer's first digest may have gone out
-            // before it saw us, and ours lets it ask for what it lacks within one
-            // round trip instead of up to an interval later.
-            gossip::antientropy::broadcast_state_digests(state, ctx.sender, ctx.mesh, ctx.author)
-                .await;
             // Suppress "has joined" when we already printed "came back"
             // from the quiet check, or when this `joined` predates
             // our own join (relayed backlog).
