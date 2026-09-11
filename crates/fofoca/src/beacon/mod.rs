@@ -683,7 +683,6 @@ async fn claim(
 
     // Register the peer's address so the rendezvous can dial it
     // in private mode (no lookup); a harmless direct hint in public.
-    let peer_id = peer.id();
     let _ = add_peer_addr(&endpoint, peer.addr());
     let topic_id = params.topic_id;
 
@@ -700,11 +699,7 @@ async fn claim(
     let rendezvous_endpoint = endpoint.clone();
 
     let task = n0_future::task::spawn(async move {
-        use std::time::Duration;
-
         use futures_util::StreamExt as _;
-
-        use crate::util::tuning::BEACON_MESH_WAIT_SECS;
 
         // Keep the gossip frontend + the Router's accept loop alive
         // for the task's lifetime so the rendezvous stays reachable by
@@ -712,41 +707,20 @@ async fn claim(
         let _endpoint = endpoint;
         let _router = router;
 
-        // Subscribe + bounded-wait to mesh with our own peer so
-        // a joiner dialing the rendezvous finds it bridged in, not a
-        // bare socket. *Inside the task*, not in `ensure`, so
-        // `daemon::run` never blocks here — blocking it stalls
-        // in-process two-session setups whose runtime must also drive
-        // the peer. Subscribe failure / `joined()` timeout: fall
-        // through, the heal loop keeps converging (empty-gossip safe).
-        let Ok(mut topic) = gossip.subscribe(topic_id, vec![peer_id]).await else {
+        // *Inside the task*, not in `ensure`, so `daemon::run` never blocks
+        // here — blocking it stalls in-process two-session setups whose
+        // runtime must also drive the peer. No bootstrap: our own peer dials
+        // us, and dialing it back races that dial (see
+        // `a_rendezvous_does_not_dial_its_own_peer`).
+        let Ok(topic) = gossip.subscribe(topic_id, Vec::new()).await else {
             return;
         };
         // Retain the gossip frontend for the task's lifetime.
         let _gossip = gossip;
-        let _ =
-            n0_future::time::timeout(Duration::from_secs(BEACON_MESH_WAIT_SECS), topic.joined())
-                .await;
-
-        let (sender, mut receiver) = topic.split();
-        let mut heal = n0_future::time::interval(Duration::from_secs(heal_interval_secs()));
-        heal.tick().await; // eat the immediate first tick
-
-        loop {
-            tokio::select! {
-                event = receiver.next() => {
-                    if event.is_none() {
-                        break; // topic terminally closed
-                    }
-                    // App payloads are discarded — this node only
-                    // relays the gossip overlay.
-                }
-                _ = heal.tick() => {
-                    // Re-assert the peer link across blips.
-                    let _ = sender.join_peers(vec![peer_id]).await;
-                }
-            }
-        }
+        let (_sender, mut receiver) = topic.split();
+        // App payloads are discarded — this node only relays the gossip
+        // overlay. Ends when the topic terminally closes.
+        while receiver.next().await.is_some() {}
     });
 
     // Relay liveness/discovery, off this gossip task: never stops
@@ -1014,6 +988,69 @@ mod tests {
         assert!(!releasable(&mut slot), "a live beacon is not releasable");
         assert!(slot.is_some(), "and is left alone");
         assert!(!endpoint.is_closed(), "its endpoint stays open");
+    }
+
+    /// The peer dials its co-hosted rendezvous (its bootstrap, or a re-graft),
+    /// so the rendezvous must not dial back. Two dials open two connections;
+    /// iroh-gossip keeps the newer one and stops reading the older, and a
+    /// `Join` or `Neighbor` already sent on the older one is lost. Only one
+    /// side then lists the other as a neighbor, and the rendezvous forwards
+    /// nothing to its own peer. Here the peer never dials, so any link can
+    /// only be the rendezvous dialing it.
+    #[tokio::test]
+    async fn a_rendezvous_does_not_dial_its_own_peer() {
+        use futures_util::StreamExt as _;
+        use iroh_gossip::api::Event;
+
+        let port = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .and_then(|socket| socket.local_addr())
+            .expect("a free loopback port")
+            .port();
+        let mut params = public_params();
+        params.bind_ports = vec![port];
+
+        let peer = loopback_endpoint().await;
+        let (gossip, router) = crate::lookup::build_mesh(
+            peer.clone(),
+            crate::util::tuning::GOSSIP_ACTIVE_VIEW_CAPACITY,
+            None,
+            None,
+            Vec::new(),
+            false,
+        );
+        let (_sender, mut receiver) = gossip
+            .subscribe(params.topic_id, Vec::new())
+            .await
+            .expect("subscribe without a bootstrap")
+            .split();
+
+        let mut beacon = None;
+        let mut probe = None;
+        assert!(
+            ensure(&params, &peer, &mut beacon, false, &mut probe).await,
+            "a free ladder rung is claimed"
+        );
+
+        let first_neighbor = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                match receiver.next().await {
+                    Some(Ok(Event::NeighborUp(id))) => return id,
+                    Some(_) => {}
+                    None => std::future::pending::<()>().await,
+                }
+            }
+        })
+        .await;
+
+        if let Some(held) = beacon.take() {
+            held.shed_and_wait().await;
+        }
+        let _ = router.shutdown().await;
+        assert!(
+            first_neighbor.is_err(),
+            "the rendezvous dialed its own peer (neighbor {}); with the peer dialing it too, the pair opens two connections and one side's Join is lost",
+            first_neighbor.map_or_else(|_| String::new(), |id| id.fmt_short().to_string())
+        );
     }
 
     #[tokio::test]

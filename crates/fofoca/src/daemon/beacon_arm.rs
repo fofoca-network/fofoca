@@ -118,6 +118,8 @@ pub(super) async fn maybe_cohost(
         .await;
         if claimed {
             schedule_rival_recheck(state, arm.policy, arm.params, ctx.endpoint);
+            // The new rendezvous never dials us; the reclaim tick re-grafts it.
+            state.arm_reclaim(Instant::now());
         }
     }
 }
@@ -130,11 +132,12 @@ pub(super) async fn maybe_cohost(
 /// isn't displaced by a colliding duplicate.
 ///
 /// Reclaiming the identity is only half of what the window is for. The
-/// other half is the *symmetric* loss: the beacon is alive and belongs to
-/// somebody else, and what we lost is our own gossip link to it. `ensure`
-/// answers that with "stay a peer" and returns `false`, which used to end
-/// the tick — leaving us off the mesh until the heal arm's re-graft came
-/// round, up to 15s later. On a loopback mesh that is the whole
+/// other half is the *symmetric* loss: the beacon is alive and what we lost
+/// is our own gossip link to it — to somebody else's beacon, or to one we
+/// hold, which never dials its own peer (`beacon::claim`). `ensure` then
+/// returns `false`, which used to end the tick — leaving us off the mesh
+/// until the heal arm's re-graft came round, up to 15s later. On a loopback
+/// mesh that is the whole
 /// bootstrap: a peer whose rendezvous link drops in the first
 /// milliseconds sees an empty roster for 15s, and a two-peer mesh simply
 /// never forms in time. So the re-graft rides this ticker too.
@@ -162,12 +165,12 @@ pub(super) async fn maybe_reclaim(
             schedule_rival_recheck(state, arm.policy, arm.params, ctx.endpoint);
             return;
         }
-        if regrafts_rendezvous(current.is_some(), state.rendezvous_linked)
+        if regrafts_rendezvous(state.rendezvous_linked)
             && crate::transport::webrtc::rendezvous_graftable(state)
         {
             tracing::info!(
                 target: "fofoca::gossip",
-                "reclaim tick: re-graft the rendezvous (link lost, beacon is someone else's)"
+                "reclaim tick: re-graft the rendezvous (link lost)"
             );
             crate::gossip::heal::tick_heal(arm.params.id, ctx.sender).await;
         }
@@ -176,14 +179,15 @@ pub(super) async fn maybe_reclaim(
 
 /// Whether a reclaim tick that did not claim should re-graft.
 ///
-/// Both guards matter. A beacon holder has nothing to graft to — it *is*
-/// the rendezvous — and a peer that still holds a live link must not dial
-/// again: both heal legs dial `GOSSIP_ALPN`, which the beacon's gossip
+/// Only when the link is lost: a peer that still holds a live link must not
+/// dial again — both heal legs dial `GOSSIP_ALPN`, which the beacon's gossip
 /// adopts, superseding the healthy link and flapping it once per tick.
-/// That is the same pair of conditions [`super::heal::run_heal`] gates its
-/// own re-graft on; this one just gets there sooner.
-fn regrafts_rendezvous(holds_beacon: bool, rendezvous_linked: bool) -> bool {
-    !holds_beacon && !rendezvous_linked
+/// Holding the beacon is no exception: our own rendezvous never dials us
+/// (`beacon::claim`), so our side re-grafts it like any other. That is the
+/// condition [`super::heal::run_heal`] gates its own re-graft on; this one
+/// just gets there sooner.
+fn regrafts_rendezvous(rendezvous_linked: bool) -> bool {
+    !rendezvous_linked
 }
 /// Whether this session's beacon is subject to the periodic rival
 /// re-check shed: any **public** co-host that had to *probe* for the
@@ -358,23 +362,114 @@ mod tests {
     /// whose rendezvous link dropped in the first milliseconds after
     /// joining waited for the 15s heal tick to re-graft, and the mesh
     /// missed its window. The reclaim tick now re-grafts — but only when
-    /// there is a link to regain and no beacon of our own to graft to.
+    /// there is a link to regain, whoever holds the beacon.
     #[test]
-    fn a_reclaim_tick_regrafts_only_when_the_link_is_lost_and_the_beacon_is_not_ours() {
+    fn a_reclaim_tick_regrafts_only_when_the_link_is_lost() {
         assert!(
-            regrafts_rendezvous(false, false),
-            "link lost and the beacon is someone else's: this is the case that stalled"
+            regrafts_rendezvous(false),
+            "link lost: the case that stalled, and the only way a beacon we hold gets linked"
         );
         assert!(
-            !regrafts_rendezvous(false, true),
+            !regrafts_rendezvous(true),
             "a live link must not be re-dialled — both heal legs dial GOSSIP_ALPN, and the \
              beacon adopting the new one flaps the healthy link once per tick"
         );
+    }
+
+    /// Our rendezvous never dials us, so a fresh claim is linked only by our
+    /// own re-graft. The reclaim tick does that within `RECLAIM_INTERVAL_MS`,
+    /// but only while its window is open, and a heal-tick claim happens with
+    /// no window open: without one, the link waits for the next heal tick.
+    #[tokio::test]
+    async fn a_heal_tick_claim_opens_the_reclaim_window() {
+        use iroh_gossip::net::Gossip;
+
+        use super::{CohostArm, maybe_cohost};
+        use crate::daemon::ctx::HandlerCtx;
+        use crate::gossip::event::SilentSink;
+        use crate::protocol::MeshId;
+        use crate::protocol::identity::{Identity, encode_pubkey};
+        use crate::protocol::mesh::LookupOpts;
+        use crate::testing::{fresh_state, nick};
+        use crate::transport::MeshSender;
+        use crate::util::clock::Instant;
+
+        let port = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .and_then(|socket| socket.local_addr())
+            .expect("a free loopback port")
+            .port();
+        let secret = iroh::SecretKey::generate();
+        let params = crate::beacon::RendezvousParams {
+            topic_id: iroh_gossip::proto::TopicId::from_bytes([5u8; 32]),
+            id: secret.public(),
+            secret,
+            bind_ports: vec![port],
+            lookups: LookupOpts::loopback(),
+            relay_transport: false,
+            bootstrap_relay: None,
+            rung_tx: tokio::sync::watch::channel(None).0,
+        };
+
+        let endpoint = crate::lookup::build_endpoint(
+            &LookupOpts::loopback(),
+            None,
+            None,
+            Vec::new(),
+            crate::lookup::TransportHandles::default(),
+        )
+        .await
+        .expect("loopback endpoint");
+        let gossip = Gossip::builder().spawn(endpoint.clone());
+        let (gossip_sender, _receiver) = gossip
+            .subscribe(params.topic_id, Vec::new())
+            .await
+            .expect("subscribe without a bootstrap")
+            .split();
+        let sender = MeshSender::new(gossip_sender);
+        let mesh = MeshId::from("test");
+        let author = nick("holder");
+        let identity = Identity::generate();
+        let our_pubkey = encode_pubkey(&identity.public());
+        let sink = SilentSink;
+        let ctx = HandlerCtx {
+            sender: &sender,
+            endpoint: &endpoint,
+            mesh: &mesh,
+            author: &author,
+            identity: &identity,
+            our_pubkey: &our_pubkey,
+            max_peers: 16,
+            rendezvous_id: params.id,
+            external_msg_tx: None,
+            sink: &sink,
+        };
+
+        let mut state = fresh_state();
+        state.meshed = true;
         assert!(
-            !regrafts_rendezvous(true, false),
-            "a beacon holder is the rendezvous; it has nothing to graft to"
+            state.reclaim_until.is_none(),
+            "no window is open before the tick"
         );
-        assert!(!regrafts_rendezvous(true, true));
+        let mut rendezvous = None;
+        let mut probe = None;
+        let arm = CohostArm {
+            policy: CoHostPolicy::Deferred,
+            params: &params,
+            started: Instant::now(),
+        };
+        maybe_cohost(&mut state, &ctx, &arm, &mut rendezvous, &mut probe).await;
+        let claimed = rendezvous.is_some();
+        let window_open = state.reclaim_until.is_some();
+
+        if let Some(held) = rendezvous.take() {
+            held.shed_and_wait().await;
+        }
+        endpoint.close().await;
+        assert!(claimed, "a meshed Deferred member claims a free rung");
+        assert!(
+            window_open,
+            "a heal-tick claim left the reclaim window closed: our rendezvous never dials us, so nothing links it until the next heal tick"
+        );
     }
 
     #[test]

@@ -222,7 +222,6 @@ async fn held_after_first_answer(node: &Node<Store>) -> usize {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "some loopback joins never complete: the rendezvous can forward no frame between its neighbors; remove with the rendezvous-forwards-nothing fix"]
 async fn a_late_joiner_backfills_on_meeting_its_only_peer() {
     pin_antientropy_tick();
     let topic = format!("late-joiner-pair-{}", rand::random::<u64>());
@@ -256,7 +255,7 @@ async fn a_late_joiner_backfills_on_meeting_its_only_peer() {
 /// queued while alone overflows the joiner's orphan buffer, and with the tick
 /// pinned nothing repairs it (follow-up: flush-outruns-its-deps).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "some loopback joins never complete: the rendezvous can forward no frame between its neighbors; remove with the rendezvous-forwards-nothing fix"]
+#[ignore = "fails ~1 run in 10 with the one-dialer fix: an unexplained join timeout, and the joiner holding none of the log (flush-outruns-its-deps); remove when both are fixed"]
 async fn a_late_joiner_backfills_on_meeting_a_meshed_pair() {
     pin_antientropy_tick();
     let topic = format!("late-joiner-trio-{}", rand::random::<u64>());

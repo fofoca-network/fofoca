@@ -733,6 +733,8 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
                         // instant, and the first re-check is what merges that
                         // split.
                         schedule_rival_recheck(&mut state, cohost, &rendezvous_params, &endpoint);
+                        // The new rendezvous never dials us; the reclaim tick re-grafts it.
+                        state.arm_reclaim(Instant::now());
                     } else if found_rival {
                         // A rival holds the identity: this arbitration epoch is
                         // settled, so a later claim (the rival died) starts the

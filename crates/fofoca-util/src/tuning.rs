@@ -372,18 +372,6 @@ pub fn starvation_threshold_secs() -> u64 {
     current().starvation_threshold_secs
 }
 
-/// How long `beacon::ensure` eagerly waits for the freshly-bound
-/// rendezvous to gossip-mesh with this process's own (already
-/// subscribed) peer before returning. Closes the
-/// rendezvous-readiness race: a joiner that dials the rendezvous finds
-/// it already bridged into the mesh, not a bare socket. Bounded — on
-/// timeout we fall through and the beacon's heal loop keeps the link
-/// converging exactly as before (empty-gossip joinability preserved;
-/// never blocks the event loop indefinitely). Generous enough to
-/// cover a public endpoint's relay-home warmup, capped so a
-/// pathological case can't stall startup.
-pub const BEACON_MESH_WAIT_SECS: u64 = 8;
-
 /// How long the event-driven failover burst keeps retrying
 /// `beacon::ensure` after a beacon-loss `NeighborDown`. Must
 /// comfortably exceed the departing beacon's graceful-shutdown grace
