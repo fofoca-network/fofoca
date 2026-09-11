@@ -102,23 +102,9 @@ pub(crate) async fn broadcast_digest(
     if !state.meshed {
         return;
     }
-    let recent = ANTIENTROPY_DIGEST_WINDOW_IDS;
-    let Some(newest) = state.message_log.recent_window(recent) else {
+    let Some(windows) = digest_windows(state) else {
         return; // empty log
     };
-    let mut windows = vec![WireWindow::encode(&newest)];
-
-    let older_len = state.message_log.older_len(recent);
-    if older_len == 0 {
-        state.digest_cursor = 0;
-    } else {
-        let start = state.digest_cursor % older_len;
-        if let Some(older) = state.message_log.older_window(recent, start, recent) {
-            state.digest_cursor = (start + older.ids.len()) % older_len;
-            windows.push(WireWindow::encode(&older));
-        }
-    }
-
     let total_ids: usize = windows.iter().map(|window| window.ids.len()).sum();
     let Some(body) = super::json_body(&DigestBody { windows }) else {
         return;
@@ -130,6 +116,34 @@ pub(crate) async fn broadcast_digest(
         &Message::new_digest(mesh, author, body).signed(&state.identity),
     )
     .await;
+}
+
+/// The windows a digest advertises: the newest, plus the next slice of the
+/// rolling older one when the log outgrows a window. `None` on an empty log.
+fn digest_windows(state: &mut EventLoopState) -> Option<Vec<WireWindow>> {
+    let recent = ANTIENTROPY_DIGEST_WINDOW_IDS;
+    let mut newest = state.message_log.recent_window(recent)?;
+    let older_len = state.message_log.older_len(recent);
+    if older_len == 0 {
+        // The window is the whole log, so its `lo` is only our first entry: the
+        // moment we first spoke, not when we joined. A node alone at start logs
+        // nothing until a link forms, and without this floor what the mesh said
+        // before that was never asked for. Nothing older than `joined_at` is
+        // ever surfaced, so asking from there costs no budget on history.
+        newest.lo = newest.lo.min(state.joined_at);
+    }
+    let mut windows = vec![WireWindow::encode(&newest)];
+
+    if older_len == 0 {
+        state.digest_cursor = 0;
+    } else {
+        let start = state.digest_cursor % older_len;
+        if let Some(older) = state.message_log.older_window(recent, start, recent) {
+            state.digest_cursor = (start + older.ids.len()) % older_len;
+            windows.push(WireWindow::encode(&older));
+        }
+    }
+    Some(windows)
 }
 
 /// Handle a received anti-entropy digest: for each advertised window, re-send
@@ -325,9 +339,9 @@ mod tests {
 
     use super::{
         ANTIENTROPY_DIGEST_WINDOW_IDS, DigestBody, DigestOrigin, HeadsBody, WireWindow,
-        missing_frames, state_digest,
+        digest_windows, missing_frames, state_digest,
     };
-    use crate::daemon::message_log::{DigestWindow, MessageLog};
+    use crate::daemon::message_log::{DigestWindow, MessageLog, MissingQuery, WindowRange};
     use crate::daemon::state::EventLoopState;
     use crate::doc::Ingested;
     use crate::protocol::{Channel, MeshId, Message, MessageBody, Nickname};
@@ -605,6 +619,79 @@ mod tests {
             "heads digest is {} bytes, over the {}-byte gossip cap",
             wire.len(),
             crate::util::consts::MAX_MESSAGE_SIZE
+        );
+    }
+
+    fn chat_at(body: &str, timestamp: i64) -> Message {
+        let mut message = Message::new_app(
+            &MeshId::from("test"),
+            &Nickname::from("author"),
+            crate::protocol::message::AppFrameParams {
+                tag: crate::protocol::AppTag::from("app_msg"),
+                to: None,
+                corr: None,
+                body: MessageBody::from(body),
+            },
+        );
+        message.timestamp = timestamp;
+        message
+    }
+
+    /// What `holder` re-sends in answer to `node`'s digest, as `handle_digest`
+    /// computes it.
+    fn answer(node: &mut EventLoopState, holder: &MessageLog) -> HashSet<String> {
+        let windows = digest_windows(node).expect("a non-empty log advertises");
+        let have: HashSet<[u8; 16]> = windows
+            .iter()
+            .flat_map(|window| window.decode_ids().expect("our own encoding"))
+            .collect();
+        windows
+            .iter()
+            .flat_map(|window| {
+                holder.missing_in_window(MissingQuery {
+                    range: WindowRange {
+                        lo: window.lo,
+                        hi: window.hi,
+                    },
+                    have: &have,
+                    max: 100,
+                    requester: &nick("node"),
+                })
+            })
+            .map(|message| message.body.as_str().to_string())
+            .collect()
+    }
+
+    /// A node gets back every message it missed after it joined, even one sent
+    /// well before its own first entry. A node alone for its first moments logs
+    /// nothing until a link forms and it announces itself, and the digest used
+    /// to start its window at that first entry, so what the mesh said in
+    /// between was never asked for and never arrived. Messages from before the
+    /// node joined stay out: it never surfaces them (`lifecycle`), so asking
+    /// for them would only spend the resend budget.
+    #[test]
+    fn a_digest_asks_for_everything_missed_since_joining() {
+        let joined_at = 1_700_000_000;
+        let own_joined = chat_at("own joined", joined_at + 5);
+        let mut node = fresh_state();
+        node.joined_at = joined_at;
+        node.message_log.push(own_joined.clone());
+
+        let mut holder = MessageLog::new(10);
+        for message in [
+            chat_at("before joining", joined_at - 5),
+            chat_at("4 s before the first entry", joined_at + 1),
+            chat_at("1 s before the first entry", joined_at + 4),
+            own_joined,
+        ] {
+            holder.push(message);
+        }
+
+        assert_eq!(
+            answer(&mut node, &holder),
+            HashSet::from(
+                ["4 s before the first entry", "1 s before the first entry"].map(String::from)
+            )
         );
     }
 
