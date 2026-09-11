@@ -684,6 +684,9 @@ async fn claim(
     // Register the peer's address so the rendezvous can dial it
     // in private mode (no lookup); a harmless direct hint in public.
     let _ = add_peer_addr(&endpoint, peer.addr());
+    // And the other way: our peer is the one that dials the rendezvous, and a
+    // public mesh without a relay rung gives it no lookup to find the id by.
+    let _ = add_peer_addr(peer, endpoint.addr());
     let topic_id = params.topic_id;
 
     // Relay-monitor inputs. The monitor runs as its **own** task (below),
@@ -1050,6 +1053,63 @@ mod tests {
             first_neighbor.is_err(),
             "the rendezvous dialed its own peer (neighbor {}); with the peer dialing it too, the pair opens two connections and one side's Join is lost",
             first_neighbor.map_or_else(|_| String::new(), |id| id.fmt_short().to_string())
+        );
+    }
+
+    /// On a public mesh with no relay rung nothing names the rendezvous for a
+    /// lookup to find, yet the holder's own peer is the one that must dial it
+    /// (the rendezvous never dials its peer). With every lookup off, only the
+    /// address the claim hands the peer lets the holder's re-graft reach it.
+    #[tokio::test]
+    async fn a_holder_reaches_its_own_public_rendezvous_without_lookups() {
+        use futures_util::StreamExt as _;
+        use iroh_gossip::api::Event;
+
+        let params = public_params();
+        let peer = loopback_endpoint().await;
+        let (gossip, router) = crate::lookup::build_mesh(
+            peer.clone(),
+            crate::util::tuning::GOSSIP_ACTIVE_VIEW_CAPACITY,
+            None,
+            None,
+            Vec::new(),
+            false,
+        );
+        let (sender, mut receiver) = gossip
+            .subscribe(params.topic_id, Vec::new())
+            .await
+            .expect("subscribe without a bootstrap")
+            .split();
+
+        let mut beacon = None;
+        let mut probe = None;
+        assert!(
+            ensure(&params, &peer, &mut beacon, false, &mut probe).await,
+            "a public rendezvous is claimed when no probe is asked for"
+        );
+        sender
+            .join_peers(vec![params.id])
+            .await
+            .expect("ask the gossip to join the rendezvous");
+        let linked = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                match receiver.next().await {
+                    Some(Ok(Event::NeighborUp(id))) if id == params.id => return,
+                    Some(_) => {}
+                    None => std::future::pending::<()>().await,
+                }
+            }
+        })
+        .await
+        .is_ok();
+
+        if let Some(held) = beacon.take() {
+            held.shed_and_wait().await;
+        }
+        let _ = router.shutdown().await;
+        assert!(
+            linked,
+            "the holder never reached its own rendezvous: nothing registered its address, and with every lookup off nothing can resolve it"
         );
     }
 
