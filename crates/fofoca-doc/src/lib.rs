@@ -125,6 +125,15 @@ pub struct MeshDoc {
     /// author's stalest orphan. A counter rather than a clock: this crate runs
     /// in a browser too, where `Instant` is not available.
     pending_seq: u64,
+    /// Dedup keys of orphan frames dropped from `pending` since the last
+    /// [`Self::take_dropped`]. The receive path marked them seen on arrival, so
+    /// unless it forgets them the author's re-send is discarded as a repeat and
+    /// the change can never land.
+    ///
+    /// Unbounded, so every caller that ingests other authors' frames must drain
+    /// it after each ingest, as the receive path does. A local write cannot
+    /// orphan and never adds to it.
+    dropped: Vec<[u8; 16]>,
     /// This channel's per-peer write gate, when it has one (`meta` does; `state`
     /// is free-form and carries no per-peer identity, so it does not).
     gate: Option<SelfWriteGate>,
@@ -177,6 +186,7 @@ impl MeshDoc {
             frames: HashMap::new(),
             pending: HashMap::new(),
             pending_seq: 0,
+            dropped: Vec::new(),
             gate,
             key: None,
         }
@@ -433,7 +443,9 @@ impl MeshDoc {
             let Some(victim) = self.stalest_of(&frame.pubkey) else {
                 break;
             };
-            self.pending.remove(&victim);
+            if let Some(evicted) = self.pending.remove(&victim) {
+                self.dropped.push(evicted.frame.dedup_key());
+            }
             tracing::warn!(
                 target: LOG_TARGET,
                 author = %frame.author,
@@ -446,6 +458,7 @@ impl MeshDoc {
                 author = %frame.author,
                 "channel orphan buffer full; incoming orphan dropped"
             );
+            self.dropped.push(frame.dedup_key());
             return Ingested::Ignored;
         }
         self.pending_seq += 1;
@@ -458,6 +471,12 @@ impl MeshDoc {
             },
         );
         Ingested::Buffered
+    }
+
+    /// The dedup keys of the orphan frames dropped since the last call, for the
+    /// receive path to forget.
+    pub fn take_dropped(&mut self) -> Vec<[u8; 16]> {
+        std::mem::take(&mut self.dropped)
     }
 
     /// How many orphans this pubkey has buffered. Scanned rather than counted
@@ -1007,6 +1026,31 @@ mod tests {
                 .values()
                 .any(|entry| entry.frame.pubkey == "11".repeat(32)),
             "the honest orphan survived: the newcomer is refused, not an incumbent evicted"
+        );
+    }
+
+    /// A newcomer refused at the global cap never reaches `pending`, but the
+    /// receive path already marked it seen, so its key is handed back with the
+    /// evicted ones or the author's re-send is discarded as a repeat.
+    #[test]
+    fn an_orphan_refused_at_the_global_cap_is_reported_as_dropped() {
+        let mut sink = MeshDoc::new_ungated();
+        let mut refused = None;
+        for who in 0..=DOC_PENDING_TOTAL_MAX {
+            let sybil = nick("sybil");
+            let mut source = MeshDoc::new_ungated();
+            let _root = author(&mut source, &sybil, &json!({"a": who}));
+            let mut orphan = author(&mut source, &sybil, &json!({"b": who}));
+            orphan.pubkey = format!("{who:064x}");
+            if matches!(sink.ingest(&orphan), Ingested::Ignored) {
+                refused = Some(orphan);
+                break;
+            }
+        }
+        let refused = refused.expect("the global cap must refuse a newcomer");
+        assert!(
+            sink.take_dropped().contains(&refused.dedup_key()),
+            "the refused orphan's dedup key must be handed back"
         );
     }
 

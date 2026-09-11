@@ -845,6 +845,9 @@ fn dispatch_channel(
         channel, message, ..
     } = event;
     ingest_channel_event(event, state.doc_mut(channel), ctx);
+    for key in state.doc_mut(channel).take_dropped() {
+        state.seen.remove(&key);
+    }
     if channel == Channel::Meta {
         // Post-apply hook: let the app adopt the author's endpoint hint from the
         // freshly-synced meta doc (the borrow above released `state`).
@@ -1467,5 +1470,179 @@ mod retain_own_broadcast_tests {
              the anti-entropy loop is back",
             offered.len()
         );
+    }
+}
+
+/// A change the channel doc evicts from its orphan buffer is recovered when
+/// anti-entropy re-serves it. The re-served frame is the original signed one,
+/// so it carries the dedup key the receive path recorded on first arrival.
+#[cfg(test)]
+mod evicted_orphan_tests {
+    use bytes::Bytes;
+    use iroh::endpoint::presets;
+    use iroh_gossip::net::Gossip;
+    use serde_json::json;
+
+    use super::ingest;
+    use crate::daemon::ctx::HandlerCtx;
+    use crate::daemon::state::EventLoopState;
+    use crate::doc::Ingested;
+    use crate::gossip::app::{AppClass, InboundApp, NodeApp};
+    use crate::gossip::event::SilentSink;
+    use crate::protocol::identity::{Identity, encode_pubkey};
+    use crate::protocol::{Channel, MeshId, Message, Nickname};
+    use crate::testing::{endpoint_id, fresh_state, nick};
+    use crate::transport::MeshSender;
+    use fofoca_util::consts::DOC_PENDING_AUTHOR_MAX;
+
+    /// State frames never reach the app, so it only has to exist.
+    struct Inert;
+
+    #[async_trait::async_trait]
+    impl NodeApp for Inert {
+        fn classify(&self, _message: &Message) -> AppClass {
+            AppClass {
+                loggable: false,
+                beat: true,
+                valid: true,
+                chained: false,
+                sealed: false,
+            }
+        }
+
+        async fn on_app_frame(
+            &mut self,
+            _frame: InboundApp<'_>,
+            _state: &mut EventLoopState,
+            _ctx: &HandlerCtx<'_>,
+        ) -> bool {
+            false
+        }
+    }
+
+    /// `count` state changes by one author, each depending on the one before.
+    fn chain(
+        writer: &mut EventLoopState,
+        mesh: &MeshId,
+        author: &Nickname,
+        count: usize,
+    ) -> Vec<Message> {
+        let seed = *writer.identity.public().as_bytes();
+        (0..count)
+            .map(|step| {
+                let change = writer
+                    .doc(Channel::State)
+                    .build_change(&json!({ format!("k{step}"): step }), &seed)
+                    .expect("a JSON object merges")
+                    .expect("a non-empty merge yields a change");
+                let (wire, _plain) = writer
+                    .doc(Channel::State)
+                    .compose_wire_body(&change, None)
+                    .expect("compose the wire body");
+                let frame = Message::new_channel_event(mesh, author, wire, Channel::State)
+                    .signed(&writer.identity);
+                assert!(matches!(
+                    writer.doc_mut(Channel::State).ingest(&frame),
+                    Ingested::Applied { .. }
+                ));
+                frame
+            })
+            .collect()
+    }
+
+    fn holds(state: &EventLoopState, step: usize) -> bool {
+        state
+            .doc(Channel::State)
+            .to_json()
+            .get(format!("k{step}"))
+            .is_some()
+    }
+
+    #[tokio::test]
+    async fn an_evicted_orphan_is_recovered_when_its_frame_is_re_served() {
+        let mesh = MeshId::from("test");
+        let mut writer = fresh_state();
+        let frames = chain(
+            &mut writer,
+            &mesh,
+            &nick("writer"),
+            DOC_PENDING_AUTHOR_MAX + 32,
+        );
+
+        let endpoint = iroh::Endpoint::builder(presets::Minimal)
+            .bind()
+            .await
+            .expect("bind a local endpoint");
+        let gossip = Gossip::builder().spawn(endpoint.clone());
+        let topic = gossip
+            .subscribe(iroh_gossip::proto::TopicId::from_bytes([3u8; 32]), vec![])
+            .await
+            .expect("subscribe to a peerless topic");
+        let (gossip_sender, _receiver) = topic.split();
+        let sender = MeshSender::new(gossip_sender);
+        let identity = Identity::generate();
+        let our_pubkey = encode_pubkey(&identity.public());
+        let reader_nick = nick("reader");
+        let sink = SilentSink;
+        let ctx = HandlerCtx {
+            sender: &sender,
+            endpoint: &endpoint,
+            mesh: &mesh,
+            author: &reader_nick,
+            identity: &identity,
+            our_pubkey: &our_pubkey,
+            max_peers: 16,
+            rendezvous_id: endpoint_id(9),
+            external_msg_tx: None,
+            sink: &sink,
+        };
+        let mut reader = fresh_state();
+        let mut app = Inert;
+        let wire = |frame: &Message| Bytes::from(frame.serialize().expect("serialize"));
+
+        // Newest first: every frame but the root arrives as an orphan, so the
+        // per-author ceiling evicts the stalest of them before the root lands.
+        for frame in frames.iter().rev() {
+            ingest(wire(frame), &mut reader, &mut app, &ctx).await;
+        }
+        let missing: Vec<&Message> = (0..frames.len())
+            .filter(|&step| !holds(&reader, step))
+            .map(|step| &frames[step])
+            .collect();
+        assert!(
+            !missing.is_empty(),
+            "nothing was evicted, so this test proves nothing"
+        );
+        let already_seen = missing
+            .iter()
+            .filter(|frame| reader.seen.contains(&frame.dedup_key()))
+            .count();
+        assert_eq!(
+            already_seen,
+            0,
+            "{already_seen} of the {} dropped frames are still in the seen set, so \
+             their re-send will be discarded as a repeat",
+            missing.len()
+        );
+
+        // What anti-entropy does for a peer whose heads show the gap: re-serve
+        // the author's original signed frames.
+        for frame in &missing {
+            ingest(wire(frame), &mut reader, &mut app, &ctx).await;
+        }
+
+        let held = (0..frames.len())
+            .filter(|&step| holds(&reader, step))
+            .count();
+        assert_eq!(
+            held,
+            frames.len(),
+            "the reader holds {held} of {} changes after the {} evicted ones were \
+             re-served; {already_seen} of those were already in the seen set, so \
+             the receive path dropped them as duplicates",
+            frames.len(),
+            missing.len()
+        );
+        endpoint.close().await;
     }
 }
