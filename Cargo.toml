@@ -140,7 +140,7 @@ iroh-mainline-address-lookup = { version = "=0.4.0", git = "https://github.com/f
 # Branch fix/fofoca-iroh-pin: the connection-churn leak fix (upstream PR
 # n0-computer/iroh-gossip#147) plus its own iroh/iroh-base repoint, since this
 # crate is another that sat between us and iroh.
-iroh-gossip = { version = "=0.101.0", git = "https://github.com/fofoca-network/iroh-gossip", rev = "57dcb6b8e5c0645c951830faf6b84b5893ee83c1", default-features = false, features = ["net"] }
+iroh-gossip = { version = "=0.101.0", git = "https://github.com/fofoca-network/iroh-gossip", rev = "50f6a933d8f4e11aeac38fd7581db3658f9fe684", default-features = false, features = ["net"] }
 # Named directly by both custom transports: `RecvMeta` appears in the
 # `CustomEndpoint::poll_recv` signature. This is the quinn fork iroh runs on,
 # and it resolves to the same crates.io release iroh itself depends on.
