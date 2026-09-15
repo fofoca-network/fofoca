@@ -2532,7 +2532,7 @@ dependencies = [
 [[package]]
 name = "iroh-gossip"
 version = "0.101.0"
-source = "git+https://github.com/fofoca-network/iroh-gossip?rev=57dcb6b8e5c0645c951830faf6b84b5893ee83c1#57dcb6b8e5c0645c951830faf6b84b5893ee83c1"
+source = "git+https://github.com/fofoca-network/iroh-gossip?rev=50f6a933d8f4e11aeac38fd7581db3658f9fe684#50f6a933d8f4e11aeac38fd7581db3658f9fe684"
 dependencies = [
  "blake3",
  "bytes",
