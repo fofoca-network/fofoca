@@ -60,6 +60,7 @@ export type FromWorker =
       readonly from: string
       readonly directed: boolean
       readonly eof: boolean
+      readonly seq: number
       readonly bytes: ArrayBuffer
     }
   | { readonly t: 'roster'; readonly json: string }

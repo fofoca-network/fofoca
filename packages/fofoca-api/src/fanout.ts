@@ -25,7 +25,7 @@ export class MeshOverflowError extends Error {
 }
 
 /**
- * Per-iterator buffer depth. At the 2112-byte frame budget a full one is about
+ * Per-iterator buffer depth. At the 2094-byte frame budget a full one is about
  * 2 MiB, and an iterator can only get there if its *consumer* stalled — the
  * engine's own 256-frame queue bounds the network side long before this.
  */

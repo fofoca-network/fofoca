@@ -96,7 +96,14 @@ describe('ffiOpener', () => {
       recorder.sink,
     )
     const payload = new TextEncoder().encode('hi')
-    emit({ t: 'frame', from: 'bo', directed: false, eof: false, bytes: payload.slice().buffer as ArrayBuffer })
+    emit({
+      t: 'frame',
+      from: 'bo',
+      directed: false,
+      eof: false,
+      seq: 0,
+      bytes: payload.slice().buffer as ArrayBuffer,
+    })
     emit({ t: 'roster', json: '{"count":2,"peers":[]}' })
     emit({ t: 'state', json: '{"a":1}' })
     emit({ t: 'failed', message: 'poll hiccup' })

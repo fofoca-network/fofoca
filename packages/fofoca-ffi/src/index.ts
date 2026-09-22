@@ -69,6 +69,7 @@ export function ffiOpener(wire: WireOpts, deps: OpenerDeps = {}): Opener {
             from: message.from,
             directed: message.directed,
             eof: message.eof,
+            seq: message.seq,
             bytes: new Uint8Array(message.bytes),
           })
           break

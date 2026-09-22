@@ -18,7 +18,7 @@
 use std::fmt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
 use crate::TaskOutcome;
@@ -190,6 +190,7 @@ struct Native {
     events: tokio::sync::mpsc::UnboundedReceiver<String>,
     seen_events: Vec<serde_json::Value>,
     seen_frames: Vec<fofoca_pipe::Inbound>,
+    seq: Mutex<fofoca_pipe::StreamSeq>,
 }
 
 impl Native {
@@ -203,6 +204,7 @@ impl Native {
             events,
             seen_events: Vec::new(),
             seen_frames: Vec::new(),
+            seq: Mutex::new(fofoca_pipe::StreamSeq::default()),
         })
     }
 
@@ -247,7 +249,13 @@ impl Native {
 
     async fn send(&self, to: Option<&str>, text: &str) -> Result<(), String> {
         let to = fofoca_pipe::parse_to(to).map_err(|error| error.to_string())?;
-        let body = fofoca_pipe::data_body(text.as_bytes()).map_err(|error| error.to_string())?;
+        let seq = self
+            .seq
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .next(&to);
+        let body =
+            fofoca_pipe::data_body(seq, text.as_bytes()).map_err(|error| error.to_string())?;
         self.request(|reply| fofoca_pipe::Request::Send {
             tag: fofoca_pipe::data_tag(),
             to,

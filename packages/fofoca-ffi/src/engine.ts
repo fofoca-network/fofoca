@@ -203,7 +203,14 @@ export function createEngine(
       }
       const bytes = payload.slice(0, frame.len)
       port.post(
-        { t: 'frame', from: frame.nick, directed: frame.directed, eof: frame.eof, bytes: bytes.buffer },
+        {
+          t: 'frame',
+          from: frame.nick,
+          directed: frame.directed,
+          eof: frame.eof,
+          seq: frame.seq,
+          bytes: bytes.buffer,
+        },
         [bytes.buffer],
       )
     } else if (code < 0n) {

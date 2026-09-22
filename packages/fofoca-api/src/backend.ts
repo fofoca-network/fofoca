@@ -15,6 +15,7 @@ export interface BackendFrame {
   readonly bytes: Uint8Array
   readonly directed: boolean
   readonly eof: boolean
+  readonly seq: number
 }
 
 /**

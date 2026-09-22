@@ -95,6 +95,9 @@ pub struct FofocaFrame {
     pub directed: c_int,
     pub eof: c_int,
     pub len: usize,
+    /// The frame's position in its (author, directed) stream; the stream's
+    /// frame count on an `eof`.
+    pub seq: u64,
 }
 
 /// The opaque handle behind `fofoca_pipe *`. Holds the [`Pipe`] plus NUL-terminated
@@ -447,6 +450,7 @@ pub unsafe extern "C" fn fofoca_recv(
             nick,
             directed,
             eof,
+            seq,
             bytes,
         } = frame;
         if bytes.len() > cap {
@@ -470,6 +474,7 @@ pub unsafe extern "C" fn fofoca_recv(
             directed: c_int::from(directed),
             eof: c_int::from(eof),
             len: bytes.len(),
+            seq,
         };
         write_nick(&mut meta.nick, &nick);
         // SAFETY: non-NULL (checked) and writable per the contract above.

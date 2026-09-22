@@ -7,7 +7,7 @@
 //! one mesh only because there is one copy of that contract. Only what cannot
 //! cross to wasm32 stayed here.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use fofoca::embed::SilentSink;
@@ -15,7 +15,7 @@ use fofoca::protocol::{AppTag, MessageBody, Nickname};
 use fofoca::runtime::Node;
 
 use anyhow::{Context, Result};
-use fofoca_pipe::{PipeApp, Request, Session};
+use fofoca_pipe::{Flow, PipeApp, Request, Session, StreamSeq};
 use tokio::sync::{mpsc, oneshot};
 
 // Re-exported rather than re-imported at every use site, so the C shim next door
@@ -33,6 +33,11 @@ pub struct Pipe {
     /// `None` after [`Pipe::close`] has taken it — `Node::leave` consumes it.
     node: Option<Node<PipeApp>>,
     inbound: mpsc::Receiver<Inbound>,
+    /// Per-addressee stream counters. A mutex rather than `&mut self` on
+    /// `send`, so the C shim keeps its shared handle for every send.
+    seq: Mutex<StreamSeq>,
+    /// The send window; see [`Flow`].
+    flow: Arc<Flow>,
     fofoca_id: String,
     nickname: String,
     name: String,
@@ -55,8 +60,11 @@ impl Pipe {
         // learns about joins, leaves and state changes by polling the roster and
         // the document. The browser peer passes `fofoca_pipe::json_sink()`'s
         // here instead, which is the one thing that differs between the two.
-        let Session { node, inbound } =
-            runtime.block_on(fofoca_pipe::join(opts, Arc::new(SilentSink)))?;
+        let Session {
+            node,
+            inbound,
+            flow,
+        } = runtime.block_on(fofoca_pipe::join(opts, Arc::new(SilentSink)))?;
 
         Ok(Self {
             fofoca_id: node.mesh_id().as_str().to_owned(),
@@ -65,6 +73,8 @@ impl Pipe {
             runtime,
             node: Some(node),
             inbound,
+            seq: Mutex::new(StreamSeq::default()),
+            flow,
             chunk: default_chunk(),
         })
     }
@@ -86,26 +96,38 @@ impl Pipe {
 
     /// Send `bytes` as one or more `pipe_data` frames — broadcast when `to` is
     /// `None`, directed at that peer otherwise. Splits at the single-frame
-    /// budget so the caller can hand over a buffer of any size.
+    /// budget so the caller can hand over a buffer of any size, each frame
+    /// numbered in its (self, `to`) stream.
     ///
     /// # Errors
     /// The event loop has stopped, or the engine refused a frame.
     pub fn send(&self, to: Option<&str>, bytes: &[u8]) -> Result<()> {
         let to = fofoca_pipe::parse_to(to)?;
         for slice in bytes.chunks(self.chunk) {
-            let body = fofoca_pipe::data_body(slice)?;
+            self.runtime.block_on(self.flow.wait_for_window(&to));
+            let seq = self.seq().next(&to);
+            let body = fofoca_pipe::data_body(seq, slice)?;
             self.request_send(fofoca_pipe::data_tag(), to.clone(), body)?;
         }
         Ok(())
     }
 
-    /// Send the end-of-stream marker (an empty `pipe_eof` body).
+    /// Send the end-of-stream marker, carrying the stream's frame count.
     ///
     /// # Errors
     /// The event loop has stopped, or the engine refused the frame.
     pub fn send_eof(&self, to: Option<&str>) -> Result<()> {
         let to = fofoca_pipe::parse_to(to)?;
-        self.request_send(fofoca_pipe::eof_tag(), to, fofoca_pipe::eof_body()?)
+        let count = self.seq().count(&to);
+        self.request_send(fofoca_pipe::eof_tag(), to, fofoca_pipe::eof_body(count)?)
+    }
+
+    fn seq(&self) -> std::sync::MutexGuard<'_, StreamSeq> {
+        // A poisoned counter is still a counter: the panic that poisoned it
+        // was not mid-update, since `next` cannot unwind.
+        self.seq
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn request_send(&self, tag: AppTag, to: Option<Nickname>, body: MessageBody) -> Result<()> {

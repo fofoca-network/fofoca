@@ -1,6 +1,9 @@
 //! The engine driver: what a `pipe_*` frame means on the way in, and what a
 //! consumer's request means on the way out.
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use anyhow::Result;
 use fofoca::async_trait;
 use fofoca::embed::{AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver};
@@ -10,6 +13,7 @@ use fofoca::protocol::{
 };
 use tokio::sync::{mpsc, oneshot};
 
+use crate::flow::{ACK_EVERY, Flow};
 use crate::wire::{self, tag};
 
 /// One surfaced inbound frame, flattened for a consumer that speaks bytes.
@@ -19,8 +23,12 @@ pub struct Inbound {
     pub nick: String,
     /// The frame was addressed to us specifically, not broadcast.
     pub directed: bool,
-    /// A `pipe_eof` marker; `bytes` is then empty.
+    /// A `pipe_eof` marker; `bytes` is then empty and `seq` is the stream's
+    /// frame count.
     pub eof: bool,
+    /// The frame's position in its (author, addressee) stream. Frames can
+    /// arrive out of order; [`Streams`](crate::Streams) puts them back.
+    pub seq: u64,
     pub bytes: Vec<u8>,
 }
 
@@ -61,14 +69,48 @@ pub enum Request {
 #[derive(Debug)]
 pub struct PipeApp {
     inbound: mpsc::Sender<Inbound>,
+    /// The sender-side window, shared with the consumers that wait on it.
+    flow: Arc<Flow>,
+    /// Frames received per (author, directed) stream — what we ack.
+    received: HashMap<(Nickname, bool), u64>,
 }
 
 impl PipeApp {
     /// Frames land on `inbound`. See [`wire::INBOUND_CAP`] for the drop-on-full
-    /// policy.
+    /// policy. `flow` is the window every send is paced against.
     #[must_use]
-    pub fn new(inbound: mpsc::Sender<Inbound>) -> Self {
-        Self { inbound }
+    pub fn new(inbound: mpsc::Sender<Inbound>, flow: Arc<Flow>) -> Self {
+        Self {
+            inbound,
+            flow,
+            received: HashMap::new(),
+        }
+    }
+
+    /// Tell `author` how many of their frames we hold, so they can pace.
+    /// Best effort: a held or refused ack costs nothing but pacing.
+    async fn ack(
+        &self,
+        state: &mut EventLoopState,
+        ctx: &HandlerCtx<'_>,
+        author: &Nickname,
+        directed: bool,
+        received: u64,
+    ) {
+        let Ok(body) = wire::ack_body(directed, received) else {
+            return;
+        };
+        let _ = send_app(
+            state,
+            ctx,
+            AppFrameParams {
+                tag: wire::ack_tag(),
+                to: Some(author.clone()),
+                corr: None,
+                body,
+            },
+        )
+        .await;
     }
 }
 
@@ -93,8 +135,8 @@ impl NodeApp for PipeApp {
     async fn on_app_frame(
         &mut self,
         frame: InboundApp<'_>,
-        _state: &mut EventLoopState,
-        _ctx: &HandlerCtx<'_>,
+        state: &mut EventLoopState,
+        ctx: &HandlerCtx<'_>,
     ) -> bool {
         let InboundApp {
             message,
@@ -105,11 +147,22 @@ impl NodeApp for PipeApp {
         let directed = matches!(message.kind, MessageKind::App { to: Some(_), .. });
         let queued = match message.kind.app_tag().map(AppTag::as_str) {
             Some(tag::DATA) => {
-                if let Some(bytes) = wire::decode_data(&message.body) {
+                if let Some((seq, bytes)) = wire::decode_data(&message.body) {
+                    let received = self
+                        .received
+                        .entry((message.author.clone(), directed))
+                        .or_default();
+                    *received += 1;
+                    let received = *received;
+                    if received.is_multiple_of(ACK_EVERY) {
+                        self.ack(state, ctx, &message.author, directed, received)
+                            .await;
+                    }
                     Some(Inbound {
                         nick: message.author.to_string(),
                         directed,
                         eof: false,
+                        seq,
                         bytes,
                     })
                 } else {
@@ -120,12 +173,39 @@ impl NodeApp for PipeApp {
                     None
                 }
             }
-            Some(tag::EOF) => Some(Inbound {
-                nick: message.author.to_string(),
-                directed,
-                eof: true,
-                bytes: Vec::new(),
-            }),
+            Some(tag::EOF) => {
+                if let Some(count) = wire::decode_eof(&message.body) {
+                    let received = self
+                        .received
+                        .get(&(message.author.clone(), directed))
+                        .copied()
+                        .unwrap_or(0);
+                    if !received.is_multiple_of(ACK_EVERY) {
+                        self.ack(state, ctx, &message.author, directed, received)
+                            .await;
+                    }
+                    Some(Inbound {
+                        nick: message.author.to_string(),
+                        directed,
+                        eof: true,
+                        seq: count,
+                        bytes: Vec::new(),
+                    })
+                } else {
+                    tracing::warn!(
+                        target: "fofoca::messages",
+                        "dropping undecodable pipe_eof"
+                    );
+                    None
+                }
+            }
+            Some(tag::ACK) => {
+                if let Some((of_directed_stream, received)) = wire::decode_ack(&message.body) {
+                    self.flow
+                        .note_ack(&message.author, of_directed_stream, received);
+                }
+                None
+            }
             Some(_) | None => None,
         };
         if let Some(inbound) = queued
@@ -141,6 +221,32 @@ impl NodeApp for PipeApp {
         // Never retained or indexed — the frame is fully handled here.
         false
     }
+
+    async fn on_peer_left(
+        &mut self,
+        nickname: &Nickname,
+        _state: &mut EventLoopState,
+        _ctx: &HandlerCtx<'_>,
+    ) {
+        self.flow.note_left(nickname);
+        self.received.retain(|(author, _), _| author != nickname);
+    }
+}
+
+/// Who a frame on the stream to `to` is expected to be acked by: the
+/// addressee, or every peer with a proven payload lane — the ones that can
+/// send a directed ack back at all.
+fn expected_receivers(state: &EventLoopState, to: Option<&Nickname>) -> Vec<Nickname> {
+    if let Some(nick) = to {
+        return vec![nick.clone()];
+    }
+    state
+        .roster_snapshot()
+        .peers
+        .into_iter()
+        .filter(|peer| !peer.quiet && peer.transport == fofoca::embed::Lane::Unicast)
+        .map(|peer| peer.nickname)
+        .collect()
 }
 
 #[async_trait]
@@ -162,6 +268,8 @@ impl NodeDriver for PipeApp {
                 body,
                 reply,
             } => {
+                let paced = tag.as_str() == tag::DATA;
+                let stream = to.clone();
                 let sent = send_app(
                     state,
                     ctx,
@@ -173,6 +281,10 @@ impl NodeDriver for PipeApp {
                     },
                 )
                 .await;
+                if paced && sent.is_ok() {
+                    self.flow
+                        .note_sent(stream.as_ref(), expected_receivers(state, stream.as_ref()));
+                }
                 let _ = reply.send(sent.map_err(|error| error.to_string()));
                 true
             }

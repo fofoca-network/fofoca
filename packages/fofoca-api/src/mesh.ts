@@ -112,6 +112,7 @@ export async function openMesh(open: Opener): Promise<Mesh> {
         bytes: frame.bytes,
         directed: frame.directed,
         eof: frame.eof,
+        seq: frame.seq,
         ...(text === undefined ? {} : { text }),
       })
     },

@@ -13,7 +13,9 @@
 //! reads. Tracing goes to stderr either way, so stdout *is* the chat.
 
 use anyhow::{Context as _, Result, bail};
-use fofoca_pipe::{Inbound, Opts, Request, data_body, data_tag, depart, join, json_sink, parse_to};
+use fofoca_pipe::{
+    Inbound, Opts, Request, StreamSeq, data_body, data_tag, depart, join, json_sink, parse_to,
+};
 use tokio::sync::oneshot;
 
 struct Args {
@@ -60,6 +62,7 @@ async fn main() -> Result<()> {
     let args = parse_args()?;
     let (sink, mut events) = json_sink();
     let mut session = join(&args.opts, sink).await?;
+    let mut seq = StreamSeq::default();
 
     // Stdin on its own thread: the pipe owns no stdio, and tokio's own stdin
     // wants the `io-std` feature this crate deliberately leaves off.
@@ -78,7 +81,7 @@ async fn main() -> Result<()> {
         tokio::select! {
             maybe = lines.recv() => {
                 let Some(line) = maybe else { break };
-                if !handle_line(&session, line.trim(), args.robot).await? {
+                if !handle_line(&session, &mut seq, line.trim(), args.robot).await? {
                     break;
                 }
             }
@@ -96,7 +99,12 @@ async fn main() -> Result<()> {
 }
 
 /// One line of input. `false` ends the chat.
-async fn handle_line(session: &fofoca_pipe::Session, line: &str, robot: bool) -> Result<bool> {
+async fn handle_line(
+    session: &fofoca_pipe::Session,
+    seq: &mut StreamSeq,
+    line: &str,
+    robot: bool,
+) -> Result<bool> {
     if line.is_empty() {
         return Ok(true);
     }
@@ -118,7 +126,7 @@ async fn handle_line(session: &fofoca_pipe::Session, line: &str, robot: bool) ->
         (None, line)
     };
     let to = parse_to(to)?;
-    let body = data_body(text.as_bytes())?;
+    let body = data_body(seq.next(&to), text.as_bytes())?;
     let sent = request(session, |reply| Request::Send {
         tag: data_tag(),
         to,

@@ -242,6 +242,7 @@ fn a_handle_serves_identity_state_and_roster() {
         directed: 0,
         eof: 0,
         len: 0,
+        seq: 0,
     };
     let mut buf = vec![0_u8; fofoca_max_chunk()];
     // SAFETY: live handle, buffer writable for the capacity passed, `out` writable.

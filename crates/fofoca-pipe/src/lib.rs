@@ -1,8 +1,8 @@
 //! The portable half of the byte-pipe embedding: the frame taxonomy, the engine
 //! driver that implements it, and the one setup ritual that stands it up.
 //!
-//! The frame taxonomy — `pipe_data` / `pipe_eof`, a base64 body, the
-//! [`AppClass`](fofoca::embed::AppClass) flags, the chunk budget — is this
+//! The frame taxonomy — `pipe_data` / `pipe_eof`, a `<seq>:<base64>` body,
+//! the [`AppClass`](fofoca::embed::AppClass) flags, the chunk budget — is this
 //! crate's own wire contract. Every peer on a pipe mesh must agree on it bit for
 //! bit, so treat a change here as a wire break.
 //!
@@ -20,13 +20,17 @@
 
 mod app;
 mod event;
+mod flow;
+mod reorder;
 mod session;
 mod wire;
 
 pub use app::{Inbound, PipeApp, Request};
 pub use event::{PipeEvent, json_sink};
+pub use flow::{ACK_EVERY, Flow, STALL_TIMEOUT, WINDOW};
+pub use reorder::{Delivered, GAP_TIMEOUT, Reorder, StreamSeq, Streams};
 pub use session::{Opts, Session, TransportFlags, depart, join, resolve_kind};
 pub use wire::{
-    DEPARTURE_GRACE, INBOUND_CAP, data_body, data_tag, decode_data, default_chunk, eof_body,
-    eof_tag, parse_to, tag,
+    DEPARTURE_GRACE, INBOUND_CAP, ack_body, ack_tag, data_body, data_tag, decode_ack, decode_data,
+    decode_eof, default_chunk, eof_body, eof_tag, parse_to, tag,
 };

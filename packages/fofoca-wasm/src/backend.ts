@@ -18,6 +18,7 @@ interface WireFrame {
   nick: string
   directed: boolean
   eof: boolean
+  seq: number
   bytes: number[]
 }
 
@@ -61,6 +62,7 @@ export function openWasm(module: FofocaWasmModule, optsJson: string): Opener {
           bytes: new Uint8Array(frame.bytes),
           directed: frame.directed,
           eof: frame.eof,
+          seq: frame.seq,
         })
       }
     }

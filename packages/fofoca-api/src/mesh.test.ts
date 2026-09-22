@@ -116,6 +116,7 @@ describe('messages', () => {
       bytes: new TextEncoder().encode('hello'),
       directed: false,
       eof: false,
+      seq: 4,
     })
 
     expect(await messages).toEqual([
@@ -125,6 +126,7 @@ describe('messages', () => {
         text: 'hello',
         directed: false,
         eof: false,
+        seq: 4,
       },
     ] satisfies Message[])
   })
@@ -132,7 +134,7 @@ describe('messages', () => {
   test('bytes that do not decode omit text rather than mangling it', async () => {
     const { mesh, sink } = await fake()
     const messages = drain(mesh.messages(), 1)
-    sink.frame({ from: 'ana', bytes: new Uint8Array([0xff, 0xfe]), directed: true, eof: false })
+    sink.frame({ from: 'ana', bytes: new Uint8Array([0xff, 0xfe]), directed: true, eof: false, seq: 0 })
 
     const [message] = await messages
     expect(message).not.toHaveProperty('text')

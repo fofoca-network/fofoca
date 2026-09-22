@@ -16,7 +16,7 @@ export interface MeshPeerHandle {
   send(to: string | undefined, bytes: Uint8Array): Promise<void>
   sendEof(to: string | undefined): Promise<void>
   /**
-   * The next inbound frame as JSON (`{nick, directed, eof, bytes: number[]}`),
+   * The next inbound frame as JSON (`{nick, directed, eof, seq, bytes: number[]}`),
    * or `undefined` once the mesh is gone. One in-flight call at a time is the
    * intended shape; a concurrent second call waits.
    */

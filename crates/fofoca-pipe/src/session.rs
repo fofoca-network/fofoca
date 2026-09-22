@@ -20,6 +20,7 @@ use serde::Deserialize;
 use tokio::sync::mpsc;
 
 use crate::app::{Inbound, PipeApp};
+use crate::flow::Flow;
 use crate::wire::{DEPARTURE_GRACE, INBOUND_CAP};
 
 /// How the caller selects a mesh — an id to join, a shared string to derive one
@@ -121,6 +122,9 @@ pub struct Session {
     /// Inbound `pipe_*` frames in arrival order, bounded at
     /// [`INBOUND_CAP`](crate::wire::INBOUND_CAP).
     pub inbound: mpsc::Receiver<Inbound>,
+    /// The send window. Call [`Flow::wait_for_window`] before each data
+    /// frame; the driver keeps it current.
+    pub flow: Arc<Flow>,
 }
 
 /// Resolve `opts`, stand the mesh up, and spawn the event loop.
@@ -207,14 +211,19 @@ pub async fn join(opts: &Opts, sink: Arc<dyn NodeSink>) -> Result<Session> {
     // process, unlike a CLI that owns its own: installing process-wide ctrl-c /
     // SIGTERM listeners would hijack the host's own handling. A foreign caller
     // traps signals itself and closes the handle.
+    let flow = Flow::new();
     let node = Node::spawn(
         config,
-        PipeApp::new(inbound_tx),
+        PipeApp::new(inbound_tx, Arc::clone(&flow)),
         /* push */ None,
         /* handle_signals */ false,
     );
 
-    Ok(Session { node, inbound })
+    Ok(Session {
+        node,
+        inbound,
+        flow,
+    })
 }
 
 impl Session {

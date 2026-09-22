@@ -26,6 +26,7 @@ interface FakeFrame {
   readonly nick: string
   readonly directed: boolean
   readonly eof: boolean
+  readonly seq: number
   readonly payload: Uint8Array
 }
 
@@ -106,6 +107,7 @@ function fakeLib(
               directed: next.directed,
               eof: next.eof,
               len: next.payload.byteLength,
+              seq: next.seq,
             }),
             0,
           )
@@ -176,7 +178,7 @@ describe('createEngine', () => {
 
   test('a received frame crosses with its payload transferred', () => {
     const payload = new TextEncoder().encode('hi')
-    const { lib } = fakeLib({ recv: [{ nick: 'bo', directed: true, eof: false, payload }] })
+    const { lib } = fakeLib({ recv: [{ nick: 'bo', directed: true, eof: false, seq: 7, payload }] })
     const { port, posted, transfers } = fakePort()
     const engine = createEngine(lib, port, () => 0)
     engine.handle(OPEN)
@@ -186,6 +188,7 @@ describe('createEngine', () => {
     expect(frame.from).toBe('bo')
     expect(frame.directed).toBe(true)
     expect(frame.eof).toBe(false)
+    expect(frame.seq).toBe(7)
     expect(Array.from(new Uint8Array(frame.bytes))).toEqual(Array.from(payload))
     expect(transfers[1]).toEqual([frame.bytes])
   })

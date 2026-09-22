@@ -20,6 +20,8 @@ export type {
 
 export { randomNick, randomTopic } from './random.ts'
 export { MeshOverflowError } from './fanout.ts'
+export type { Delivered } from './reorder.ts'
+export { GAP_TIMEOUT_MS, REORDER_CAP, Reorder, Streams } from './reorder.ts'
 
 // The seam. A consumer never needs these; a third backend would.
 export type {

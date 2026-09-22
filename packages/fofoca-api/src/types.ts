@@ -96,8 +96,9 @@ export interface Peer {
  * One inbound frame.
  *
  * A frame, not a message: `send` splits a body larger than `MAX_CHUNK` and the
- * receiver sees one of these per chunk, with nothing to rejoin them by. A
- * consumer that needs whole messages frames them itself.
+ * receiver sees one of these per chunk. Gossip keeps no order, so frames of
+ * one stream can arrive shuffled; `seq` is what puts them back (`Streams`
+ * does that). A consumer that needs whole messages frames them itself.
  */
 export interface Message {
   from: string
@@ -106,8 +107,10 @@ export interface Message {
   text?: string
   /** True when the frame was addressed to us alone. */
   directed: boolean
-  /** An end-of-stream marker. `bytes` is empty. */
+  /** An end-of-stream marker. `bytes` is empty; `seq` is the stream's frame count. */
   eof: boolean
+  /** Position in its (`from`, `directed`) stream, counted from 0. */
+  seq: number
 }
 
 export type MeshEvent =

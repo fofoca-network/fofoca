@@ -7,10 +7,12 @@
  *   int directed;
  *   int eof;
  *   size_t len;
+ *   uint64_t seq;
  * } fofoca_frame;
  * ```
  *
- * 80 bytes, alignment 8, no padding: `len` lands at offset 72, already aligned.
+ * 88 bytes, alignment 8, no padding: `len` lands at offset 72, already
+ * aligned, and `seq` follows at 80.
  *
  * Neither `bun:ffi` nor Deno's FFI decodes C structs at all. koffi could, and
  * deliberately does not, so a change to the layout breaks in exactly one place
@@ -25,8 +27,9 @@ const NICK_CAP = 64
 const DIRECTED_OFFSET = 64
 const EOF_OFFSET = 68
 const LEN_OFFSET = 72
+const SEQ_OFFSET = 80
 
-export const FRAME_BYTES = 80
+export const FRAME_BYTES = 88
 
 /**
  * Computed rather than assumed, so a big-endian port fails a test instead of
@@ -41,6 +44,7 @@ export interface FrameMeta {
   readonly directed: boolean
   readonly eof: boolean
   readonly len: number
+  readonly seq: number
 }
 
 /**
@@ -68,6 +72,7 @@ export function decodeFrame(meta: Uint8Array): FrameMeta {
     directed: view.getInt32(DIRECTED_OFFSET, LITTLE_ENDIAN) !== 0,
     eof: view.getInt32(EOF_OFFSET, LITTLE_ENDIAN) !== 0,
     len: Number(view.getBigUint64(LEN_OFFSET, LITTLE_ENDIAN)),
+    seq: Number(view.getBigUint64(SEQ_OFFSET, LITTLE_ENDIAN)),
   }
 }
 
@@ -83,5 +88,6 @@ export function encodeFrame(meta: FrameMeta): Uint8Array {
   view.setInt32(DIRECTED_OFFSET, meta.directed ? 1 : 0, LITTLE_ENDIAN)
   view.setInt32(EOF_OFFSET, meta.eof ? 1 : 0, LITTLE_ENDIAN)
   view.setBigUint64(LEN_OFFSET, BigInt(meta.len), LITTLE_ENDIAN)
+  view.setBigUint64(SEQ_OFFSET, BigInt(meta.seq), LITTLE_ENDIAN)
   return bytes
 }

@@ -12,7 +12,7 @@
 use std::cell::RefCell;
 
 use fofoca::runtime::Node;
-use fofoca_pipe::{Inbound, Opts, PipeApp, Request, json_sink};
+use fofoca_pipe::{Flow, Inbound, Opts, PipeApp, Request, StreamSeq, json_sink};
 use tokio::sync::{Mutex, mpsc, oneshot};
 use wasm_bindgen::prelude::*;
 
@@ -28,6 +28,12 @@ pub struct MeshPeer {
     sender: mpsc::Sender<Request>,
     inbound: Mutex<mpsc::Receiver<Inbound>>,
     events: Mutex<mpsc::UnboundedReceiver<String>>,
+    /// Per-addressee stream counters. A `RefCell`, borrowed only between
+    /// awaits: the number is taken before a frame is sent, never held across
+    /// the send.
+    seq: RefCell<StreamSeq>,
+    /// The send window; see `fofoca_pipe::Flow`.
+    flow: std::sync::Arc<Flow>,
     id: String,
     nick: String,
     name: String,
@@ -57,6 +63,8 @@ impl MeshPeer {
             nick: node.nickname().to_string(),
             name: node.name().to_string(),
             chunk: fofoca_pipe::default_chunk(),
+            seq: RefCell::new(StreamSeq::default()),
+            flow: session.flow,
             sender: node.sender(),
             inbound: Mutex::new(session.inbound),
             events: Mutex::new(events),
@@ -90,7 +98,8 @@ impl MeshPeer {
     }
 
     /// Send `bytes` — broadcast with `to` absent, directed at that nickname
-    /// otherwise. Splits at the single-frame budget.
+    /// otherwise. Splits at the single-frame budget, each frame numbered in
+    /// its (self, `to`) stream.
     ///
     /// # Errors
     /// The event loop has stopped, the addressee is unknown, or the engine
@@ -98,26 +107,31 @@ impl MeshPeer {
     pub async fn send(&self, to: Option<String>, bytes: Vec<u8>) -> Result<(), JsValue> {
         let to = fofoca_pipe::parse_to(to.as_deref()).map_err(|error| to_js_error(&error))?;
         for slice in bytes.chunks(self.chunk) {
-            let body = fofoca_pipe::data_body(slice).map_err(|error| to_js_error(&error))?;
+            self.flow.wait_for_window(&to).await;
+            let seq = self.seq.borrow_mut().next(&to);
+            let body = fofoca_pipe::data_body(seq, slice).map_err(|error| to_js_error(&error))?;
             self.request_send(fofoca_pipe::data_tag(), to.clone(), body)
                 .await?;
         }
         Ok(())
     }
 
-    /// Send the end-of-stream marker.
+    /// Send the end-of-stream marker, carrying the stream's frame count.
     ///
     /// # Errors
     /// As for [`MeshPeer::send`].
     #[wasm_bindgen(js_name = sendEof)]
     pub async fn send_eof(&self, to: Option<String>) -> Result<(), JsValue> {
         let to = fofoca_pipe::parse_to(to.as_deref()).map_err(|error| to_js_error(&error))?;
-        let body = fofoca_pipe::eof_body().map_err(|error| to_js_error(&error))?;
+        let count = self.seq.borrow().count(&to);
+        let body = fofoca_pipe::eof_body(count).map_err(|error| to_js_error(&error))?;
         self.request_send(fofoca_pipe::eof_tag(), to, body).await
     }
 
     /// The next inbound frame, as JSON:
-    /// `{"nick","directed","eof","bytes":[…u8]}`. `null` once the mesh is
+    /// `{"nick","directed","eof","seq","bytes":[…u8]}` — `seq` is the frame's
+    /// position in its (author, directed) stream, or the stream's frame count
+    /// on an `eof`. Frames can arrive out of order. `null` once the mesh is
     /// gone and the queue is drained.
     #[wasm_bindgen(js_name = nextFrame)]
     pub async fn next_frame(&self) -> Option<String> {
@@ -240,6 +254,7 @@ fn frame_json(frame: &Inbound) -> String {
         "nick": frame.nick,
         "directed": frame.directed,
         "eof": frame.eof,
+        "seq": frame.seq,
         "bytes": frame.bytes,
     })
     .to_string()

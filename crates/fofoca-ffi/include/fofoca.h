@@ -72,6 +72,8 @@ typedef struct {
   int directed;   /* 1 = addressed to us specifically, 0 = broadcast */
   int eof;        /* 1 = an end-of-stream marker; `len` is then 0 */
   size_t len;
+  uint64_t seq;   /* position in its (author, directed) stream — frames can
+                     arrive out of order; the stream's frame count on eof */
 } fofoca_frame;
 
 /* Create or join a mesh. NULL on failure. */
