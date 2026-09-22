@@ -12,11 +12,9 @@ export interface WireOpts {
   readonly topic: string | null
   readonly nick: string | null
   readonly name: string | null
-  readonly isPublic: boolean
-  readonly mdns: boolean
-  readonly dht: boolean
-  readonly relayLookup: boolean
-  readonly relayTransport: boolean
+  /** The three comma lists the C struct takes; `null` for an empty list. */
+  readonly lookup: string | null
+  readonly transport: string | null
   readonly relayUrls: string | null
   readonly disableIp: boolean
   readonly disableWebrtc: boolean

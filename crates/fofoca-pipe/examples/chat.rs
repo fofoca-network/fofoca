@@ -4,6 +4,7 @@
 //! ```text
 //! cargo run -p fofoca-pipe --example chat -- --topic room
 //! cargo run -p fofoca-pipe --example chat -- --topic room --nick ana --relay-url http://127.0.0.1:3340/
+//! cargo run -p fofoca-pipe --example chat -- --topic room --transport p2p,relay
 //! ```
 //!
 //! Type to broadcast; `/msg <nick> <text>` sends directed; `/peers` prints
@@ -31,15 +32,19 @@ fn parse_args() -> Result<Args> {
             "--topic" => opts.topic = Some(value("--topic")?),
             "--mesh" => opts.mesh = Some(value("--mesh")?),
             "--nick" => opts.nick = Some(value("--nick")?),
-            // `--relay-url`, not `--relay`: the bare name reads as the boolean
-            // lookup switch, which is the confusion `relay_lookup` was named
-            // apart to end. Spelled as the bun-ffi client spells it.
+            // `--relay-url`, not `--relay`: which relay, nothing about its
+            // role. Spelled as the bun-ffi client spells it.
             "--relay-url" => opts.relay_urls.push(value("--relay-url")?),
-            "--relay-transport" => opts.relay_transport = true,
+            "--transport" => {
+                opts.transport = value("--transport")?
+                    .split(',')
+                    .map(|name| name.parse().map_err(|error| anyhow::anyhow!("{error}")))
+                    .collect::<Result<_>>()?;
+            }
             "--robot" => robot = true,
             other => bail!(
                 "unknown argument {other}\nusage: chat --topic <t> | --mesh <id> \
-                 [--nick <n>] [--relay-url <url>]... [--relay-transport] [--robot]"
+                 [--nick <n>] [--relay-url <url>]... [--transport p2p,relay] [--robot]"
             ),
         }
     }

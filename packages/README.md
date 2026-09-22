@@ -30,21 +30,24 @@ for await (const message of mesh.messages()) {
 **`join({ topic })` is always public.** A topic mesh is reached over mDNS, the
 mainline DHT and the relay ladder, and that is not a default you can change.
 The engine mixes the lookup set into the mesh id, so two peers reaching the
-same string over different discovery legs derive two different meshes and
-never meet. `JoinOpts` therefore carries almost no discovery flags — the two
-it does carry, `relayUrls` and `relayTransport`, are exactly the two that are
-mixed into the id, and every member must pass the same values.
+same string over different lookups derive two different meshes and never
+meet. `JoinOpts` therefore carries no `lookup` — the two choices it does
+carry, `transport` and `relayUrls`, are exactly the two that are mixed into
+the id, and every member must pass the same values.
 
-**`create({})` is machine-local.** Naming no discovery option is not "the
-default set" — it resolves to a loopback mesh nothing off this machine can
-reach. That is what makes the offline two-peer test possible, and it is
-surprising everywhere else. Pass `public: true`, or name the legs you want.
+**`create({})` is machine-local.** Naming no lookup is not "the default set"
+— it resolves to a loopback mesh nothing off this machine can reach. That is
+what makes the offline two-peer test possible, and it is surprising
+everywhere else. Name the lookups you want: `lookup: ['mdns', 'dht',
+'relay']` is the all-on set a topic uses.
 
-**The relay carries no data unless you say so.** `relayLookup` (and `public`) use
-the relay as a *lookup*: a meeting point where peers find each other. Payload
-then goes peer to peer, and a pair that cannot open a direct path stays
-unlinked for data. `relayTransport: true` lets payload fall back to the relay.
-It is part of the mesh id, so joiners inherit whatever the creator chose.
+**The relay carries no data unless you say so.** Three lists name three
+concepts. `lookup: ['relay']` uses the relay as a *lookup*: a meeting point
+where peers find each other. Payload then goes peer to peer, and a pair that
+cannot open a direct path stays unlinked for data. `transport: ['p2p',
+'relay']` lets payload fall back to the relay; it is part of the mesh id, so
+joiners inherit whatever the creator chose. `relayUrls` says *which* relay
+and nothing about its role.
 
 ## The harness page
 
@@ -53,7 +56,7 @@ It is part of the mesh id, so joiners inherit whatever the creator chose.
 (`bun run harness -- 3000`), and open
 
 ```
-http://127.0.0.1:3000/?topic=room&relayTransport=0&log=fofoca=info
+http://127.0.0.1:3000/?topic=room&transport=p2p&log=fofoca=info
 ```
 
 The page joins the mesh the query names and mirrors the roster, every frame,

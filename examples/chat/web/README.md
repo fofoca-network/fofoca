@@ -29,10 +29,10 @@ Query parameters, the browser half of the flags the terminal client takes:
 | `?id=<base58>` | or join a mesh by id |
 | `?nick=<name>` | the nickname to request; the engine may assign another |
 | `?relay=<url>` | a custom relay ladder, repeatable. Part of the derived id, so every member must pass the same list |
-| `?relayTransport=1` | let payload fall back to the relay. Part of the id too |
+| `?transport=p2p,relay` | let payload fall back to the relay. Part of the id too |
 | `?log=<level>` | engine tracing level, `warn` by default |
 
-The relay stays a lookup unless `relayTransport` says otherwise: a tab has no
-UDP socket, so payload waits for a WebRTC session rather than riding the relay.
+The relay stays a lookup unless `transport` names it: a tab has no UDP
+socket, so payload waits for a WebRTC session rather than riding the relay.
 
 `cargo task e2e --suite chat` drives this page against the terminal client.

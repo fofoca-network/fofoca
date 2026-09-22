@@ -7,11 +7,8 @@ const BASE: WireOpts = {
   topic: null,
   nick: null,
   name: null,
-  isPublic: false,
-  mdns: false,
-  dht: false,
-  relayLookup: false,
-  relayTransport: false,
+  lookup: null,
+  transport: null,
   relayUrls: null,
   disableIp: false,
   disableWebrtc: false,
@@ -35,15 +32,15 @@ describe('encodeOpts', () => {
   // is the layout assert on `FofocaOpts` in crates/fofoca-ffi/src/ffi.rs; a
   // linked C consumer keeps passing the old struct when it moves, so both
   // sides must be edited together.
-  test('the struct is the 80 bytes the C header lays out', () => {
-    expect(OPTS_BYTES).toBe(80)
+  test('the struct is the 72 bytes the C header lays out', () => {
+    expect(OPTS_BYTES).toBe(72)
   })
 
-  test('null selectors encode as NULL pointers', () => {
+  test('null selectors and empty lists encode as NULL pointers', () => {
     const { struct } = encodeOpts(BASE, fakePointers().pointerOf)
     expect(struct.byteLength).toBe(OPTS_BYTES)
     const view = new DataView(struct.buffer)
-    for (const offset of [0, 8, 16, 24]) {
+    for (const offset of [0, 8, 16, 24, 32, 40, 48]) {
       expect(view.getBigUint64(offset, true)).toBe(0n)
     }
   })
@@ -66,35 +63,30 @@ describe('encodeOpts', () => {
     expect(Array.from(topic ?? [])).toEqual([...new TextEncoder().encode('tea-time'), 0])
   })
 
-  test('flags and max_peers', () => {
+  test('path switches and max_peers', () => {
     const { struct } = encodeOpts(
-      { ...BASE, isPublic: true, dht: true, disableWebrtc: true, maxPeers: 12 },
+      { ...BASE, disableWebrtc: true, maxPeers: 12 },
       fakePointers().pointerOf,
     )
     const view = new DataView(struct.buffer)
-    expect(view.getInt32(32, true)).toBe(1) // is_public
-    expect(view.getInt32(36, true)).toBe(0) // mdns
-    expect(view.getInt32(40, true)).toBe(1) // dht
-    expect(view.getInt32(44, true)).toBe(0) // relay_lookup
-    expect(view.getInt32(48, true)).toBe(0) // relay_transport
-    expect(view.getBigUint64(56, true)).toBe(0n) // relay_urls
-    expect(view.getInt32(64, true)).toBe(0) // disable_ip
-    expect(view.getInt32(68, true)).toBe(1) // disable_webrtc
-    expect(view.getBigUint64(72, true)).toBe(12n)
+    expect(view.getInt32(56, true)).toBe(0) // disable_ip
+    expect(view.getInt32(60, true)).toBe(1) // disable_webrtc
+    expect(view.getBigUint64(64, true)).toBe(12n)
   })
 
-  test('relay transport and a custom ladder', () => {
+  test('the three lists land at their offsets as comma strings', () => {
     const pointers = fakePointers()
     const { struct, keepAlive } = encodeOpts(
-      { ...BASE, relayLookup: true, relayTransport: true, relayUrls: 'http://a/,http://b/' },
+      { ...BASE, lookup: 'mdns,relay', transport: 'p2p,relay', relayUrls: 'http://a/,http://b/' },
       pointers.pointerOf,
     )
     const view = new DataView(struct.buffer)
-    expect(view.getInt32(44, true)).toBe(1) // relay_lookup
-    expect(view.getInt32(48, true)).toBe(1) // relay_transport
-    expect(view.getBigUint64(56, true)).toBe(0x1000n) // relay_urls
-    expect(keepAlive.length).toBe(1)
-    expect(Array.from(pointers.buffers[0] ?? [])).toEqual([
+    expect(view.getBigUint64(32, true)).toBe(0x1000n) // lookup
+    expect(view.getBigUint64(40, true)).toBe(0x1100n) // transport
+    expect(view.getBigUint64(48, true)).toBe(0x1200n) // relay_urls
+    expect(keepAlive.length).toBe(3)
+    expect(Array.from(pointers.buffers[0] ?? [])).toEqual([...new TextEncoder().encode('mdns,relay'), 0])
+    expect(Array.from(pointers.buffers[2] ?? [])).toEqual([
       ...new TextEncoder().encode('http://a/,http://b/'),
       0,
     ])
