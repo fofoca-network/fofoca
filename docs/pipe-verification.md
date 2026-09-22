@@ -200,13 +200,17 @@ stall a stream. Same transfer after: 1.2 s, lossless. Tests: five in
 `crates/fofoca-pipe/src/flow.rs`; the pipe e2e payload is now twice the
 window.
 
-**F7 — a tab's throughput degrades with sustained transfers.** Open. On one
-mesh, 1 MB browser→browser measured 848 KB/s, then 163 KB/s on the third
-run of the session; reloading both tabs restored 866 KB/s on the same mesh
-with the same peers. So the loss is per-session state in the tab (the peer
-connection or the wasm peer), not the mesh. A 5 MB transfer left the
-sessions detaching (`peer connection Failed after grace`, `silent
-partition`). Worth a look before anyone streams continuously.
+**F7 — a tab's throughput degraded with sustained transfers. Fixed.** 1 MB
+browser→browser measured 848 KB/s, then 163 KB/s on the third run of a
+session, and a reload restored it. The cause was the page, not the
+transport: it appended a text node per chunk and read `scrollHeight` each
+time, so every chunk forced a layout of the whole view. Measured on a `<pre>`
+holding 4.2 M characters, 50 chunks cost **5,069 ms** that way against
+**106 ms** written as one batch, and that work runs on the same thread as
+the wasm engine. The page now writes once per animation frame and keeps at
+most `MAX_VIEW_CHARS` per view (`src/render.ts`), marking a trimmed view
+`data-truncated="true"`. Tests: 10 in `render.test.ts`; the benchmark above
+is the before/after.
 
 ## 3. Throughput
 
