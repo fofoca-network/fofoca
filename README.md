@@ -79,9 +79,7 @@ one. The other two meet it in a consumer.
 That is the whole reason the split exists. Cargo features cannot be selected
 per-consumer across a dependency edge, so a consumer that wants the wire
 vocabulary without the network stack needs a crate boundary, not a feature flag.
-[`docs/mesh-slimming.md`](docs/mesh-slimming.md) has the measurements and the
-p2panda-derived rules the split follows — the engine was 39.4 MiB of mallorca's
-40.7 MiB release binary before it.
+The engine was 39.4 MiB of mallorca's 40.7 MiB release binary before it.
 
 The crates are versioned in lockstep from `[workspace.package]`. They were carved
 out of one engine to control the dependency closure, not to be released on

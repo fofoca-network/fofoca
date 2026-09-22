@@ -67,8 +67,7 @@ blob = ["host"]
 # that only needs relay-reachable meshes can turn them off and drop
 # swarm-discovery/acto and n0-mainline/lru entirely. (`interprocess` still
 # builds unconditionally: IpcMessage is in the event loop signatures, so
-# gating it needs ipc.rs split by dependency first.) See
-# docs/mesh-slimming.md in the mallorca repo.
+# gating it needs ipc.rs split by dependency first.)
 default = ["host", "mdns", "dht"]
 # Both need real UDP sockets, so each implies `host`.
 mdns = ["host", "dep:iroh-mdns-address-lookup"]

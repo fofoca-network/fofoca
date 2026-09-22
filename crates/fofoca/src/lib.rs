@@ -38,7 +38,7 @@ pub(crate) mod lookup;
 // Extracted leaf crates. Each owns one dependency the engine would otherwise
 // carry unconditionally — automerge, tracing-subscriber — and each depends only
 // on `fofoca-protocol`/`-util`, never back on this crate. Aliased so
-// engine code keeps its `crate::doc::…` paths. See docs/mesh-slimming.md.
+// engine code keeps its `crate::doc::…` paths.
 pub(crate) use fofoca_doc as doc;
 pub(crate) use fofoca_logging as logging;
 

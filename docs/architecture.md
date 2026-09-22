@@ -117,7 +117,6 @@ The engine meets the WebRTC transport in a consumer, through injected transport 
 | `fofoca-iroh-webrtc-transport` | An iroh custom transport: QUIC datagrams over a WebRTC data channel. |
 | `fofoca-iroh-multihop-transport` | An iroh custom transport: source-routed relaying through peers. |
 
-The crate split follows the rules in `docs/mesh-slimming.md`.
 The measurement that drove the split was a consumer binary where the engine cost 39.4 MiB of 40.7 MiB.
 
 ### 3.1 The iroh quarantine
@@ -586,7 +585,6 @@ In this repository:
 - `README.md` — workspace overview, build and test commands.
 - `crates/fofoca/README.md` — the subsystem table, the seam traits, and the tracing-target rules.
 - `FORKED.md` — fork provenance and the pin contract.
-- `docs/mesh-slimming.md` — the crate-split rules and their cost measurements.
 - `crates/fofoca-iroh-webrtc-transport/examples/chat-webrtc/README.md` — the browser-to-terminal chat and its two-endpoint workaround.
 - Per-crate READMEs under `crates/*/README.md`.
 

@@ -11,7 +11,7 @@ publish = false
 # Forwarded from the engine so an embedder can drop the discovery legs it does
 # not use. `default` matches the engine's, so a plain build is unchanged; a
 # relay-only embedder builds with --no-default-features and sheds
-# swarm-discovery/acto and n0-mainline/lru. See docs/mesh-slimming.md.
+# swarm-discovery/acto and n0-mainline/lru.
 default = ["mdns", "dht"]
 mdns = ["fofoca/mdns"]
 dht = ["fofoca/dht"]

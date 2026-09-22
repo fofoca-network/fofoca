@@ -117,9 +117,9 @@ uuid = { version = "1", features = ["v4"] }
 iroh = { version = "=1.0.3", git = "https://github.com/fofoca-network/iroh", rev = "b7e07872a6d28a9b7971ecfaca8db69c4bddd2de", default-features = false, features = ["tls-ring", "unstable-custom-transports"] }
 # The dependency-light half of iroh: keys, endpoint addresses, relay URLs — no
 # QUIC, TLS or DNS. `fofoca-protocol` depends on this rather than `iroh` so the
-# wire vocabulary carries no network stack (docs/mesh-slimming.md). Same repo and
-# rev as `iroh` above, necessarily: the forked `iroh` uses its workspace-local
-# copy, and mixing that with the published one is the two-`iroh_base` failure.
+# wire vocabulary carries no network stack. Same repo and rev as `iroh` above,
+# necessarily: the forked `iroh` uses its workspace-local copy, and mixing
+# that with the published one is the two-`iroh_base` failure.
 # `relay` is a default `fofoca-protocol` adds back; the transports do not need it.
 iroh-base = { version = "=1.0.3", git = "https://github.com/fofoca-network/iroh", rev = "b7e07872a6d28a9b7971ecfaca8db69c4bddd2de", default-features = false, features = ["key"] }
 # Only `iroh-mainline-address-lookup` names it, and only under `dht`. Pinned to
