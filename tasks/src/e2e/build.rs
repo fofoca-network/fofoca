@@ -257,6 +257,17 @@ pub(crate) fn build_browser_peer() -> Result<PathBuf, String> {
 /// same stale-artifact reason [`build`] does.
 #[cfg(feature = "mesh")]
 pub(crate) fn build_example(package: &str, example: &str) -> Result<PathBuf, String> {
+    build_target(package, "--example", example)
+}
+
+/// A binary target, the same way.
+#[cfg(feature = "mesh")]
+pub(crate) fn build_binary(package: &str, bin: &str) -> Result<PathBuf, String> {
+    build_target(package, "--bin", bin)
+}
+
+#[cfg(feature = "mesh")]
+fn build_target(package: &str, kind: &str, name: &str) -> Result<PathBuf, String> {
     let built = Command::new("cargo")
         .current_dir(repo_root())
         .args([
@@ -264,8 +275,8 @@ pub(crate) fn build_example(package: &str, example: &str) -> Result<PathBuf, Str
             "--quiet",
             "-p",
             package,
-            "--example",
-            example,
+            kind,
+            name,
             "--message-format=json",
         ])
         .output()
@@ -282,7 +293,7 @@ pub(crate) fn build_example(package: &str, example: &str) -> Result<PathBuf, Str
         .next_back();
     artifact.filter(|path| path.is_file()).ok_or_else(|| {
         format!(
-            "could not build the {example} example:
+            "could not build {name} ({kind}):
 {}",
             String::from_utf8_lossy(&built.stderr).trim()
         )

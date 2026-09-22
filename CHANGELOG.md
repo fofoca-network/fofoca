@@ -32,6 +32,27 @@ published to a registry; pin it with
   (`pipe_send`, `pipe_send_eof`, `pipe_read`, `pipe_peers`, `pipe_status`,
   `pipe_state_get`, `pipe_state_merge`), with the same functions on
   `window.pipe` where there is no model context.
+- `cargo task e2e --suite pipe`: the binary against the page over a local
+  relay. A payload twice the send window lands byte-exact both ways, the tab
+  shows its own send, and the binary exits clean on EOF.
+- Flow control on the pipe: a receiver acks every 8 frames (`pipe_ack`) and
+  the sender waits while more than `WINDOW` (64) frames are unacknowledged by
+  any peer with a proven payload lane (`fofoca_pipe::Flow`, on
+  `Session::flow`). A receiver silent for `STALL_TIMEOUT` stops being waited
+  for. Without it a 1 MB stream overran every queue on the path: the gossip
+  subscription (`Lagged`), the pipe's inbound queue, the data channel's send
+  buffer. It arrived incomplete. Measured 1 MB browser to browser: 12 to 21 s
+  with losses before, 1.2 s (850 KB/s) lossless after.
+- `fofoca-pipe`, the binary (`crates/fofoca-pipe-cli`): stdin to a mesh, the
+  mesh to stdout. A bare run mints a public mesh and prints the id, and with
+  `--web-url` the page URL with the id in its fragment. It waits for a peer
+  the roster shows as `unicast` before it reads stdin, because a frame sent
+  earlier is lost.
+- `packages/fofoca-pipe-web`: the pipe's web app, a static build any host
+  serves. It shows streams in order and registers its runtime as WebMCP tools
+  (`pipe_send`, `pipe_send_eof`, `pipe_read`, `pipe_peers`, `pipe_status`,
+  `pipe_state_get`, `pipe_state_merge`), with the same functions on
+  `window.pipe` where there is no model context.
 - Flow control on the pipe: a receiver acks every 8 frames (`pipe_ack`) and
   the sender waits while more than `WINDOW` (64) frames are unacknowledged by
   any peer with a proven payload lane (`fofoca_pipe::Flow`, on
@@ -106,8 +127,30 @@ published to a registry; pin it with
   on both sides (`Reorder::expire`, `Streams::expire`; `GAP_TIMEOUT_MS` in
   `fofoca-api`).
 
+### Fixed
+
+- A node judged its own need for the `WebRTC` lane from its endpoint address,
+  which is empty in a browser whenever the relay link is down; empty read as
+  "has IP", so a tab that was the lower id skipped the lane for a native peer
+  and stayed relay-only. The pair decision and the rendezvous offer now use
+  the node's own transport set (`EventLoopState::local_ip_transport`).
+- A pipe receiver held a whole stream behind one missing frame until 256
+  later frames arrived. A hole older than `GAP_TIMEOUT` (3 s) is now skipped
+  on both sides (`Reorder::expire`, `Streams::expire`; `GAP_TIMEOUT_MS` in
+  `fofoca-api`).
+
 ### Changed
 
+- **Breaking (pipe wire):** a `pipe_data` body is now `<seq>:<base64>`, a
+  `pipe_eof` body carries the stream's frame count, and `pipe_ack` is a new
+  tag. Gossip keeps no order, so each frame names its position in its
+  (author, addressee) stream and receivers reorder (`fofoca_pipe::Streams`,
+  `Streams` in `fofoca-api`). A peer on the old wire drops the new frames as
+  undecodable, and vice versa. The frame budget shrank from 2112 to 2094
+  bytes to hold the prefix.
+- **Breaking (C ABI):** `fofoca_frame` gained `seq` and grew from 80 to 88
+  bytes. `fofoca_recv` writes it; a consumer compiled against the old header
+  hands over a buffer eight bytes too small.
 - **Breaking (pipe wire):** a `pipe_data` body is now `<seq>:<base64>`, a
   `pipe_eof` body carries the stream's frame count, and `pipe_ack` is a new
   tag. Gossip keeps no order, so each frame names its position in its

@@ -23,6 +23,8 @@ mod chat;
 mod loopback;
 #[cfg(feature = "mesh")]
 mod mesh;
+#[cfg(feature = "mesh")]
+mod pipe;
 mod server;
 mod webdriver;
 
@@ -120,6 +122,10 @@ enum Suite {
     /// The chat example end to end: the native terminal chat in robot mode
     /// against the browser chat page, over a local relay.
     Chat,
+    /// The pipe end to end: the `fofoca-pipe` CLI against the pipe web page,
+    /// over a local relay — a file in on one side, the same bytes out on
+    /// the other, and back.
+    Pipe,
 }
 
 /// Which wasm build a cell runs.
@@ -258,10 +264,10 @@ fn run_engine_suite(args: &Args) -> TaskOutcome {
     if !args.list {
         build::check_tooling()?;
     }
-    if args.suite == Suite::Mesh {
-        mesh::run(args)
-    } else {
-        chat::run(args)
+    match args.suite {
+        Suite::Mesh => mesh::run(args),
+        Suite::Pipe => pipe::run(args),
+        Suite::Chat | Suite::Matrix | Suite::Loopback => chat::run(args),
     }
 }
 
@@ -294,7 +300,7 @@ fn run_engine_suite(_: &Args) -> TaskOutcome {
 }
 
 pub(crate) fn run(args: &Args) -> TaskOutcome {
-    if matches!(args.suite, Suite::Mesh | Suite::Chat) {
+    if matches!(args.suite, Suite::Mesh | Suite::Chat | Suite::Pipe) {
         return run_engine_suite(args);
     }
 
