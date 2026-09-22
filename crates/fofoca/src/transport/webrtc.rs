@@ -594,12 +594,27 @@ pub(crate) fn needs_webrtc_lane(addr: &EndpointAddr) -> bool {
     !addr.is_empty() && addr.ip_addrs().next().is_none()
 }
 
-/// The local-node twin of [`needs_webrtc_lane`]: whether *this* node's
-/// rendezvous graft must wait for a data-channel session. A wasm node never
-/// has IP transports whatever the flags say; with the relay allowed as a
-/// transport nothing needs holding.
+/// The local-node twin of [`needs_webrtc_lane`]: does *this* node need the
+/// lane? Answered from the node's own transport set, never from its address
+/// snapshot — that snapshot is empty while the relay link is down, and empty
+/// reads as "unknown" for a remote but must not for ourselves. A wasm node
+/// never has IP transports whatever the flags say.
+pub(crate) fn local_needs_webrtc_lane(has_ip_transport: bool) -> bool {
+    cfg!(target_arch = "wasm32") || !has_ip_transport
+}
+
+/// Whether a pair needs the lane: **either** end lacking IP is enough. The
+/// remote is judged by its advertised address, this node by what it knows
+/// about itself.
+pub(crate) fn pair_needs_lane(remote: &EndpointAddr, local_has_ip_transport: bool) -> bool {
+    needs_webrtc_lane(remote) || local_needs_webrtc_lane(local_has_ip_transport)
+}
+
+/// Whether *this* node's rendezvous graft must wait for a data-channel
+/// session: a lane-needing node on a lookup-only mesh. With the relay allowed
+/// as a transport nothing needs holding.
 pub(crate) fn node_graft_needs_session(relay_transport: bool, has_ip_transport: bool) -> bool {
-    !relay_transport && (cfg!(target_arch = "wasm32") || !has_ip_transport)
+    !relay_transport && local_needs_webrtc_lane(has_ip_transport)
 }
 
 pub(crate) fn negotiate_session(
@@ -626,7 +641,7 @@ pub(crate) fn negotiate_session(
     // browser that evaluates this. It would see the native peer's IP, skip,
     // and the native — waiting to be dialled — would never offer. The pair
     // would silently never get a channel.
-    if !needs_webrtc_lane(&addr) && !needs_webrtc_lane(&ctx.endpoint.addr()) {
+    if !pair_needs_lane(&addr, state.local_ip_transport) {
         tracing::debug!(
             target: LOG_TARGET,
             %peer,
@@ -738,7 +753,7 @@ pub(crate) fn negotiate_rendezvous_session(
     let Some(handle) = state.webrtc.clone() else {
         return;
     };
-    if !needs_webrtc_lane(&ctx.endpoint.addr()) && !state.rendezvous_offer_fallback {
+    if !local_needs_webrtc_lane(state.local_ip_transport) && !state.rendezvous_offer_fallback {
         // An IP-capable peer normally reaches the rendezvous by punching
         // inside the bootstrap connection — the data channel would be a
         // worse path — so the punch gets the first heal tick. But IP
@@ -1038,6 +1053,11 @@ pub(crate) fn retry_sessions(
     // them. The cheap disqualifiers run before the clone — a peer whose
     // session is already attached (admission would refuse it with
     // `HaveSession` anyway) or a pure-IP pair costs a map walk, nothing more.
+    // Judged by the address snapshot on purpose, unlike `negotiate_session`:
+    // a browser's own address reads as "unknown" here, so its retry pass
+    // covers relay-only peers (other tabs) and leaves natives to dial it.
+    // Read through `local_needs_webrtc_lane` the pass re-offered to every
+    // native each tick, colliding with the native's own dial.
     let own_addr = ctx.endpoint.addr();
     let own_needs_lane = needs_webrtc_lane(&own_addr);
     let mut peers: Vec<EndpointAddr> = state
@@ -1171,6 +1191,28 @@ mod tests {
         assert!(
             !pair_needs_lane(&native, &native),
             "two native peers must stay on iroh's own transports"
+        );
+    }
+
+    /// **A node's own lane is a fact about the node, not about its address
+    /// snapshot.** A browser whose relay link just dropped has an empty
+    /// endpoint address for a moment; read through `needs_webrtc_lane` that
+    /// is "unknown", and a pair with a native peer was left on iroh's own
+    /// transports — which a browser does not have. Observed in Safari: every
+    /// probe timed out and the peer stayed relay-only for good.
+    #[test]
+    fn a_node_without_ip_needs_the_lane_even_while_its_own_address_is_empty() {
+        let native = native_shaped(SecretKey::from_bytes(&[7u8; 32]).public());
+        // The address is not consulted at all for the local end; a node
+        // without IP transports needs the lane, full stop.
+        assert!(
+            pair_needs_lane(&native, false),
+            "a node with no IP transport must offer whatever its address says"
+        );
+        assert!(local_needs_webrtc_lane(false));
+        assert!(
+            !pair_needs_lane(&native, true),
+            "two IP-capable peers stay on iroh's own transports"
         );
     }
 

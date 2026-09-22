@@ -23,6 +23,14 @@ published to a registry; pin it with
   `tasks`, and local-only for now.
 - `Session::request` on the pipe, and one config path for every topic.
 
+### Fixed
+
+- A node judged its own need for the `WebRTC` lane from its endpoint address,
+  which is empty in a browser whenever the relay link is down; empty read as
+  "has IP", so a tab that was the lower id skipped the lane for a native peer
+  and stayed relay-only. The pair decision and the rendezvous offer now use
+  the node's own transport set (`EventLoopState::local_ip_transport`).
+
 ### Changed
 
 - **Breaking (C ABI):** `fofoca_opts` gained `relay_transport`,
