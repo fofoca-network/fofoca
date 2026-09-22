@@ -200,7 +200,7 @@ describe('wire opts', () => {
   test('join requires exactly one selector', () => {
     expect(() => joinWire({})).toThrow('join needs a topic or an id')
     expect(() => joinWire({ topic: 't', id: 'm' })).toThrow('not both')
-    expect(joinWire({ topic: 't' })).toMatchObject({ topic: 't', mesh: null, isPublic: false })
+    expect(joinWire({ topic: 't' })).toMatchObject({ topic: 't', mesh: null, lookup: null })
     expect(joinWire({ id: 'm', nick: 'ana', maxPeers: 3 })).toMatchObject({
       mesh: 'm',
       nick: 'ana',
@@ -208,35 +208,33 @@ describe('wire opts', () => {
     })
   })
 
-  test('create maps the discovery flags and defaults', () => {
+  test('create maps the three lists and the defaults', () => {
     expect(createWire({})).toEqual({
       mesh: null,
       topic: null,
       nick: null,
       name: null,
-      isPublic: false,
-      mdns: false,
-      dht: false,
-      relayLookup: false,
-      relayTransport: false,
+      lookup: null,
+      transport: null,
       relayUrls: null,
       disableIp: false,
       disableWebrtc: false,
       maxPeers: 0,
     })
-    expect(createWire({ public: true, name: 'salon' })).toMatchObject({
-      isPublic: true,
+    expect(createWire({ lookup: ['mdns', 'dht', 'relay'], name: 'salon' })).toMatchObject({
+      lookup: 'mdns,dht,relay',
       name: 'salon',
     })
   })
 
-  test('relay ladder, relay transport and transport switches', () => {
-    expect(joinWire({ topic: 't', relayTransport: true, relayUrls: ['http://a/', 'http://b/'] })).toMatchObject({
-      relayTransport: true,
+  test('relay ladder, transport policy and path switches', () => {
+    expect(joinWire({ topic: 't', transport: ['p2p', 'relay'], relayUrls: ['http://a/', 'http://b/'] })).toMatchObject({
+      lookup: null,
+      transport: 'p2p,relay',
       relayUrls: 'http://a/,http://b/',
     })
-    expect(createWire({ relayUrls: [] })).toMatchObject({ relayUrls: null })
-    expect(createWire({ transports: { webrtc: false } })).toMatchObject({
+    expect(createWire({ relayUrls: [], transport: [] })).toMatchObject({ relayUrls: null, transport: null })
+    expect(createWire({ paths: { webrtc: false } })).toMatchObject({
       disableIp: false,
       disableWebrtc: true,
     })

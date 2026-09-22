@@ -37,11 +37,16 @@ typedef struct fofoca_pipe fofoca_pipe;
 /*
  * How to reach a mesh. Zero-initialize, then set at most one selector:
  *
- *   - `mesh`  — join this mesh id id.
+ *   - `mesh`  — join this mesh id.
  *   - `topic` — derive a public mesh from a shared string (all peers passing the
  *               same string land in the same mesh).
- *   - neither — create a fresh mesh; the discovery flags below say how far it
- *               reaches, and fofoca_id() returns the minted id.
+ *   - neither — create a fresh mesh; `lookup` says how far it reaches, and
+ *               fofoca_id() returns the minted id.
+ *
+ * Three comma-separated lists name the mesh-wide choices a create bakes into
+ * the id, one concept each: `lookup` is how members find each other,
+ * `transport` is what payload may ride, `relay_urls` is which relay. A joiner
+ * inherits all three from the id; a topic fixes `lookup` to all three lookups.
  *
  * String fields are NUL-terminated or NULL. `max_peers == 0` takes the engine's
  * default active-view cap.
@@ -49,15 +54,15 @@ typedef struct fofoca_pipe fofoca_pipe;
 typedef struct {
   const char *mesh;
   const char *topic;
-  const char *nick; /* NULL mints a random nickname */
-  const char *name; /* mesh name on create; NULL falls back to "fofoca" */
-  int is_public;    /* create a public mesh (the all-on discovery preset) */
-  int mdns;         /* discoverable over mDNS */
-  int dht;          /* discoverable over the mainline DHT */
-  int relay_lookup; /* relay as lookup: reachable via the default relay ladder */
-  int relay_transport; /* relay as transport: payload may fall back to it.
-                          0 keeps all data peer to peer; needs `relay_lookup` */
-  const char *relay_urls; /* comma-separated custom relay ladder; NULL = default */
+  const char *nick;       /* NULL mints a random nickname */
+  const char *name;       /* mesh name on create; NULL falls back to "fofoca" */
+  const char *lookup;     /* "mdns,dht,relay", any subset; NULL = none, a
+                             loopback mesh reachable from this machine only */
+  const char *transport;  /* "p2p" or "p2p,relay"; NULL = "p2p", so every byte
+                             of data goes peer to peer. "relay" needs "relay" in
+                             `lookup` */
+  const char *relay_urls; /* comma-separated custom relay ladder; NULL = the
+                             default. Needs "relay" in `lookup` */
   int disable_ip;         /* nonzero: no direct UDP / hole-punched paths */
   int disable_webrtc;     /* nonzero: no WebRTC lane */
   size_t max_peers;

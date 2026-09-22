@@ -25,14 +25,50 @@ use crate::base58check;
 mod id;
 mod lookup;
 mod name;
+mod transport;
 
 pub use id::{MeshId, MeshIdError};
 pub use lookup::{
-    AdvertiseRequiresReachable, DEFAULT_DIRECTORY, DirectorySelection, LookupOpts, MeshConfig,
-    RelayChoice, TransportPolicy, resolve_lookups, validate_advertise,
+    AdvertiseRequiresReachable, DEFAULT_DIRECTORY, DirectorySelection, Lookup, LookupOpts,
+    MeshConfig, RelayChoice, resolve_lookups, validate_advertise,
 };
 pub use lookup::{LookupSet, OptFlag, RelayLadder, RelayLadderError, RelaySelection};
 pub use name::{MeshName, NameError};
+pub use transport::{Transport, TransportPolicy};
+
+/// A name that is not one of a list's choices — a `lookup` or `transport`
+/// entry with a typo. Names the list and the choices, so the message stands
+/// on its own wherever it surfaces (a CLI, a JSON error, a C error slot).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChoiceError {
+    list: &'static str,
+    given: String,
+    choices: &'static [&'static str],
+}
+
+impl ChoiceError {
+    fn new(list: &'static str, given: &str, choices: &'static [&'static str]) -> Self {
+        Self {
+            list,
+            given: given.to_owned(),
+            choices,
+        }
+    }
+}
+
+impl fmt::Display for ChoiceError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "unknown {} `{}`: expected one of {}",
+            self.list,
+            self.given,
+            self.choices.join(", ")
+        )
+    }
+}
+
+impl std::error::Error for ChoiceError {}
 
 /// Id format version. A single byte reserved so the encoding can evolve;
 /// an unknown version is rejected.

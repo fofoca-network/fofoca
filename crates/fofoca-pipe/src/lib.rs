@@ -25,7 +25,10 @@ mod wire;
 
 pub use app::{Inbound, PipeApp, Request};
 pub use event::{PipeEvent, json_sink};
-pub use session::{Opts, Session, TransportFlags, depart, join, resolve_kind};
+/// The entries of [`Opts::lookup`] and [`Opts::transport`], so a consumer
+/// builds an `Opts` without naming the protocol crate.
+pub use fofoca::protocol::{Lookup, Transport};
+pub use session::{Opts, PathFlags, Session, depart, join, resolve_kind};
 pub use wire::{
     DEPARTURE_GRACE, INBOUND_CAP, data_body, data_tag, decode_data, default_chunk, eof_body,
     eof_tag, parse_to, tag,

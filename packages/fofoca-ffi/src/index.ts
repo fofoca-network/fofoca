@@ -188,12 +188,9 @@ export function joinWire(opts: JoinOpts): WireOpts {
     topic,
     nick: opts.nick ?? null,
     name: null,
-    isPublic: false,
-    mdns: false,
-    dht: false,
-    relayLookup: false,
-    relayTransport: opts.relayTransport ?? false,
-    relayUrls: relayUrlsWire(opts.relayUrls),
+    lookup: null,
+    transport: listWire(opts.transport),
+    relayUrls: listWire(opts.relayUrls),
     disableIp: false,
     disableWebrtc: false,
     maxPeers: opts.maxPeers ?? 0,
@@ -206,24 +203,21 @@ export function createWire(opts: CreateOpts): WireOpts {
     topic: null,
     nick: opts.nick ?? null,
     name: opts.name ?? null,
-    isPublic: opts.public ?? false,
-    mdns: opts.mdns ?? false,
-    dht: opts.dht ?? false,
-    relayLookup: opts.relayLookup ?? false,
-    relayTransport: opts.relayTransport ?? false,
-    relayUrls: relayUrlsWire(opts.relayUrls),
-    disableIp: opts.transports?.ip === false,
-    disableWebrtc: opts.transports?.webrtc === false,
+    lookup: listWire(opts.lookup),
+    transport: listWire(opts.transport),
+    relayUrls: listWire(opts.relayUrls),
+    disableIp: opts.paths?.ip === false,
+    disableWebrtc: opts.paths?.webrtc === false,
     maxPeers: opts.maxPeers ?? 0,
   }
 }
 
-/** The C ABI takes the ladder as one comma-separated string, NULL for the default. */
-function relayUrlsWire(urls: string[] | undefined): string | null {
-  if (urls === undefined || urls.length === 0) {
+/** The C ABI takes each list as one comma-separated string, NULL for empty. */
+function listWire(items: readonly string[] | undefined): string | null {
+  if (items === undefined || items.length === 0) {
     return null
   }
-  return urls.join(',')
+  return items.join(',')
 }
 
 export async function join(opts: JoinOpts = {}): Promise<Mesh> {
@@ -239,10 +233,12 @@ export type {
   CreateOpts,
   JoinOpts,
   Lane,
+  Lookup,
   Mesh,
   MeshEvent,
   Message,
   Peer,
   Reach,
   StateDoc,
+  Transport,
 } from 'fofoca-api'

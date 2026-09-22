@@ -483,17 +483,20 @@ fn native_opts(cell: &Cell, relay_url: &str, selector: NativeSelector<'_>) -> fo
     }
     opts.nick = Some("native".to_owned());
     opts.relay_urls = vec![relay_url.to_owned()];
-    opts.relay_transport = cell.policy == Policy::RelayTransport;
-    opts.transports = match cell.native {
-        NativeTransports::Default => fofoca_pipe::TransportFlags {
+    opts.transport = match cell.policy {
+        Policy::RelayTransport => vec![fofoca_pipe::Transport::P2p, fofoca_pipe::Transport::Relay],
+        Policy::LookupOnly => vec![fofoca_pipe::Transport::P2p],
+    };
+    opts.paths = match cell.native {
+        NativeTransports::Default => fofoca_pipe::PathFlags {
             ip: true,
             webrtc: true,
         },
-        NativeTransports::WebRtcOnly => fofoca_pipe::TransportFlags {
+        NativeTransports::WebRtcOnly => fofoca_pipe::PathFlags {
             ip: false,
             webrtc: true,
         },
-        NativeTransports::RelayOnly => fofoca_pipe::TransportFlags {
+        NativeTransports::RelayOnly => fofoca_pipe::PathFlags {
             ip: false,
             webrtc: false,
         },
@@ -509,9 +512,12 @@ enum NativeSelector<'a> {
 
 fn page_url(base: &str, cell: &Cell, relay_url: &str, selector: &str) -> String {
     format!(
-        "{base}/?{selector}&nick=browser&relay={}&relayTransport={}&log=fofoca=debug,iroh_gossip=debug",
+        "{base}/?{selector}&nick=browser&relay={}&transport={}&log=fofoca=debug,iroh_gossip=debug",
         urlencode(relay_url),
-        u8::from(cell.policy == Policy::RelayTransport),
+        match cell.policy {
+            Policy::RelayTransport => "p2p,relay",
+            Policy::LookupOnly => "p2p",
+        },
     )
 }
 

@@ -17,11 +17,12 @@ the other.
   `fofoca_close`.
 - Every entry point catches panics, so an engine panic returns an error
   code instead of unwinding across `extern "C"`.
-- `fofoca_opts` names the relay's two roles apart: `relay_lookup` finds peers
-  through it, `relay_transport` lets payload ride it. Leave
-  `relay_transport` at 0 and every byte of data goes peer to peer.
-  `relay_urls` swaps in a custom ladder (comma-separated, NULL for the
-  default), and `disable_ip` / `disable_webrtc` switch transports off.
+- `fofoca_opts` takes three comma-separated lists, one concept each:
+  `lookup` (`"mdns,dht,relay"`, any subset) is how members find each other,
+  `transport` (`"p2p"` or `"p2p,relay"`) is what payload may ride, and
+  `relay_urls` is which relay (NULL for the default ladder). Leave
+  `transport` NULL and every byte of data goes peer to peer.
+  `disable_ip` / `disable_webrtc` switch this node's own paths off.
 
 Test with `cargo test -p fofoca-ffi`. CI builds the staticlib and makes
 sure that every function in the header is exported.

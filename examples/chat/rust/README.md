@@ -13,7 +13,8 @@ cargo run -p fofoca-pipe --example chat -- --topic room --nick terminal
 ```
 
 Flags: `--topic <string>` or `--mesh <id>` selects the mesh; `--nick <name>`;
-`--relay-url <url>` (repeatable) swaps in a custom relay ladder; `--robot` turns
+`--relay-url <url>` (repeatable) swaps in a custom relay ladder;
+`--transport p2p,relay` lets payload fall back to the relay; `--robot` turns
 the terminal chat into the NDJSON automation contract the e2e suite drives.
 
 Commands once connected: type to broadcast, `/msg <nick> <text>`, `/peers`,
