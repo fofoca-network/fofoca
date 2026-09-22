@@ -107,7 +107,7 @@ export function pipeTools(runtime: PipeRuntime): ToolDescriptor[] {
     },
     {
       name: 'pipe_read',
-      description: `Read everything received since the last call, in stream order, and consume it. If nothing is waiting, wait up to waitMs (at most ${MAX_WAIT_MS}) for the first chunk, then return what arrived — possibly nothing. Call it in a loop to follow a stream; an item with eof=true closes that sender's stream.`,
+      description: `Read what has arrived, in stream order, and get back a cursor. Pass that cursor to the next call to continue where you stopped; omit it to read from the oldest entry still held. Reading takes nothing away, so another reader with its own cursor sees the same stream. If there is nothing to read, wait up to waitMs (at most ${MAX_WAIT_MS}) for the first entry, then return what arrived, possibly nothing. Call it in a loop to follow a stream; an item with eof=true closes that sender's stream. Ask for encoding "base64" to get bytes that are not text back exactly.`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -115,14 +115,32 @@ export function pipeTools(runtime: PipeRuntime): ToolDescriptor[] {
             type: 'integer',
             minimum: 0,
             maximum: MAX_WAIT_MS,
-            description: 'How long to wait for the first chunk when the buffer is empty.',
+            description: 'How long to wait for the first entry when there is nothing to read.',
+          },
+          cursor: {
+            type: 'integer',
+            minimum: 0,
+            description: 'Where to read from, as returned by a previous call.',
+          },
+          encoding: {
+            type: 'string',
+            enum: ['text', 'base64'],
+            description: 'How to render the bytes. Default text.',
           },
         },
       },
       execute: async (input, options) => {
-        const { waitMs } = fields(input)
-        const wait = waitMs === undefined ? undefined : requireInteger(waitMs, 'waitMs')
-        return ok(await runtime.read(wait, options?.signal))
+        const { waitMs, cursor, encoding } = fields(input)
+        return ok(
+          await runtime.read(
+            {
+              ...(waitMs === undefined ? {} : { waitMs: requireInteger(waitMs, 'waitMs') }),
+              ...(cursor === undefined ? {} : { cursor: requireInteger(cursor, 'cursor') }),
+              ...(encoding === undefined ? {} : { encoding: requireEncoding(encoding) }),
+            },
+            options?.signal,
+          ),
+        )
       },
     },
     {
@@ -134,7 +152,7 @@ export function pipeTools(runtime: PipeRuntime): ToolDescriptor[] {
     {
       name: 'pipe_status',
       description:
-        'This tab on the mesh: its id, name and nickname, the peer count, how many chunks await pipe_read, and every stream seen so far.',
+        'This tab on the mesh: its id, name and nickname, the peer count, how much the read log holds, the cursor a reader wanting only new data starts from, the oldest cursor still readable, and every stream seen so far.',
       inputSchema: { type: 'object', properties: {} },
       execute: async () => ok(runtime.status()),
     },
@@ -192,6 +210,13 @@ function optionalString(value: unknown, name: string): string | undefined {
 function requireInteger(value: unknown, name: string): number {
   if (typeof value !== 'number' || !Number.isInteger(value)) {
     throw new TypeError(`${name} must be an integer`)
+  }
+  return value
+}
+
+function requireEncoding(value: unknown): 'text' | 'base64' {
+  if (value !== 'text' && value !== 'base64') {
+    throw new TypeError('encoding must be "text" or "base64"')
   }
   return value
 }

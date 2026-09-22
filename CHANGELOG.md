@@ -85,6 +85,15 @@ published to a registry; pin it with
 
 ### Fixed
 
+- `pipe_read` consumed what it returned, so two readers on one tab split the
+  stream between them, and a binary payload reached every reader as U+FFFD
+  because the runtime kept only decoded text. The runtime now keeps a
+  bounded log of entries with sequence numbers and their bytes. `pipe_read`
+  takes a `cursor` and returns the next one, so a read takes nothing away
+  and each reader follows the stream from its own position, and
+  `encoding: "base64"` returns bytes that are not text, exactly. The log is
+  bounded by bytes held (4 MB), not by what anyone has read; `pipe_status`
+  reports `buffered`, `cursor` and `oldestCursor` in place of `unread`.
 - A beacon holder sheds its rendezvous periodically to re-arbitrate with a
   possible same-id co-host. It now waits, up to three rounds, while a
   data-channel peer depends on that beacon: a browser reaches the mesh
@@ -104,52 +113,15 @@ published to a registry; pin it with
 
 ### Fixed
 
-- A beacon holder sheds its rendezvous periodically to re-arbitrate with a
-  possible same-id co-host. It now waits, up to three rounds, while a
-  data-channel peer depends on that beacon: a browser reaches the mesh
-  through the rendezvous and has no second path, so the shed emptied its
-  roster mid-transfer.
-- The pipe page wrote a chunk at a time and read `scrollHeight` for each,
-  so every chunk forced a layout of the whole view, on the same thread the
-  wasm engine runs on. Throughput fell about 5x over a session and came back
-  on reload. Measured on a view holding 4.2 M characters, 50 chunks cost
-  5069 ms that way against 106 ms as one batch. The page now writes once per
-  animation frame and bounds each view.
-- A node judged its own need for the `WebRTC` lane from its endpoint address,
-  which is empty in a browser whenever the relay link is down; empty read as
-  "has IP", so a tab that was the lower id skipped the lane for a native peer
-  and stayed relay-only. The pair decision and the rendezvous offer now use
-  the node's own transport set (`EventLoopState::local_ip_transport`).
-- A pipe receiver held a whole stream behind one missing frame until 256
-  later frames arrived. A hole older than `GAP_TIMEOUT` (3 s) is now skipped
-  on both sides (`Reorder::expire`, `Streams::expire`; `GAP_TIMEOUT_MS` in
-  `fofoca-api`).
-
-### Fixed
-
-- A beacon holder sheds its rendezvous periodically to re-arbitrate with a
-  possible same-id co-host. It now waits, up to three rounds, while a
-  data-channel peer depends on that beacon: a browser reaches the mesh
-  through the rendezvous and has no second path, so the shed emptied its
-  roster mid-transfer.
-- The pipe page wrote a chunk at a time and read `scrollHeight` for each,
-  so every chunk forced a layout of the whole view, on the same thread the
-  wasm engine runs on. Throughput fell about 5x over a session and came back
-  on reload. Measured on a view holding 4.2 M characters, 50 chunks cost
-  5069 ms that way against 106 ms as one batch. The page now writes once per
-  animation frame and bounds each view.
-- A node judged its own need for the `WebRTC` lane from its endpoint address,
-  which is empty in a browser whenever the relay link is down; empty read as
-  "has IP", so a tab that was the lower id skipped the lane for a native peer
-  and stayed relay-only. The pair decision and the rendezvous offer now use
-  the node's own transport set (`EventLoopState::local_ip_transport`).
-- A pipe receiver held a whole stream behind one missing frame until 256
-  later frames arrived. A hole older than `GAP_TIMEOUT` (3 s) is now skipped
-  on both sides (`Reorder::expire`, `Streams::expire`; `GAP_TIMEOUT_MS` in
-  `fofoca-api`).
-
-### Fixed
-
+- `pipe_read` consumed what it returned, so two readers on one tab split the
+  stream between them, and a binary payload reached every reader as U+FFFD
+  because the runtime kept only decoded text. The runtime now keeps a
+  bounded log of entries with sequence numbers and their bytes. `pipe_read`
+  takes a `cursor` and returns the next one, so a read takes nothing away
+  and each reader follows the stream from its own position, and
+  `encoding: "base64"` returns bytes that are not text, exactly. The log is
+  bounded by bytes held (4 MB), not by what anyone has read; `pipe_status`
+  reports `buffered`, `cursor` and `oldestCursor` in place of `unread`.
 - A beacon holder sheds its rendezvous periodically to re-arbitrate with a
   possible same-id co-host. It now waits, up to three rounds, while a
   data-channel peer depends on that beacon: a browser reaches the mesh
@@ -173,6 +145,79 @@ published to a registry; pin it with
 
 ### Fixed
 
+- `pipe_read` consumed what it returned, so two readers on one tab split the
+  stream between them, and a binary payload reached every reader as U+FFFD
+  because the runtime kept only decoded text. The runtime now keeps a
+  bounded log of entries with sequence numbers and their bytes. `pipe_read`
+  takes a `cursor` and returns the next one, so a read takes nothing away
+  and each reader follows the stream from its own position, and
+  `encoding: "base64"` returns bytes that are not text, exactly. The log is
+  bounded by bytes held (4 MB), not by what anyone has read; `pipe_status`
+  reports `buffered`, `cursor` and `oldestCursor` in place of `unread`.
+- A beacon holder sheds its rendezvous periodically to re-arbitrate with a
+  possible same-id co-host. It now waits, up to three rounds, while a
+  data-channel peer depends on that beacon: a browser reaches the mesh
+  through the rendezvous and has no second path, so the shed emptied its
+  roster mid-transfer.
+- The pipe page wrote a chunk at a time and read `scrollHeight` for each,
+  so every chunk forced a layout of the whole view, on the same thread the
+  wasm engine runs on. Throughput fell about 5x over a session and came back
+  on reload. Measured on a view holding 4.2 M characters, 50 chunks cost
+  5069 ms that way against 106 ms as one batch. The page now writes once per
+  animation frame and bounds each view.
+- A node judged its own need for the `WebRTC` lane from its endpoint address,
+  which is empty in a browser whenever the relay link is down; empty read as
+  "has IP", so a tab that was the lower id skipped the lane for a native peer
+  and stayed relay-only. The pair decision and the rendezvous offer now use
+  the node's own transport set (`EventLoopState::local_ip_transport`).
+- A pipe receiver held a whole stream behind one missing frame until 256
+  later frames arrived. A hole older than `GAP_TIMEOUT` (3 s) is now skipped
+  on both sides (`Reorder::expire`, `Streams::expire`; `GAP_TIMEOUT_MS` in
+  `fofoca-api`).
+
+### Fixed
+
+- `pipe_read` consumed what it returned, so two readers on one tab split the
+  stream between them, and a binary payload reached every reader as U+FFFD
+  because the runtime kept only decoded text. The runtime now keeps a
+  bounded log of entries with sequence numbers and their bytes. `pipe_read`
+  takes a `cursor` and returns the next one, so a read takes nothing away
+  and each reader follows the stream from its own position, and
+  `encoding: "base64"` returns bytes that are not text, exactly. The log is
+  bounded by bytes held (4 MB), not by what anyone has read; `pipe_status`
+  reports `buffered`, `cursor` and `oldestCursor` in place of `unread`.
+- A beacon holder sheds its rendezvous periodically to re-arbitrate with a
+  possible same-id co-host. It now waits, up to three rounds, while a
+  data-channel peer depends on that beacon: a browser reaches the mesh
+  through the rendezvous and has no second path, so the shed emptied its
+  roster mid-transfer.
+- The pipe page wrote a chunk at a time and read `scrollHeight` for each,
+  so every chunk forced a layout of the whole view, on the same thread the
+  wasm engine runs on. Throughput fell about 5x over a session and came back
+  on reload. Measured on a view holding 4.2 M characters, 50 chunks cost
+  5069 ms that way against 106 ms as one batch. The page now writes once per
+  animation frame and bounds each view.
+- A node judged its own need for the `WebRTC` lane from its endpoint address,
+  which is empty in a browser whenever the relay link is down; empty read as
+  "has IP", so a tab that was the lower id skipped the lane for a native peer
+  and stayed relay-only. The pair decision and the rendezvous offer now use
+  the node's own transport set (`EventLoopState::local_ip_transport`).
+- A pipe receiver held a whole stream behind one missing frame until 256
+  later frames arrived. A hole older than `GAP_TIMEOUT` (3 s) is now skipped
+  on both sides (`Reorder::expire`, `Streams::expire`; `GAP_TIMEOUT_MS` in
+  `fofoca-api`).
+
+### Fixed
+
+- `pipe_read` consumed what it returned, so two readers on one tab split the
+  stream between them, and a binary payload reached every reader as U+FFFD
+  because the runtime kept only decoded text. The runtime now keeps a
+  bounded log of entries with sequence numbers and their bytes. `pipe_read`
+  takes a `cursor` and returns the next one, so a read takes nothing away
+  and each reader follows the stream from its own position, and
+  `encoding: "base64"` returns bytes that are not text, exactly. The log is
+  bounded by bytes held (4 MB), not by what anyone has read; `pipe_status`
+  reports `buffered`, `cursor` and `oldestCursor` in place of `unread`.
 - A beacon holder sheds its rendezvous periodically to re-arbitrate with a
   possible same-id co-host. It now waits, up to three rounds, while a
   data-channel peer depends on that beacon: a browser reaches the mesh

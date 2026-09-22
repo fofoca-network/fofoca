@@ -63,34 +63,58 @@ describe('pipeTools', () => {
     expect(fake.eofs).toEqual([{}, { to: 'bo' }])
   })
 
-  test('pipe_read returns what arrived, in order, and consumes it', async () => {
+  test('pipe_read returns what arrived, in order, with a cursor to continue', async () => {
     const fake = fakeMesh()
     const tools = pipeTools(new PipeRuntime(fake.mesh))
     fake.push(frame('ana', 1, 'b'))
     fake.push(frame('ana', 0, 'a'))
     await settle()
 
-    expect(await call(tools, 'pipe_read', { waitMs: 0 })).toEqual({
-      items: [{ from: 'ana', directed: false, text: 'ab', eof: false }],
+    const first = (await call(tools, 'pipe_read', { waitMs: 0 })) as {
+      items: unknown[]
+      cursor: number
+    }
+    expect(first.items).toEqual([{ from: 'ana', directed: false, eof: false, text: 'ab' }])
+    // Reading again from that cursor yields nothing new, and the same call
+    // without a cursor still sees the stream: a read consumes nothing.
+    expect(await call(tools, 'pipe_read', { waitMs: 0, cursor: first.cursor })).toEqual({
+      items: [],
+      cursor: first.cursor,
     })
-    expect(await call(tools, 'pipe_read', { waitMs: 0 })).toEqual({ items: [] })
+    expect(((await call(tools, 'pipe_read', { waitMs: 0 })) as { items: unknown[] }).items).toEqual(
+      first.items,
+    )
   })
 
-  test('pipe_read refuses a non-integer wait, and honors the abort signal', async () => {
+  test('pipe_read renders bytes as base64 when asked', async () => {
+    const fake = fakeMesh()
+    const tools = pipeTools(new PipeRuntime(fake.mesh))
+    fake.push({ from: 'ana', bytes: new Uint8Array([0, 255]), directed: false, eof: false, seq: 0 })
+    await settle()
+
+    const read = (await call(tools, 'pipe_read', { waitMs: 0, encoding: 'base64' })) as {
+      items: { base64?: string }[]
+    }
+    expect(read.items[0]?.base64).toBe('AP8=')
+  })
+
+  test('pipe_read refuses bad input, and honors the abort signal', async () => {
     const tools = pipeTools(new PipeRuntime(fakeMesh().mesh))
     await expect(call(tools, 'pipe_read', { waitMs: 'soon' })).rejects.toThrow(/waitMs/)
+    await expect(call(tools, 'pipe_read', { cursor: 1.5 })).rejects.toThrow(/cursor/)
+    await expect(call(tools, 'pipe_read', { encoding: 'utf16' })).rejects.toThrow(/encoding/)
 
     const controller = new AbortController()
     const pending = tool(tools, 'pipe_read').execute({ waitMs: 25_000 }, { signal: controller.signal })
     controller.abort()
-    expect(JSON.parse((await pending).content[0]?.text ?? '')).toEqual({ items: [] })
+    expect(JSON.parse((await pending).content[0]?.text ?? '')).toEqual({ items: [], cursor: 0 })
   })
 
   test('pipe_peers, pipe_status and pipe_state_get read the mesh', async () => {
     const peers = [{ nick: 'ana', reach: 'direct', transport: 'unicast', quiet: false }]
     const tools = pipeTools(new PipeRuntime(fakeMesh(peers as never).mesh))
     expect(await call(tools, 'pipe_peers')).toEqual(peers)
-    expect(await call(tools, 'pipe_status')).toMatchObject({ nick: 'me', peerCount: 1, unread: 0 })
+    expect(await call(tools, 'pipe_status')).toMatchObject({ nick: 'me', peerCount: 1, buffered: 0 })
     expect(await call(tools, 'pipe_state_get')).toEqual({ a: 1 })
   })
 

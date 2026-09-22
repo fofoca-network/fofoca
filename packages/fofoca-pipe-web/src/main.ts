@@ -191,7 +191,7 @@ async function main(): Promise<void> {
   window.pipe = {
     send: (text, to) => runtime.send(text, to),
     sendEof: (to) => runtime.sendEof(to),
-    read: (waitMs, signal) => runtime.read(waitMs, signal),
+    read: (opts, signal) => runtime.read(opts, signal),
     peers: () => runtime.peers(),
     status: () => runtime.status(),
     stateGet: () => runtime.stateGet(),

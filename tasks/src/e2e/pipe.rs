@@ -387,11 +387,13 @@ fn exchange(cli: &mut Cli, page: &Page, sent: &str) -> Result<(), Failure> {
         return fail(cli, Some(page), &reason);
     }
 
-    // `pipe_read` semantics on the tab: the payload, as one ordered item.
+    // `pipe_read` semantics on the tab: the payload, as one ordered item,
+    // and a second read from the same cursor-free call sees it again — a
+    // read takes nothing away.
     call_page(
         page,
         "pipe",
-        "read(0).then(r => { window.__read = JSON.stringify(r) })",
+        "read({ waitMs: 0 }).then(r => { window.__read = JSON.stringify(r) })",
     )?;
     let read = page.evaluate("window.__read||''");
     let parsed: serde_json::Value = serde_json::from_str(&read)
