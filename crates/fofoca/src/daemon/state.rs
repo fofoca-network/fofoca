@@ -345,6 +345,9 @@ pub struct EventLoopState {
     /// rival started within seconds of us; later rounds run the steady
     /// jittered cadence.
     pub(crate) rival_recheck_rounds: u32,
+    /// Consecutive due sheds held back because a data-channel peer depends
+    /// on this beacon; see `beacon_arm::defer_shed`. Cleared by a shed.
+    pub(crate) rival_recheck_deferrals: u32,
     /// Recently-seen message ids, for duplicate suppression. Gossip
     /// (GRAFT/repair, topology churn, our own re-broadcasts, anti-entropy
     /// re-sends, the rendezvous double-path) can deliver the same message
@@ -637,6 +640,7 @@ impl EventLoopState {
             reclaim_until: None,
             next_rival_recheck: None,
             rival_recheck_rounds: 0,
+            rival_recheck_deferrals: 0,
             seen: BoundedFifoSet::new(SEEN_IDS_CAP),
             pending_outbound: BoundedQueue::new(PENDING_OUTBOUND_CAP),
             #[cfg(feature = "host")]

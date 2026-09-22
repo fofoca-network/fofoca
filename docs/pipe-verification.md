@@ -156,15 +156,31 @@ against both a terminal and a Chrome tab on the same machine. Chrome for
 Testing 152 links in 40–130 s on the same setup. Broadcasts and state still
 flow over gossip; directed frames do not. Use Chrome until this is found.
 
-**F8 — the chat e2e suite is failing on this machine for reasons outside
-the pipe.** Open, pre-existing. `cargo task e2e --suite chat --quick` went
-2/2 green early in the session and 0/5 later the same evening, with the
+**F8 — the chat e2e suite fails on this machine, in the topic bootstrap.**
+Open, pre-existing, partly mitigated. `cargo task e2e --suite chat --quick`
+went 2/2 green early in the session and 1/8 later the same evening, with the
 browser's roster empty (`page peers: []`) and the terminal cycling `beacon
-rival re-check: releasing the rendezvous to re-probe for a same-id
-co-host`. **Unmodified `main` fails the same way, 0/2, in the same
-conditions** — so it is the machine or the local beacon arbitration, not
-this branch. The mesh and pipe suites (same relay, same browser) stay green
-throughout. Anyone bisecting a chat failure should run `main` first.
+rival re-check: releasing the rendezvous to re-probe for a same-id co-host`.
+What is known:
+
+- **Unmodified `main` fails the same way, 0/2, in the same conditions.** Not
+  this branch.
+- The pipe suite, which creates a **relay-only** mesh over the same local
+  relay and drives the same browser, passes every time. The chat suite is
+  the one that joins by **topic**, which is the public preset: mDNS, the
+  mainline DHT and a pinned relay on top of the local one. That is where to
+  look.
+- The machine runs other fofoca peers (`agent-gossip`) doing their own mDNS
+  and DHT work, which is the likeliest source of the environmental half.
+- The tab never enters the roster at all, so the failure is before any
+  data-channel session exists.
+
+Mitigated, not cured: a holder no longer sheds its beacon while a
+data-channel peer depends on it (`beacon_arm::defer_shed`, up to
+`MAX_SHED_DEFERRALS` rounds). That protects a tab already attached — a shed
+takes away the only path a browser has — but it cannot help a tab that has
+not reached the beacon yet, which is this failure. Anyone bisecting a chat
+failure should run `main` first.
 
 **F3 — a missed opening frame stalled a stream until 256 later frames.
 Fixed.** A hole older than `GAP_TIMEOUT` (3 s) is now skipped and the frames

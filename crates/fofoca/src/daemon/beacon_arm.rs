@@ -279,6 +279,23 @@ pub(super) fn next_recheck_delay(round: u32, roster: usize, endpoint_id: Endpoin
     let jitter_ms = rand::Rng::random_range(&mut rand::rng(), 0..=base_secs.saturating_mul(1000));
     Duration::from_secs(base_secs) + Duration::from_millis(jitter_ms)
 }
+/// How many steady intervals a shed may be held back while a data-channel
+/// peer depends on this beacon.
+///
+/// A shed drops the rendezvous a browser reached us through, and a browser
+/// has no second path to fall back on: the tab's roster empties and its
+/// transfer stops. Native peers re-dial, so the wait is for the lane that
+/// cannot. Bounded rather than indefinite because the shed is also how two
+/// split holders discover each other, and a pair that each kept a tab would
+/// otherwise never merge.
+const MAX_SHED_DEFERRALS: u32 = 3;
+
+/// Whether this due shed waits a round: someone is on the data channel and
+/// we have not already waited our limit.
+pub(super) fn defer_shed(sessions: usize, deferrals: u32) -> bool {
+    sessions > 0 && deferrals < MAX_SHED_DEFERRALS
+}
+
 /// Arm the next rival re-check after a fresh claim (a `None` → live
 /// `beacon::ensure` transition). No-op for sessions the shed doesn't
 /// apply to, so every claim site can call it unconditionally.
@@ -321,6 +338,23 @@ pub(super) fn shed_rival_beacon_if_due(
     if !due {
         return false;
     }
+    let sessions = state
+        .webrtc
+        .as_ref()
+        .map_or(0, fofoca_iroh_webrtc_transport::WebRtcHandle::session_count);
+    if defer_shed(sessions, state.rival_recheck_deferrals) {
+        state.rival_recheck_deferrals = state.rival_recheck_deferrals.saturating_add(1);
+        state.next_rival_recheck =
+            Some(Instant::now() + Duration::from_secs(crate::util::tuning::rival_recheck_secs()));
+        tracing::info!(
+            target: "fofoca::gossip",
+            sessions,
+            deferrals = state.rival_recheck_deferrals,
+            "beacon rival re-check deferred: a data-channel peer is hanging off this beacon"
+        );
+        return false;
+    }
+    state.rival_recheck_deferrals = 0;
     tracing::info!(
         target: "fofoca::gossip",
         "beacon rival re-check: releasing the rendezvous to re-probe for a same-id co-host"
@@ -353,10 +387,30 @@ pub(super) fn shed_rival_beacon_if_due(
 mod tests {
     use super::super::config::CoHostPolicy;
     use super::{
-        claims_at_startup, next_recheck_delay, probes_before_claim, regrafts_rendezvous,
-        rival_recheck_applies,
+        MAX_SHED_DEFERRALS, claims_at_startup, defer_shed, next_recheck_delay, probes_before_claim,
+        regrafts_rendezvous, rival_recheck_applies,
     };
     use std::time::Duration;
+
+    /// A shed cuts the rendezvous a browser reached us through, and the tab
+    /// has nothing else: its roster empties mid-transfer. Observed as a
+    /// terminal cycling claim and release while a tab saw no peers at all.
+    #[test]
+    fn a_due_shed_waits_while_a_data_channel_peer_depends_on_us() {
+        assert!(defer_shed(1, 0), "a tab is hanging off this beacon");
+        assert!(!defer_shed(0, 0), "nobody on the channel: shed on time");
+    }
+
+    /// Bounded, or two holders that each kept a tab would never find each
+    /// other and the overlays would stay split for good.
+    #[test]
+    fn the_wait_runs_out() {
+        assert!(defer_shed(2, MAX_SHED_DEFERRALS - 1));
+        assert!(
+            !defer_shed(2, MAX_SHED_DEFERRALS),
+            "past the limit the shed happens anyway, so split holders still merge"
+        );
+    }
 
     /// Regression for a two-peer loopback mesh that never formed: a peer
     /// whose rendezvous link dropped in the first milliseconds after
