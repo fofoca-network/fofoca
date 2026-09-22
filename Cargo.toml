@@ -62,6 +62,8 @@ serde = { version = "1", features = ["derive"] }
 # `--output json` stream.
 serde_json = { version = "1", features = ["raw_value"] }
 anyhow = "1"
+# Named by `tasks` and `fofoca-pipe-cli`, so the version lives here.
+clap = { version = "4", features = ["derive"] }
 # Named by `fofoca-chunks`, and kept in the workspace table so a second namer
 # cannot drift. The floor is the OFF position:
 # `default-features = false` keeps the wasm build honest, and `std` comes back

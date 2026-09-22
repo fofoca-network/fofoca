@@ -1,0 +1,33 @@
+[package]
+name = "fofoca-pipe-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "`fofoca-pipe`: stdin to a gossip mesh, the mesh to stdout"
+readme = "README.md"
+publish = false
+
+# A sibling of `fofoca-pipe` rather than a `[[bin]]` inside it: the wasm gate
+# builds that crate for wasm32, and a binary needs the tokio runtime that
+# cannot go there. Same shape as `fofoca-ffi`, the other host-only consumer.
+
+[features]
+default = ["mdns", "dht"]
+mdns = ["fofoca/mdns"]
+dht = ["fofoca/dht"]
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "fofoca-pipe"
+path = "src/main.rs"
+
+[dependencies]
+fofoca = { path = "../fofoca", default-features = false }
+fofoca-pipe = { path = "../fofoca-pipe" }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time"] }
+anyhow.workspace = true
+clap = { workspace = true, features = ["env"] }
+serde_json.workspace = true
+tracing-subscriber.workspace = true

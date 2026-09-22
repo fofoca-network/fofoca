@@ -1639,6 +1639,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "fofoca-pipe-cli"
+version = "0.6.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "fofoca",
+ "fofoca-pipe",
+ "serde_json",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "fofoca-protocol"
 version = "0.6.0"
 dependencies = [
