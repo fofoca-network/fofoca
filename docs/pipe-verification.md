@@ -150,11 +150,24 @@ F2 is a correctness fix against the code's own documented invariant
 rule. It did **not** change any observed outcome, so treat it as a
 correctness fix, not a cure for F2b.
 
-**F2b — Safari still does not form a direct path.** Open, and not the same
-bug: with F2 fixed, Safari 27.0 offers the lane and still ends `relay-only`
-against both a terminal and a Chrome tab on the same machine. Chrome for
-Testing 152 links in 40–130 s on the same setup. Broadcasts and state still
-flow over gossip; directed frames do not. Use Chrome until this is found.
+**F2b — Safari still does not form a direct path.** Open, not root-caused,
+and not the same bug as F2: Safari 27.0 offers the lane and still ends
+`relay-only` against both a terminal and a Chrome tab on the same machine,
+while Chrome for Testing 152 links in 40–130 s on that same setup.
+Broadcasts and state still flow over gossip; directed frames do not. Use
+Chrome until this is found.
+
+Two facts narrow it. Both browsers advertise the same candidate shape
+(`host=0 mdns=1 srflx=1`), so Safari is not failing to gather: an mDNS
+`.local` candidate is one the native side (str0m) cannot resolve, leaving
+only the reflexive one for either browser. And on this machine **neither
+browser can reach a LAN address at all** — `fetch("http://<lan-ip>:3020/")`
+fails in both while `127.0.0.1` returns 200 and `curl` to the same LAN
+address from a shell returns 200, which points at per-app local-network
+permission rather than a firewall. Chrome pairs anyway and Safari does not,
+so the difference is in which candidate pair each browser will actually use.
+Whoever picks this up should start from `RTCPeerConnection.getStats()` in
+each browser, comparing the selected candidate pair.
 
 **F8 — the chat e2e suite fails on this machine, in the topic bootstrap.**
 Open, pre-existing, partly mitigated. `cargo task e2e --suite chat --quick`
@@ -181,6 +194,24 @@ data-channel peer depends on it (`beacon_arm::defer_shed`, up to
 takes away the only path a browser has — but it cannot help a tab that has
 not reached the beacon yet, which is this failure. Anyone bisecting a chat
 failure should run `main` first.
+
+Late in the session the **pipe** suite started failing the same way
+(`page peers: []`), so this is not about joining by topic. Every unit and
+integration test stays green; what stopped working is a browser pairing
+with a native peer at all. Two environment facts to check before suspecting
+the code:
+
+1. **Local network access.** Neither browser on this machine can reach a LAN
+   address: `fetch("http://<lan-ip>:3020/")` fails in Safari and in Chrome
+   for Testing while `127.0.0.1` returns 200 and `curl` to that same LAN
+   address returns 200. A browser that cannot send to a LAN address cannot
+   use a native peer's host candidate. On macOS this is granted per app
+   under System Settings, Privacy and Security, Local Network — check that
+   Safari and Google Chrome for Testing are enabled there.
+2. **Machine load.** ICE and the beacon probes are deadline-driven. The
+   failures began after hours of back-to-back suite runs, with the 15-minute
+   load average at 14. The suites passed earlier the same day on the same
+   commit with the machine idle.
 
 **F3 — a missed opening frame stalled a stream until 256 later frames.
 Fixed.** A hole older than `GAP_TIMEOUT` (3 s) is now skipped and the frames
