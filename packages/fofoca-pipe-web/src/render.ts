@@ -42,16 +42,26 @@ const keyOf = (key: ViewKey) => `${key.self ? 's' : 'r'}:${key.directed ? 'd' : 
 
 /**
  * Accumulates chunks per stream and hands them over in one batch per flush.
- * Pure: `main.ts` owns the DOM and the frame timer.
+ * Pure: `main.ts` owns the DOM and the timers.
+ *
+ * What it holds is bounded per stream. A flush can be a long way off — a
+ * hidden tab gets no animation frames at all — and a view only ever shows
+ * its last `MAX_VIEW_CHARS` anyway, so keeping more than that would grow the
+ * tab for text no one will see.
  */
 export class Batcher {
-  readonly #pending = new Map<string, { key: ViewKey; parts: string[]; complete?: boolean }>()
+  readonly #pending = new Map<string, { key: ViewKey; parts: string[]; held: number; complete?: boolean }>()
+  readonly #max: number
+
+  constructor(maxChars: number = MAX_VIEW_CHARS) {
+    this.#max = maxChars
+  }
 
   #entry(key: ViewKey) {
     const id = keyOf(key)
     let entry = this.#pending.get(id)
     if (entry === undefined) {
-      entry = { key, parts: [] }
+      entry = { key, parts: [], held: 0 }
       this.#pending.set(id, entry)
     }
     return entry
@@ -59,8 +69,15 @@ export class Batcher {
 
   /** Queue text for this stream. */
   push(key: ViewKey, text: string): void {
-    if (text !== '') {
-      this.#entry(key).parts.push(text)
+    if (text === '') {
+      return
+    }
+    const entry = this.#entry(key)
+    entry.parts.push(text)
+    entry.held += text.length
+    while (entry.held > this.#max && entry.parts.length > 1) {
+      const oldest = entry.parts.shift()
+      entry.held -= oldest?.length ?? 0
     }
   }
 

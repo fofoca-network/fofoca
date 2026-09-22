@@ -49,6 +49,9 @@ declare global {
   }
 }
 
+/** How often the view is flushed when animation frames are not running. */
+const HIDDEN_FLUSH_MS = 500
+
 function byId(id: string): HTMLElement {
   const element = document.getElementById(id)
   if (!element) {
@@ -101,15 +104,27 @@ function apply(pending: Pending): void {
   }
 }
 
-/** Drive a batcher from animation frames, flushing only when there is work. */
+/**
+ * Drive a batcher from animation frames, and from a timer as well.
+ *
+ * A hidden tab gets no animation frames at all, so a frame-only loop leaves
+ * its view arbitrarily stale and its batch growing. Timers are throttled
+ * there rather than stopped, so the slow leg keeps the view roughly current
+ * whatever the tab is doing. Flushing twice is harmless: the second flush
+ * finds nothing.
+ */
 function paint(batcher: Batcher): void {
-  const frame = (): void => {
+  const flush = (): void => {
     for (const pending of batcher.flush()) {
       apply(pending)
     }
+  }
+  const frame = (): void => {
+    flush()
     requestAnimationFrame(frame)
   }
   requestAnimationFrame(frame)
+  setInterval(flush, HIDDEN_FLUSH_MS)
 }
 
 function selectors(): { id?: string; topic?: string } {

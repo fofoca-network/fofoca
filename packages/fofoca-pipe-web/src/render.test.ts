@@ -57,6 +57,25 @@ describe('Batcher', () => {
     expect(batcher.flush()).toEqual([{ key: ana, text: 'more' }])
   })
 
+  test('what it holds is bounded, so a hidden tab cannot grow it', () => {
+    const batcher = new Batcher(10)
+    for (let i = 0; i < 100; i++) {
+      batcher.push(ana, 'abcde')
+    }
+
+    const flushed = batcher.flush()
+    expect(flushed).toHaveLength(1)
+    expect(flushed[0]?.text.length).toBeLessThanOrEqual(10)
+    expect(flushed[0]?.text).toBe('abcdeabcde')
+  })
+
+  test('a single chunk over the bound is kept whole for `fit` to trim', () => {
+    const batcher = new Batcher(4)
+    batcher.push(ana, 'abcdefgh')
+
+    expect(batcher.flush()[0]?.text).toBe('abcdefgh')
+  })
+
   test('an empty chunk queues nothing', () => {
     const batcher = new Batcher()
     batcher.push(ana, '')
