@@ -5,14 +5,10 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use fofoca::embed::NodeSink;
-use fofoca::iroh::RelayUrl;
 use fofoca::net::TransportOpts;
 use fofoca::protocol::JoinTarget;
 use fofoca::protocol::Nickname;
-use fofoca::protocol::{
-    DirectorySelection, LookupOpts, LookupSet, MeshConfig, MeshName, RelayChoice, RelaySelection,
-    TransportPolicy, resolve_lookups,
-};
+use fofoca::protocol::{DirectorySelection, Lookup, MeshConfig, MeshName, RelayLadder, Transport};
 use fofoca::runtime::{CreateParams, JoinParams, Node, Resolved};
 use fofoca::runtime::{SetupKind, SetupParams, derive_topic_mesh_config, setup_mesh};
 use fofoca::util::tuning::GOSSIP_ACTIVE_VIEW_CAPACITY;
@@ -24,7 +20,12 @@ use crate::flow::Flow;
 use crate::wire::{DEPARTURE_GRACE, INBOUND_CAP};
 
 /// How the caller selects a mesh — an id to join, a shared string to derive one
-/// from, or a create over these lookups.
+/// from, or a create over the choices below.
+///
+/// A create names three mesh-wide choices, kept apart because they are three
+/// concepts: `lookup` says how members find each other, `transport` says what
+/// payload may ride, `relay_urls` says which relay. `paths` is this node's own
+/// and not in the id.
 ///
 /// `Deserialize` so a browser tab can hand its constructor a plain object and
 /// have it land here, which is what stops the browser and the C caller growing
@@ -32,10 +33,6 @@ use crate::wire::{DEPARTURE_GRACE, INBOUND_CAP};
 /// than a silently loopback mesh; `default` so every field stays optional.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "four independent discovery choices (public/mdns/dht/relay lookup) plus the relay's transport role; they are flat inputs, not a state machine to model as an enum"
-)]
 pub struct Opts {
     /// A `mesh id` to join.
     pub mesh: Option<String>,
@@ -46,43 +43,43 @@ pub struct Opts {
     /// Mesh name to create with; `None` falls back to `"fofoca"`. Ignored
     /// when joining (the name travels with the id/topic instead).
     pub name: Option<String>,
-    /// Create a public mesh (the all-on discovery preset).
-    pub public: bool,
-    pub mdns: bool,
-    pub dht: bool,
-    /// The relay as a **lookup**: members find each other through it.
-    pub relay_lookup: bool,
-    /// The relay as a **transport**: payload may fall back to it. Off by
-    /// default, so all data is peer to peer and the relay serves lookup
-    /// alone. Needs `relay_lookup` (or `public`); baked into the mesh id, so a
-    /// joiner inherits it. Ignored when joining by id.
-    pub relay_transport: bool,
-    /// A custom relay **ladder** (ordered URLs, first preferred), replacing
-    /// the default ladder. Implies the relay lookup. Part of the mesh id —
-    /// with `topic`, every member must pass the same list or they derive
+    /// How members find each other: any of `mdns`, `dht`, `relay`. Naming
+    /// any uses only those; naming none is a loopback mesh. Ignored with a
+    /// `topic` (always all three) or a `mesh` id (which carries its own).
+    pub lookup: Vec<Lookup>,
+    /// What may carry payload: `p2p`, and `relay` if named. Empty ⇒ `p2p`
+    /// alone, so all data is peer to peer and the relay serves lookup only.
+    /// `relay` needs `relay` in `lookup`. Part of the mesh id, so a joiner
+    /// inherits it; ignored when joining by id.
+    pub transport: Vec<Transport>,
+    /// Which relay: an ordered ladder (first preferred) replacing the
+    /// default. Needs `relay` in `lookup`. Part of the mesh id — with
+    /// `topic`, every member must pass the same list or they derive
     /// different meshes. Empty ⇒ the default ladder. Ignored when joining
     /// by id.
     pub relay_urls: Vec<String>,
-    /// Which of this node's transports may carry data. Per node, not in the
-    /// id; the default is everything the target has.
-    pub transports: TransportFlags,
+    /// Which of this node's paths may carry data. Per node, not in the id;
+    /// the default is everything the target has.
+    pub paths: PathFlags,
     /// Active-view cap; `0` takes the engine default.
     pub max_peers: usize,
 }
 
-/// Per-node transport switches, mirrored from the engine's `TransportOpts`.
-/// Only the two a consumer plausibly turns off are exposed: the relay stays
-/// (it is the rendezvous) and multihop stays an engine concern.
+/// Per-node path switches, mirrored from the engine's `TransportOpts`. Not
+/// the mesh's transport policy: that says what payload *may* ride and is in
+/// the id; this says what *this node* has. Only the two a consumer plausibly
+/// turns off are exposed: the relay stays (it is the rendezvous) and multihop
+/// stays an engine concern.
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
-pub struct TransportFlags {
+pub struct PathFlags {
     /// Direct UDP and hole-punched paths.
     pub ip: bool,
     /// QUIC over a `WebRTC` data channel.
     pub webrtc: bool,
 }
 
-impl Default for TransportFlags {
+impl Default for PathFlags {
     fn default() -> Self {
         Self {
             ip: true,
@@ -91,25 +88,16 @@ impl Default for TransportFlags {
     }
 }
 
-/// The relay leg these options ask for: a custom ladder wins over the
-/// default/off switch, and a bad URL is an error rather than a shrunk ladder.
-fn relay_choice(urls: &[String], default_on: bool) -> Result<RelayChoice> {
+/// The ladder these options name, or `None` for the default. Parsed as one
+/// list, so an empty or bad entry is an error rather than a shrunk ladder.
+fn relay_ladder(urls: &[String]) -> Result<Option<RelayLadder>> {
     if urls.is_empty() {
-        return Ok(if default_on {
-            RelayChoice::Pinned
-        } else {
-            RelayChoice::Disabled
-        });
+        return Ok(None);
     }
-    let ladder = urls
-        .iter()
-        .map(|url| {
-            url.trim()
-                .parse::<RelayUrl>()
-                .map_err(|error| anyhow::anyhow!("invalid relay URL {url:?}: {error}"))
-        })
-        .collect::<Result<Vec<_>>>()?;
-    Ok(RelayChoice::Custom(ladder))
+    urls.join(",")
+        .parse::<RelayLadder>()
+        .map(Some)
+        .map_err(|error| anyhow::anyhow!("{error}"))
 }
 
 /// One live membership's moving parts.
@@ -167,7 +155,7 @@ pub async fn join(opts: &Opts, sink: Arc<dyn NodeSink>) -> Result<Session> {
         };
         anyhow::ensure!(
             !loopback,
-            "a browser peer cannot reach a loopback mesh: pass `public`, or a topic / mesh id"
+            "a browser peer cannot reach a loopback mesh: name a lookup (`relay`), or a topic / mesh id"
         );
     }
 
@@ -192,8 +180,8 @@ pub async fn join(opts: &Opts, sink: Arc<dyn NodeSink>) -> Result<Session> {
             // browser the WebRTC lane is the only one that exists, and the
             // engine attaches it per target.
             transports: TransportOpts {
-                ip: opts.transports.ip,
-                webrtc: opts.transports.webrtc,
+                ip: opts.paths.ip,
+                webrtc: opts.paths.webrtc,
                 ..TransportOpts::default()
             },
             multihop: false,
@@ -266,8 +254,8 @@ pub async fn depart(node: Node<PipeApp>) -> Result<()> {
 }
 
 /// Resolve the selectors into a [`SetupKind`] plus our nickname. Exactly one
-/// source: an id, a topic string, or a create over the lookup flags (no
-/// selector at all ⇒ a loopback create).
+/// source: an id, a topic string, or a create over the named lookups (no
+/// selector and no lookup ⇒ a loopback create).
 ///
 /// Public because it is the one function that decides *which mesh you land in*,
 /// and a tab and a terminal meeting depends on both running it.
@@ -290,26 +278,19 @@ pub fn resolve_kind(opts: &Opts, nickname: Option<Nickname>) -> Result<(SetupKin
             Ok((kind, author))
         }
         (None, Some(string)) => {
-            // Note what this ignores: the discovery flags. `TopicParams::resolve`
-            // always derives through the public preset, so a topic mesh is
-            // always mDNS + DHT + the pinned relay ladder. That is what lets a
-            // tab and a terminal derive the same id from the same string —
-            // the lookups are mixed into the derivation, so two reaches over
-            // one string are two different meshes. `relay_urls` and
-            // `relay_transport` are the two knobs that *do* change the id,
-            // and every member must pass the same values.
-            let config = MeshConfig {
-                lookups: LookupOpts {
-                    mdns: true,
-                    dht: true,
-                    relay_lookup: relay_choice(&opts.relay_urls, true)?,
-                },
-                password: None,
-                issuer_pubkey: None,
-                transport: TransportPolicy {
-                    relay_transport: opts.relay_transport,
-                },
-            };
+            // Note what this ignores: `lookup`. `TopicParams::resolve` always
+            // derives through the all-on preset, so a topic mesh is always
+            // mDNS + DHT + the relay. That is what lets a tab and a terminal
+            // derive the same id from the same string — the lookups are mixed
+            // into the derivation, so two reaches over one string are two
+            // different meshes. `relay_urls` and `transport` are the two
+            // choices that *do* change the id, and every member must pass the
+            // same values.
+            let config = MeshConfig::resolve(
+                &[Lookup::Mdns, Lookup::Dht, Lookup::Relay],
+                relay_ladder(&opts.relay_urls)?,
+                &opts.transport,
+            )?;
             let mesh =
                 derive_topic_mesh_config(string, config).context("resolving the topic string")?;
             Ok((
@@ -321,30 +302,11 @@ pub fn resolve_kind(opts: &Opts, nickname: Option<Nickname>) -> Result<(SetupKin
             ))
         }
         (None, None) => {
-            let lookups = LookupSet {
-                mdns: opts.mdns,
-                dht: opts.dht,
-                relay_lookup: if opts.relay_lookup {
-                    RelaySelection::Default
-                } else {
-                    RelaySelection::Unset
-                },
-            };
-            let mut resolved_lookups = resolve_lookups(opts.public, lookups);
-            if !opts.relay_urls.is_empty() {
-                resolved_lookups.relay_lookup = relay_choice(&opts.relay_urls, true)?;
-            }
-            let config = MeshConfig {
-                lookups: resolved_lookups,
-                password: None,
-                issuer_pubkey: None,
-                transport: TransportPolicy {
-                    relay_transport: opts.relay_transport,
-                },
-            };
-            config
-                .validate()
-                .map_err(|error| anyhow::anyhow!("{error}"))?;
+            let config = MeshConfig::resolve(
+                &opts.lookup,
+                relay_ladder(&opts.relay_urls)?,
+                &opts.transport,
+            )?;
             let name = MeshName::new(opts.name.clone().unwrap_or_else(|| "fofoca".to_string()))
                 .map_err(|error| anyhow::anyhow!("{error}"))?;
             let Resolved { kind, author, .. } = CreateParams {
@@ -364,13 +326,52 @@ pub fn resolve_kind(opts: &Opts, nickname: Option<Nickname>) -> Result<(SetupKin
 
 #[cfg(test)]
 mod tests {
-    use fofoca::protocol::RelayChoice;
+    use fofoca::protocol::{LookupOpts, RelayChoice};
     use fofoca::runtime::derive_topic_mesh_with;
 
     use super::*;
 
     fn opts() -> Opts {
         Opts::default()
+    }
+
+    fn all_lookups() -> Vec<Lookup> {
+        vec![Lookup::Mdns, Lookup::Dht, Lookup::Relay]
+    }
+
+    fn create_config(opts: &Opts) -> MeshConfig {
+        let (kind, _) = resolve_kind(opts, None).expect("a create resolves");
+        match kind {
+            SetupKind::Create { config, .. } => config,
+            SetupKind::Join { .. } | SetupKind::Topic { .. } => {
+                panic!("no selector must resolve to SetupKind::Create")
+            }
+        }
+    }
+
+    /// The JSON a browser tab hands over is this struct verbatim, so its
+    /// shape is a contract: the three lists, the ladder, the per-node paths.
+    /// A field from before the split is a typo now, not a silent no-op.
+    #[test]
+    fn the_json_shape_is_the_three_choices_and_the_paths() {
+        let parsed: Opts = serde_json::from_str(
+            r#"{"lookup":["mdns","relay"],"transport":["p2p","relay"],
+                "relayUrls":["http://127.0.0.1:3340/"],"paths":{"webrtc":false}}"#,
+        )
+        .expect("the documented shape parses");
+        assert_eq!(parsed.lookup, vec![Lookup::Mdns, Lookup::Relay]);
+        assert_eq!(parsed.transport, vec![Transport::P2p, Transport::Relay]);
+        assert_eq!(parsed.relay_urls, vec!["http://127.0.0.1:3340/".to_owned()]);
+        assert!(parsed.paths.ip && !parsed.paths.webrtc);
+        for stale in [
+            r#"{"public":true}"#,
+            r#"{"relayLookup":true}"#,
+            r#"{"relayTransport":true}"#,
+            r#"{"transports":{}}"#,
+            r#"{"lookup":["public"]}"#,
+        ] {
+            assert!(serde_json::from_str::<Opts>(stale).is_err(), "{stale}");
+        }
     }
 
     /// The interop assertion. A browser resolving `topic` and a terminal calling
@@ -418,68 +419,38 @@ mod tests {
     }
 
     #[test]
-    fn a_bare_create_is_loopback_and_naming_public_is_not() {
-        let (bare, _) = resolve_kind(&opts(), None).expect("a bare create resolves");
-        let (public, _) = resolve_kind(
-            &Opts {
-                public: true,
-                ..opts()
-            },
-            None,
-        )
-        .expect("a public create resolves");
-        for (kind, loopback) in [(bare, true), (public, false)] {
-            match kind {
-                SetupKind::Create { config, .. } => {
-                    assert_eq!(config.lookups.is_loopback(), loopback);
-                }
-                SetupKind::Join { .. } | SetupKind::Topic { .. } => {
-                    panic!("no selector must resolve to SetupKind::Create")
-                }
-            }
-        }
+    fn a_bare_create_is_loopback_and_naming_lookups_is_not() {
+        assert!(create_config(&opts()).lookups.is_loopback());
+        let all = create_config(&Opts {
+            lookup: all_lookups(),
+            ..opts()
+        });
+        assert!(!all.lookups.is_loopback());
+        assert_eq!(all.lookups, LookupOpts::public_preset());
     }
 
-    /// The relay's two roles are two options: `relay_lookup` finds peers through
-    /// it, `relay_transport` lets payload ride it. The second is off unless
-    /// named, and meaningless without the first.
+    /// The relay's two roles are two lists: `relay` in `lookup` finds peers
+    /// through it, `relay` in `transport` lets payload ride it. The second is
+    /// off unless named, and meaningless without the first.
     #[test]
     fn relay_transport_is_off_unless_named_and_needs_the_relay_lookup() {
-        let (kind, _) = resolve_kind(
-            &Opts {
-                public: true,
-                ..opts()
-            },
-            None,
-        )
-        .expect("a public create resolves");
-        let SetupKind::Create { config, .. } = kind else {
-            panic!("no selector must resolve to SetupKind::Create")
-        };
-        assert!(!config.transport.relay_transport);
+        let lookup_only = create_config(&Opts {
+            lookup: all_lookups(),
+            ..opts()
+        });
+        assert!(!lookup_only.transport.relay_transport);
 
-        let (relayed, _) = resolve_kind(
-            &Opts {
-                relay_lookup: true,
-                relay_transport: true,
-                ..opts()
-            },
-            None,
-        )
-        .expect("a relay-transport create resolves");
-        let SetupKind::Create {
-            config: relayed_config,
-            ..
-        } = relayed
-        else {
-            panic!("no selector must resolve to SetupKind::Create")
-        };
-        assert!(relayed_config.transport.relay_transport);
+        let relayed = create_config(&Opts {
+            lookup: vec![Lookup::Relay],
+            transport: vec![Transport::P2p, Transport::Relay],
+            ..opts()
+        });
+        assert!(relayed.transport.relay_transport);
 
         assert!(
             resolve_kind(
                 &Opts {
-                    relay_transport: true,
+                    transport: vec![Transport::P2p, Transport::Relay],
                     ..opts()
                 },
                 None,
@@ -489,27 +460,77 @@ mod tests {
         );
     }
 
-    /// `relayUrls` swaps the default ladder for the caller's, on both the
-    /// create path and the topic path — and on a topic it changes the id,
-    /// because the lookups are mixed into the derivation.
+    /// Naming the relay as a lookup and not as a transport is a mesh whose
+    /// relay is the meeting point and nothing more: payload never rides it.
+    /// On a create, on a topic, and with a custom ladder alike.
     #[test]
-    fn relay_urls_replace_the_ladder_and_change_a_topic_id() {
-        let urls = vec!["http://127.0.0.1:3340/".to_owned()];
-        let (kind, _) = resolve_kind(
+    fn the_relay_can_serve_lookup_alone() {
+        let create = create_config(&Opts {
+            lookup: vec![Lookup::Relay],
+            transport: vec![Transport::P2p],
+            ..opts()
+        });
+        assert_eq!(create.lookups.relay_lookup, RelayChoice::Pinned);
+        assert!(!create.transport.relay_transport);
+
+        let (topic, _) = resolve_kind(
             &Opts {
-                relay_urls: urls.clone(),
+                topic: Some("standup".to_owned()),
+                transport: vec![Transport::P2p],
+                relay_urls: vec!["http://127.0.0.1:3340/".to_owned()],
                 ..opts()
             },
             None,
         )
-        .expect("a custom-ladder create resolves");
-        let SetupKind::Create { config, .. } = kind else {
-            panic!("no selector must resolve to SetupKind::Create")
+        .expect("a lookup-only topic resolves");
+        let SetupKind::Topic { mesh, .. } = topic else {
+            panic!("a topic selector must resolve to SetupKind::Topic")
         };
+        assert!(!mesh.transport().relay_transport);
+        assert!(!mesh.is_loopback(), "the relay lookup is on");
+    }
+
+    #[test]
+    fn p2p_cannot_be_left_out_of_the_transports() {
+        let error = resolve_kind(
+            &Opts {
+                lookup: vec![Lookup::Relay],
+                transport: vec![Transport::Relay],
+                ..opts()
+            },
+            None,
+        )
+        .expect_err("relay alone is not a mode the engine has");
+        assert!(format!("{error:#}").contains("p2p"), "{error:#}");
+    }
+
+    /// `relayUrls` swaps the default ladder for the caller's, on both the
+    /// create path and the topic path — and on a topic it changes the id,
+    /// because the lookups are mixed into the derivation. It says *which*
+    /// relay and nothing more: it does not turn the relay lookup on.
+    #[test]
+    fn relay_urls_replace_the_ladder_and_change_a_topic_id() {
+        let urls = vec!["http://127.0.0.1:3340/".to_owned()];
+        let config = create_config(&Opts {
+            lookup: vec![Lookup::Relay],
+            relay_urls: urls.clone(),
+            ..opts()
+        });
         let RelayChoice::Custom(ladder) = &config.lookups.relay_lookup else {
             panic!("relayUrls must resolve to a custom ladder")
         };
         assert_eq!(ladder.len(), 1);
+        assert!(
+            resolve_kind(
+                &Opts {
+                    relay_urls: urls.clone(),
+                    ..opts()
+                },
+                None,
+            )
+            .is_err(),
+            "a ladder without the relay lookup is an error, not an implied lookup"
+        );
 
         let (plain, _) = resolve_kind(
             &Opts {
@@ -542,6 +563,7 @@ mod tests {
         assert!(
             resolve_kind(
                 &Opts {
+                    lookup: vec![Lookup::Relay],
                     relay_urls: vec!["not a url".to_owned()],
                     ..opts()
                 },
@@ -567,6 +589,7 @@ mod tests {
             let error = resolve_kind(
                 &Opts {
                     topic: kind.clone(),
+                    lookup: vec![Lookup::Relay],
                     relay_urls: urls.clone(),
                     ..opts()
                 },
@@ -596,7 +619,7 @@ mod tests {
         let (relayed, _) = resolve_kind(
             &Opts {
                 topic: Some("standup".to_owned()),
-                relay_transport: true,
+                transport: vec![Transport::P2p, Transport::Relay],
                 ..opts()
             },
             None,
@@ -613,25 +636,15 @@ mod tests {
     }
 
     #[test]
-    fn naming_one_leg_selects_only_that_leg() {
-        let (kind, _) = resolve_kind(
-            &Opts {
-                mdns: true,
-                ..opts()
-            },
-            None,
-        )
-        .expect("an mdns-only create resolves");
-        match kind {
-            SetupKind::Create { config, .. } => {
-                assert!(config.lookups.mdns);
-                assert!(!config.lookups.dht);
-                assert!(!config.lookups.is_loopback());
-            }
-            SetupKind::Join { .. } | SetupKind::Topic { .. } => {
-                panic!("no selector must resolve to SetupKind::Create")
-            }
-        }
+    fn naming_one_lookup_selects_only_that_one() {
+        let config = create_config(&Opts {
+            lookup: vec![Lookup::Mdns],
+            ..opts()
+        });
+        assert!(config.lookups.mdns);
+        assert!(!config.lookups.dht);
+        assert_eq!(config.lookups.relay_lookup, RelayChoice::Disabled);
+        assert!(!config.lookups.is_loopback());
     }
 }
 

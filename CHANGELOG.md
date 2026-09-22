@@ -14,9 +14,14 @@ published to a registry; pin it with
   with `packages/fofoca-wasm` as its JS backend and a driverless harness
   page. `cargo task wasm-peer` builds it.
 - A custom relay ladder (`relay_urls` / `relayUrls` / `--relay-url`) and the
-  per-node transport switches (`ip`, `webrtc`) on every create surface. The
-  ladder is mixed into a derived topic id, so every member must pass the
-  same list.
+  per-node path switches (`paths.ip`, `paths.webrtc`; `disable_ip` /
+  `disable_webrtc` in C) on every create surface. The ladder is mixed into a
+  derived topic id, so every member must pass the same list.
+- `fofoca_protocol::Lookup` and `Transport`, the entries of the `lookup` and
+  `transport` lists every create surface takes, with `LookupSet::from_lookups`,
+  `TransportPolicy::from_transports` and `MeshConfig::resolve` behind them, so
+  a consumer parses the two lists and applies the cross-rules with no code of
+  its own.
 - `cargo task e2e --suite mesh` and `--suite chat`: a real native peer and a
   real browser tab on a local plain-HTTP relay, swept over the relay policy,
   the native transport set and the join mode. Behind the `mesh` feature of
@@ -276,49 +281,28 @@ published to a registry; pin it with
 - **Breaking (C ABI):** `fofoca_frame` gained `seq` and grew from 80 to 88
   bytes. `fofoca_recv` writes it; a consumer compiled against the old header
   hands over a buffer eight bytes too small.
-- **Breaking (pipe wire):** a `pipe_data` body is now `<seq>:<base64>`, a
-  `pipe_eof` body carries the stream's frame count, and `pipe_ack` is a new
-  tag. Gossip keeps no order, so each frame names its position in its
-  (author, addressee) stream and receivers reorder (`fofoca_pipe::Streams`,
-  `Streams` in `fofoca-api`). A peer on the old wire drops the new frames as
-  undecodable, and vice versa. The frame budget shrank from 2112 to 2094
-  bytes to hold the prefix.
-- **Breaking (C ABI):** `fofoca_frame` gained `seq` and grew from 80 to 88
-  bytes. `fofoca_recv` writes it; a consumer compiled against the old header
-  hands over a buffer eight bytes too small.
-- **Breaking (pipe wire):** a `pipe_data` body is now `<seq>:<base64>`, a
-  `pipe_eof` body carries the stream's frame count, and `pipe_ack` is a new
-  tag. Gossip keeps no order, so each frame names its position in its
-  (author, addressee) stream and receivers reorder (`fofoca_pipe::Streams`,
-  `Streams` in `fofoca-api`). A peer on the old wire drops the new frames as
-  undecodable, and vice versa. The frame budget shrank from 2112 to 2094
-  bytes to hold the prefix.
-- **Breaking (C ABI):** `fofoca_frame` gained `seq` and grew from 80 to 88
-  bytes. `fofoca_recv` writes it; a consumer compiled against the old header
-  hands over a buffer eight bytes too small.
-- **Breaking (pipe wire):** a `pipe_data` body is now `<seq>:<base64>`, a
-  `pipe_eof` body carries the stream's frame count, and `pipe_ack` is a new
-  tag. Gossip keeps no order, so each frame names its position in its
-  (author, addressee) stream and receivers reorder (`fofoca_pipe::Streams`,
-  `Streams` in `fofoca-api`). A peer on the old wire drops the new frames as
-  undecodable, and vice versa. The frame budget shrank from 2112 to 2094
-  bytes to hold the prefix.
-- **Breaking (C ABI):** `fofoca_frame` gained `seq` and grew from 80 to 88
-  bytes. `fofoca_recv` writes it; a consumer compiled against the old header
-  hands over a buffer eight bytes too small.
-- **Breaking (C ABI):** `fofoca_opts` gained `relay_transport`,
-  `relay_urls`, `disable_ip` and `disable_webrtc`, and grew from 56 to 80
-  bytes. A consumer compiled against the old header keeps passing the old
-  struct and the engine reads past it — there is no version field to catch
-  that, so relink against the new `include/fofoca.h`. The layout is now
-  pinned by a compile-time assert in `fofoca-ffi` and by
-  `packages/fofoca-ffi`'s encoder test.
-- **Breaking:** the relay's two roles are named apart on every create
-  surface: `relay_lookup` (`relayLookup`, `--relay-lookup`) for the lookup,
-  `relay_transport` (`relayTransport`, `--relay-transport`) for the payload
-  fallback. The second needs the first; a config that sets it with the relay
-  disabled is rejected before any network. `TransportOpts.relay` keeps its
-  name — it is per-node capability, not the mesh policy.
+- **Breaking (C ABI):** `fofoca_opts` is now 72 bytes: the five discovery
+  ints (`is_public`, `mdns`, `dht`, `relay_lookup`, `relay_transport`) are
+  replaced by two comma-list strings, `lookup` and `transport`, ahead of
+  `relay_urls`, and `disable_ip` / `disable_webrtc` follow. A consumer
+  compiled against the old header keeps passing the old struct and the
+  engine reads it wrong — there is no version field to catch that, so relink
+  against the new `include/fofoca.h`. The layout is pinned by a compile-time
+  assert in `fofoca-ffi` and by `packages/fofoca-ffi`'s encoder test.
+- **Breaking:** every create surface names three mesh-wide choices apart,
+  one concept each. `lookup` (`lookup: ['mdns', 'dht', 'relay']`, any
+  subset) is how members find each other. `transport` (`['p2p']` or
+  `['p2p', 'relay']`) is what payload may ride. `relay_urls` is which relay.
+  The `public`, `mdns`, `dht`, `relay_lookup` and `relay_transport` booleans
+  are gone; `public: true` is spelled `lookup: ['mdns', 'dht', 'relay']`, and
+  naming no lookup is a loopback mesh. A ladder no longer implies the relay
+  lookup: both it and `'relay'` in `transport` need `'relay'` in `lookup`,
+  and a config that breaks either rule is rejected before any network. The
+  per-node switches are `paths` (was `transports`), so "transport" means
+  only the mesh-wide policy. In the wasm JSON every old field is an error,
+  not a silent no-op. `fofoca_protocol::resolve_lookups` lost its `public`
+  parameter. `TransportOpts.relay` keeps its name — it is per-node
+  capability, not the mesh policy.
 - `MeshConfig::validate` now also rejects a custom relay ladder that would
   not survive the wire (more than 16 rungs, or a URL over 512 bytes). A
   caller-supplied ladder reached the encoder unbounded before: past 255

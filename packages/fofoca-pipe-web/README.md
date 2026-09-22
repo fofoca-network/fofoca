@@ -38,7 +38,7 @@ Any static host serves it. Point the CLI at the host with `--web-url` or
 - `?nick=` — this peer's nickname.
 - `?relay=` — a custom relay URL (repeatable). With `topic` it is part of the
   derived id, so every member must pass the same.
-- `?relayTransport=1` — let payload fall back to the relay (same rule).
+- `?transport=p2p,relay` — let payload fall back to the relay (same rule).
 - `?log=` — an `EnvFilter` for the engine's tracing, to the console.
 
 ## WebMCP

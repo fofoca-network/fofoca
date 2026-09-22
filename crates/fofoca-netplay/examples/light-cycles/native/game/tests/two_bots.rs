@@ -132,17 +132,19 @@ async fn two_bots_play_a_match_and_agree_on_its_outcome() {
     );
 
     // They play it out. Two cycles turning across a small arena decide
-    // well inside the tick cap.
-    let decided = drive(&mut bots, Duration::from_secs(60), |bots| {
-        bots.iter()
-            .all(|bot| bot.game.outcome() != Outcome::InProgress)
+    // well inside the tick cap. Wait for agreement, not the first decided
+    // frame: a bot can reach an ending on a predicted input, and the
+    // rollback that corrects it waits for the real input to arrive.
+    let agreed = drive(&mut bots, Duration::from_secs(60), |bots| {
+        let first = bots[0].game.outcome();
+        first != Outcome::InProgress && bots.iter().all(|bot| bot.game.outcome() == first)
     })
     .await;
     assert!(
-        decided,
-        "the match never reached a decided outcome on both sides: {:?}",
+        agreed,
+        "the two bots never agreed on who won: {:?}",
         bots.iter()
-            .map(|bot| bot.game.snapshot().world.tick)
+            .map(|bot| (bot.game.outcome(), bot.game.snapshot().world.tick))
             .collect::<Vec<_>>()
     );
 
@@ -158,12 +160,6 @@ async fn two_bots_play_a_match_and_agree_on_its_outcome() {
         assert_eq!(snapshot.match_number, 1);
     }
 
-    // The actual claim under test.
-    assert_eq!(
-        bots[0].game.outcome(),
-        bots[1].game.outcome(),
-        "the two bots disagree about who won"
-    );
     assert!(
         bots.iter().all(|bot| !bot.game.snapshot().desynced),
         "a bot reported a state checksum that disagreed with its peer's"

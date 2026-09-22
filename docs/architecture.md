@@ -92,16 +92,16 @@ graph TD
     engine["fofoca<br>the engine"] --> doc["fofoca-doc<br>CRDT channels"]
     engine --> logging["fofoca-logging<br>tracing sink"]
     engine --> mh["fofoca-iroh-multihop-transport"]
+    engine --> webrtc["fofoca-iroh-webrtc-transport"]
     doc --> proto["fofoca-protocol<br>wire vocabulary"]
     logging --> proto
     proto --> util["fofoca-util<br>host helpers, constants"]
     chunks["fofoca-chunks<br>content-addressed chunks"]
-    webrtc["fofoca-iroh-webrtc-transport"]
 ```
 
 An arrow reads "depends on".
-`fofoca-chunks` and `fofoca-iroh-webrtc-transport` stand alone.
-The engine meets the WebRTC transport in a consumer, through injected transport handles (section 9).
+`fofoca-chunks` stands alone.
+The engine depends on `fofoca-iroh-webrtc-transport` on both targets: the `native` backend on a host, the `web` backend in a browser.
 
 | Crate | Role |
 |---|---|
@@ -436,9 +436,14 @@ A pair that cannot hole-punch and has no WebRTC session stays unlinked for paylo
 The policy is in the id so that every member enforces the same rule; one relaying member would undo the saving for everyone it links.
 An id minted before the policy existed keeps its bytes and topic and reads as lookup only.
 
-Every create surface names the relay's two roles apart: `relay_lookup` (`relayLookup` in JSON and TypeScript, `--relay-lookup` on a CLI) and `relay_transport` (`relayTransport`, `--relay-transport`).
-The second needs the first; a config that sets it with the relay disabled is rejected before any network, along with a custom ladder that would not survive the wire (`MeshConfig::validate`).
-Per-node capability is a different thing and stays out of the id: `TransportOpts` says whether *this* node has IP, WebRTC or a relay transport at all.
+Every create surface names three mesh-wide choices apart, because they are three concepts.
+`lookup` (`--lookup mdns,dht,relay` on a CLI, `lookup: ['relay']` in JSON and TypeScript) says how members find each other.
+`transport` (`--transport p2p,relay`, `transport: ['p2p', 'relay']`) says what payload may ride; `p2p` is always on.
+`relay_urls` (`--relay-url`, `relayUrls`) says which relay, and nothing about its role.
+`fofoca_protocol::Lookup` and `Transport` are the entries of the first two lists, and `MeshConfig::resolve` is the one place that knows all three.
+The two rules that need two of them live there and nowhere else: a ladder needs `relay` among the lookups, and so does letting the relay carry payload.
+A config that breaks either is rejected before any network, along with a custom ladder that would not survive the wire (`MeshConfig::validate`).
+Per-node capability is a different thing and stays out of the id: `TransportOpts` in the engine, `paths` on a create surface, says whether *this* node has IP, WebRTC or a relay transport at all.
 The policy is validated end to end by `cargo task e2e --suite mesh`: a real native peer and a real browser tab on a local relay, swept over the policy, the native transport set, and the join mode.
 
 ### 9.2 WebRTC transport
@@ -449,6 +454,10 @@ The channel is negotiated unreliable and unordered, because QUIC above it owns l
 One crate holds two mutually exclusive backends over one shared protocol half.
 The `native` backend drives sans-io str0m on tokio and gathers STUN candidates itself.
 The `web` backend uses the `RTCPeerConnection` of the browser.
+
+The engine opens a WebRTC session for a pair only when one end or both ends advertise no IP address, as a browser does (`transport::webrtc::needs_webrtc_lane`).
+Two native peers stay on iroh QUIC, because it is faster (section 11).
+The session must exist before the gossip graft, because iroh cannot move a live connection to a transport that attaches later.
 
 Signaling is vanilla ICE, with no trickle.
 Candidates ride inside the SDP, so gathering completes before an envelope goes out.

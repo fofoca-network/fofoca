@@ -2,16 +2,12 @@
 //! switches that are this binary's own.
 
 use clap::Parser;
-use fofoca_pipe::Opts;
+use fofoca_pipe::{Lookup, Opts, Transport};
 
 /// Pipe bytes through a fofoca mesh: stdin goes out, what peers send comes to
 /// stdout.
 #[derive(Debug, Parser)]
 #[command(name = "fofoca-pipe", version)]
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "command-line switches: each is an independent flag, not a state to model as an enum"
-)]
 pub(crate) struct Args {
     /// A shared string every member derives the same public mesh from.
     #[arg(long, conflicts_with = "mesh")]
@@ -26,19 +22,14 @@ pub(crate) struct Args {
     /// every member must pass the same list.
     #[arg(long = "relay-url", value_name = "URL")]
     pub relay_urls: Vec<String>,
-    /// Let payload fall back to the relay. Part of the mesh id.
-    #[arg(long)]
-    pub relay_transport: bool,
-    /// Create a public mesh (mDNS, DHT and the relay ladder). The default
-    /// when no selector and no other discovery switch is given.
-    #[arg(long)]
-    pub public: bool,
-    /// Create a mesh discoverable over mDNS.
-    #[arg(long)]
-    pub mdns: bool,
-    /// Create a mesh discoverable over the mainline DHT.
-    #[arg(long)]
-    pub dht: bool,
+    /// How members find each other, any of `mdns,dht,relay`. A created mesh
+    /// uses all three when none is named.
+    #[arg(long, value_delimiter = ',')]
+    pub lookup: Vec<Lookup>,
+    /// What may carry payload: `p2p`, or `p2p,relay` to let it fall back to
+    /// the relay. Part of the mesh id.
+    #[arg(long, value_delimiter = ',')]
+    pub transport: Vec<Transport>,
     /// The web page's address. Printed with the mesh in its fragment as the
     /// URL to open.
     #[arg(long, env = "FOFOCA_PIPE_WEB", value_name = "URL")]
@@ -57,20 +48,22 @@ pub(crate) struct Args {
 }
 
 impl Args {
-    /// The pipe's options. With no selector and no discovery switch the mesh
-    /// is public: a bare `fofoca-pipe` must be reachable by the tab it prints
-    /// the URL for, and a loopback mesh is not.
+    /// The pipe's options. With no selector and no lookup named, the mesh
+    /// uses every lookup: a bare `fofoca-pipe` must be reachable by the tab it
+    /// prints the URL for, and a loopback mesh is not.
     pub(crate) fn opts(&self) -> Opts {
         let selected = self.topic.is_some() || self.mesh.is_some();
-        let discovery = self.mdns || self.dht || !self.relay_urls.is_empty();
+        let lookup = if selected || !self.lookup.is_empty() {
+            self.lookup.clone()
+        } else {
+            vec![Lookup::Mdns, Lookup::Dht, Lookup::Relay]
+        };
         Opts {
             mesh: self.mesh.clone(),
             topic: self.topic.clone(),
             nick: self.nick.clone(),
-            public: self.public || (!selected && !discovery),
-            mdns: self.mdns,
-            dht: self.dht,
-            relay_transport: self.relay_transport,
+            lookup,
+            transport: self.transport.clone(),
             relay_urls: self.relay_urls.clone(),
             ..Opts::default()
         }
@@ -114,23 +107,29 @@ mod tests {
     }
 
     #[test]
-    fn a_bare_invocation_creates_a_public_mesh() {
+    fn a_bare_invocation_creates_a_mesh_with_every_lookup() {
         let opts = parse(&[]).opts();
-        assert!(opts.public);
+        assert_eq!(opts.lookup, vec![Lookup::Mdns, Lookup::Dht, Lookup::Relay]);
         assert!(opts.mesh.is_none() && opts.topic.is_none());
     }
 
     #[test]
-    fn a_selector_or_a_discovery_switch_turns_the_default_off() {
-        assert!(!parse(&["--mesh", "abc"]).opts().public);
-        assert!(!parse(&["--topic", "room"]).opts().public);
-        assert!(
-            !parse(&["--relay-url", "http://127.0.0.1:3340/"])
-                .opts()
-                .public
+    fn a_selector_or_a_named_lookup_turns_the_default_off() {
+        assert!(parse(&["--mesh", "abc"]).opts().lookup.is_empty());
+        assert!(parse(&["--topic", "room"]).opts().lookup.is_empty());
+        assert_eq!(
+            parse(&["--lookup", "mdns,relay"]).opts().lookup,
+            vec![Lookup::Mdns, Lookup::Relay]
         );
-        assert!(!parse(&["--mdns"]).opts().public);
-        assert!(parse(&["--mdns", "--public"]).opts().public);
+    }
+
+    #[test]
+    fn transport_is_a_comma_list() {
+        assert_eq!(
+            parse(&["--transport", "p2p,relay"]).opts().transport,
+            vec![Transport::P2p, Transport::Relay]
+        );
+        assert!(Args::try_parse_from(["fofoca-pipe", "--lookup", "public"]).is_err());
     }
 
     #[test]

@@ -1,16 +1,19 @@
-//! The mesh-wide config carried in the mesh id — the lookup
-//! allowlist (`mdns`/`dht`/`relay`) — plus its byte codec and the
-//! `--advertise` directory selection. A mesh's network reach is fully
-//! described by its lookups: no lookups means loopback-only; any lookup
-//! means reachable across machines.
+//! The mesh-wide config carried in the mesh id — the lookup allowlist
+//! (`mdns`/`dht`/`relay`) and the relay ladder it may carry — plus its byte
+//! codec and the `--advertise` directory selection. A mesh's network reach is
+//! fully described by its lookups: no lookups means loopback-only; any lookup
+//! means reachable across machines. The transport policy the id also carries
+//! is `transport.rs`; [`MeshConfig`] is where the two meet.
 
 use std::fmt;
 use std::str::FromStr;
 
 use anyhow::{Context, Result, bail};
 use iroh_base::RelayUrl;
+use serde::Deserialize;
 
-use super::MeshName;
+use super::transport::{Transport, TransportPolicy};
+use super::{ChoiceError, MeshName};
 use crate::crypto::PASSWORD_VERIFIER_LEN;
 
 /// The connectivity relay. `Disabled` ⇒ no relay at all
@@ -235,24 +238,6 @@ const FEATURE_RELAY_TRANSPORT: u8 = 0b0100;
 
 const KNOWN_FEATURES: u8 = FEATURE_PASSWORD | FEATURE_INVITE_ONLY | FEATURE_RELAY_TRANSPORT;
 
-/// Which transports may carry mesh **payload**, baked into the mesh id beside
-/// [`LookupOpts`]. Lookups say how members find each other; this says what
-/// their traffic may ride once they have. Only mesh-wide policy lives here —
-/// what a given node *can* do (`ip`, `webrtc`, `multihop`) is per node, in the
-/// engine's `TransportOpts`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct TransportPolicy {
-    /// Whether the iroh relay may carry payload. Off by default: the relay is
-    /// kept for lookup alone — the bootstrap dial, JSEP signalling and the
-    /// NAT-traversal frames of a freshly opened connection still cross it —
-    /// and every payload lane refuses to send while the relay is the only
-    /// path to a peer. A pair that cannot hole-punch and has no `WebRTC`
-    /// session stays unlinked for payload rather than relayed. `true` lets
-    /// payload fall back to the relay; meaningless without a relay lookup, so
-    /// rejected together with [`RelayChoice::Disabled`].
-    pub relay_transport: bool,
-}
-
 /// Byte length of the Ed25519 issuer public key an invite-only mesh carries.
 const ISSUER_PUBKEY_LEN: usize = 32;
 
@@ -317,10 +302,38 @@ impl MeshConfig {
         self.lookups.validate()?;
         if self.transport.relay_transport && self.lookups.relay_lookup == RelayChoice::Disabled {
             bail!(
-                "transport.relay_transport=on needs a relay lookup: with the relay disabled there is none to carry payload"
+                "transport `relay` needs lookup `relay`: with the relay disabled there is none to carry payload"
             );
         }
         Ok(())
+    }
+
+    /// The config a create names, from its three independent choices: the
+    /// lookups, the relay ladder, and the transports. Password and invite
+    /// stay unset; a caller that wants them fills those fields in.
+    ///
+    /// This is the one place that knows all three, so the rules that need two
+    /// of them live here and nowhere else: a ladder needs `relay` among the
+    /// lookups (through [`LookupSet::from_lookups`]), and so does letting the
+    /// relay carry payload (through [`MeshConfig::validate`]).
+    ///
+    /// # Errors
+    /// `relay_urls` is given without [`Lookup::Relay`], `transports` leaves
+    /// [`Transport::P2p`] out, or `transports` names [`Transport::Relay`]
+    /// while no relay lookup is on.
+    pub fn resolve(
+        lookups: &[Lookup],
+        relay_urls: Option<RelayLadder>,
+        transports: &[Transport],
+    ) -> Result<Self> {
+        let config = MeshConfig {
+            lookups: resolve_lookups(LookupSet::from_lookups(lookups, relay_urls)?),
+            password: None,
+            issuer_pubkey: None,
+            transport: TransportPolicy::from_transports(transports)?,
+        };
+        config.validate()?;
+        Ok(config)
     }
 
     /// Canonical wire bytes: `[lookups…][if password: feature-flags u8 ‖
@@ -549,9 +562,57 @@ pub fn validate_advertise(
     Ok(())
 }
 
-/// The lookup flags the user selected on the CLI. `mdns`/`dht` are
-/// address-lookups; `relay_lookup` is the connectivity/relay-direct rendezvous
-/// path.
+/// One way a mesh's members find each other — an entry of the `lookup` list
+/// a create names. Naming any restricts the mesh to exactly those; naming
+/// none is a loopback-only mesh.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Lookup {
+    /// LAN mDNS multicast.
+    Mdns,
+    /// The mainline `BitTorrent` DHT.
+    Dht,
+    /// Rendezvous through a relay server. A lookup only: whether the relay
+    /// may also carry payload is the transport policy's call.
+    Relay,
+}
+
+impl Lookup {
+    const NAMES: &[&str] = &["mdns", "dht", "relay"];
+
+    /// The name the list spells this lookup by.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Mdns => "mdns",
+            Self::Dht => "dht",
+            Self::Relay => "relay",
+        }
+    }
+}
+
+impl FromStr for Lookup {
+    type Err = ChoiceError;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        match text {
+            "mdns" => Ok(Self::Mdns),
+            "dht" => Ok(Self::Dht),
+            "relay" => Ok(Self::Relay),
+            other => Err(ChoiceError::new("lookup", other, Self::NAMES)),
+        }
+    }
+}
+
+impl fmt::Display for Lookup {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// The lookups a create selected, before they become the [`LookupOpts`] in
+/// the id. `mdns`/`dht` are address-lookups; `relay_lookup` is the
+/// rendezvous through a relay, bare or with a custom ladder.
 #[derive(Debug, Clone, Default)]
 pub struct LookupSet {
     pub mdns: bool,
@@ -560,34 +621,52 @@ pub struct LookupSet {
 }
 
 impl LookupSet {
+    /// The set a `lookup` list names, with `relay_urls` as the ladder the
+    /// relay lookup homes on (`None` ⇒ the pinned default).
+    ///
+    /// # Errors
+    /// `relay_urls` is given but `lookups` does not name [`Lookup::Relay`]:
+    /// a ladder says *which* relay, and only a relay lookup uses one.
+    pub fn from_lookups(lookups: &[Lookup], relay_urls: Option<RelayLadder>) -> Result<Self> {
+        let relay = lookups.contains(&Lookup::Relay);
+        if relay_urls.is_some() && !relay {
+            bail!("a relay ladder needs lookup `relay`");
+        }
+        let relay_lookup = if relay {
+            relay_urls.map_or(RelaySelection::Default, RelaySelection::Named)
+        } else {
+            RelaySelection::Unset
+        };
+        Ok(Self {
+            mdns: lookups.contains(&Lookup::Mdns),
+            dht: lookups.contains(&Lookup::Dht),
+            relay_lookup,
+        })
+    }
+
     fn any(&self) -> bool {
         self.mdns || self.dht || self.relay_lookup.is_set()
     }
 }
 
-/// Resolve the CLI inputs into the effective [`LookupOpts`] baked into
-/// the mesh id. Naming **any** lookup flag uses *only* those passed (so
-/// `--mdns` alone is mDNS-only, relay/dht off); naming **none** but
-/// passing `--public` enables the all-on preset; naming nothing at all is
-/// a loopback-only mesh. `--relay` bare ⇒ pinned default, `--relay
-/// <url>` ⇒ custom ladder.
+/// Resolve a selection into the effective [`LookupOpts`] baked into the mesh
+/// id. Naming **any** lookup uses *only* those named (so `mdns` alone is
+/// mDNS-only, relay/dht off); naming none is a loopback-only mesh. A bare
+/// relay ⇒ the pinned default ladder, a named one ⇒ that custom ladder.
 #[must_use]
-pub fn resolve_lookups(public: bool, lookups: LookupSet) -> LookupOpts {
-    if lookups.any() {
-        let relay_lookup = match lookups.relay_lookup {
-            RelaySelection::Unset => RelayChoice::Disabled,
-            RelaySelection::Default => RelayChoice::Pinned,
-            RelaySelection::Named(ladder) => RelayChoice::Custom(ladder.as_urls().to_vec()),
-        };
-        LookupOpts {
-            mdns: lookups.mdns,
-            dht: lookups.dht,
-            relay_lookup,
-        }
-    } else if public {
-        LookupOpts::public_preset()
-    } else {
-        LookupOpts::loopback()
+pub fn resolve_lookups(lookups: LookupSet) -> LookupOpts {
+    if !lookups.any() {
+        return LookupOpts::loopback();
+    }
+    let relay_lookup = match lookups.relay_lookup {
+        RelaySelection::Unset => RelayChoice::Disabled,
+        RelaySelection::Default => RelayChoice::Pinned,
+        RelaySelection::Named(ladder) => RelayChoice::Custom(ladder.as_urls().to_vec()),
+    };
+    LookupOpts {
+        mdns: lookups.mdns,
+        dht: lookups.dht,
+        relay_lookup,
     }
 }
 
@@ -718,11 +797,11 @@ mod lookup_tests {
     }
 
     #[test]
-    fn naming_relay_enables_it_without_public() {
-        // Granular model: naming any lookup uses only those, regardless of
-        // `public`. A relay alone yields a reachable (non-loopback) mesh.
+    fn naming_relay_alone_is_reachable() {
+        // Naming any lookup uses only those. A relay alone yields a reachable
+        // (non-loopback) mesh.
         let ladder: RelayLadder = "https://a.example".parse().unwrap();
-        let opts = resolve_lookups(false, lookups(false, false, RelaySelection::Named(ladder)));
+        let opts = resolve_lookups(lookups(false, false, RelaySelection::Named(ladder)));
         assert!(!opts.mdns && !opts.dht);
         assert!(
             !opts.is_loopback(),
@@ -732,27 +811,8 @@ mod lookup_tests {
     }
 
     #[test]
-    fn public_no_flags_enables_all_three() {
-        let opts = resolve_lookups(true, LookupSet::default());
-        assert!(opts.mdns && opts.dht);
-        assert_eq!(
-            opts.relay_lookup,
-            RelayChoice::Pinned,
-            "preset ⇒ pinned relay"
-        );
-        assert!(!opts.is_loopback());
-    }
-
-    #[test]
-    fn no_public_no_flags_is_loopback() {
-        let opts = resolve_lookups(false, LookupSet::default());
-        assert!(opts.is_loopback());
-        assert_eq!(opts.network_label(), "private");
-    }
-
-    #[test]
     fn mdns_alone_disables_dht_and_relay() {
-        let opts = resolve_lookups(false, lookups(true, false, RelaySelection::Unset));
+        let opts = resolve_lookups(lookups(true, false, RelaySelection::Unset));
         assert!(opts.mdns && !opts.dht);
         assert_eq!(
             opts.relay_lookup,
@@ -764,7 +824,7 @@ mod lookup_tests {
 
     #[test]
     fn bare_relay_is_pinned_and_suppresses_lookups() {
-        let opts = resolve_lookups(false, lookups(false, false, RelaySelection::Default));
+        let opts = resolve_lookups(lookups(false, false, RelaySelection::Default));
         assert!(!opts.mdns && !opts.dht);
         assert_eq!(opts.relay_lookup, RelayChoice::Pinned);
     }
@@ -774,7 +834,7 @@ mod lookup_tests {
         let rung0: iroh_base::RelayUrl = "https://a.example".parse().unwrap();
         let rung1: iroh_base::RelayUrl = "https://b.example".parse().unwrap();
         let ladder: RelayLadder = "https://a.example,https://b.example".parse().unwrap();
-        let opts = resolve_lookups(false, lookups(false, false, RelaySelection::Named(ladder)));
+        let opts = resolve_lookups(lookups(false, false, RelaySelection::Named(ladder)));
         assert_eq!(opts.relay_lookup, RelayChoice::Custom(vec![rung0, rung1]));
     }
 
@@ -974,3 +1034,147 @@ mod lookup_tests {
 #[cfg(test)]
 #[path = "lookup_tests.rs"]
 mod directory_selection_tests;
+
+#[cfg(test)]
+mod choice_tests {
+    use super::{
+        Lookup, LookupSet, MeshConfig, RelayChoice, RelayLadder, RelaySelection, Transport,
+        TransportPolicy, resolve_lookups,
+    };
+
+    #[test]
+    fn a_lookup_and_a_transport_parse_from_their_names() {
+        assert_eq!("mdns".parse::<Lookup>().unwrap(), Lookup::Mdns);
+        assert_eq!("dht".parse::<Lookup>().unwrap(), Lookup::Dht);
+        assert_eq!("relay".parse::<Lookup>().unwrap(), Lookup::Relay);
+        assert_eq!("p2p".parse::<Transport>().unwrap(), Transport::P2p);
+        assert_eq!("relay".parse::<Transport>().unwrap(), Transport::Relay);
+        for (name, lookup) in [
+            ("mdns", Lookup::Mdns),
+            ("dht", Lookup::Dht),
+            ("relay", Lookup::Relay),
+        ] {
+            assert_eq!(lookup.to_string(), name);
+        }
+        assert_eq!(Transport::P2p.to_string(), "p2p");
+    }
+
+    #[test]
+    fn an_unknown_name_is_an_error_that_lists_the_choices() {
+        let error = "relai".parse::<Lookup>().unwrap_err().to_string();
+        assert!(
+            error.contains("relai") && error.contains("mdns, dht, relay"),
+            "{error}"
+        );
+        let transport_error = "webrtc".parse::<Transport>().unwrap_err().to_string();
+        assert!(
+            transport_error.contains("webrtc") && transport_error.contains("p2p, relay"),
+            "{transport_error}"
+        );
+    }
+
+    #[test]
+    fn the_lists_deserialize_from_json_names() {
+        let lookups: Vec<Lookup> = serde_json::from_str(r#"["mdns","relay"]"#).unwrap();
+        assert_eq!(lookups, vec![Lookup::Mdns, Lookup::Relay]);
+        let transports: Vec<Transport> = serde_json::from_str(r#"["p2p","relay"]"#).unwrap();
+        assert_eq!(transports, vec![Transport::P2p, Transport::Relay]);
+        assert!(serde_json::from_str::<Vec<Lookup>>(r#"["public"]"#).is_err());
+    }
+
+    #[test]
+    fn a_lookup_list_becomes_the_set_of_exactly_those() {
+        let set = LookupSet::from_lookups(&[Lookup::Mdns], None).unwrap();
+        assert!(set.mdns && !set.dht);
+        assert_eq!(set.relay_lookup, RelaySelection::Unset);
+        let opts = resolve_lookups(set);
+        assert!(opts.mdns && !opts.dht);
+        assert_eq!(opts.relay_lookup, RelayChoice::Disabled);
+    }
+
+    #[test]
+    fn naming_relay_takes_the_default_ladder_unless_one_is_given() {
+        let bare = LookupSet::from_lookups(&[Lookup::Relay], None).unwrap();
+        assert_eq!(bare.relay_lookup, RelaySelection::Default);
+        let ladder: RelayLadder = "https://a.example,https://b.example".parse().unwrap();
+        let custom = LookupSet::from_lookups(&[Lookup::Relay], Some(ladder.clone())).unwrap();
+        assert_eq!(custom.relay_lookup, RelaySelection::Named(ladder));
+    }
+
+    #[test]
+    fn a_ladder_without_the_relay_lookup_is_an_error() {
+        let ladder: RelayLadder = "https://a.example".parse().unwrap();
+        let error = LookupSet::from_lookups(&[Lookup::Mdns], Some(ladder))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("relay"), "{error}");
+    }
+
+    #[test]
+    fn an_empty_transport_list_and_p2p_alone_keep_the_relay_off_payload() {
+        assert_eq!(
+            TransportPolicy::from_transports(&[]).unwrap(),
+            TransportPolicy::default()
+        );
+        assert!(
+            !TransportPolicy::from_transports(&[Transport::P2p])
+                .unwrap()
+                .relay_transport
+        );
+        assert!(
+            TransportPolicy::from_transports(&[Transport::P2p, Transport::Relay])
+                .unwrap()
+                .relay_transport
+        );
+    }
+
+    #[test]
+    fn p2p_cannot_be_disabled() {
+        let error = TransportPolicy::from_transports(&[Transport::Relay])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("p2p"), "{error}");
+    }
+
+    #[test]
+    fn a_config_resolves_from_the_three_choices() {
+        let config =
+            MeshConfig::resolve(&[Lookup::Relay], None, &[Transport::P2p, Transport::Relay])
+                .unwrap();
+        assert!(config.transport.relay_transport);
+        assert_eq!(config.lookups.relay_lookup, RelayChoice::Pinned);
+        assert!(config.password.is_none() && config.issuer_pubkey.is_none());
+
+        let bare = MeshConfig::resolve(&[], None, &[]).unwrap();
+        assert!(bare.lookups.is_loopback());
+        assert!(!bare.transport.relay_transport);
+    }
+
+    /// The relay's two roles are two lists, so the relay can serve lookup
+    /// alone: named in `lookup` and not in `transport`, it is the rendezvous
+    /// and carries no payload. That is also what an empty `transport` means.
+    #[test]
+    fn relay_can_be_a_lookup_and_nothing_more() {
+        for transports in [&[][..], &[Transport::P2p][..]] {
+            let config = MeshConfig::resolve(&[Lookup::Relay], None, transports).unwrap();
+            assert_eq!(config.lookups.relay_lookup, RelayChoice::Pinned);
+            assert!(!config.transport.relay_transport, "{transports:?}");
+            assert_eq!(config, MeshConfig::from_bytes(&config.to_bytes()).unwrap());
+        }
+    }
+
+    #[test]
+    fn relay_transport_needs_the_relay_lookup() {
+        let error = MeshConfig::resolve(&[Lookup::Mdns], None, &[Transport::P2p, Transport::Relay])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("relay"), "{error}");
+    }
+
+    #[test]
+    fn no_lookups_is_loopback_without_a_preset_switch() {
+        let opts = resolve_lookups(LookupSet::default());
+        assert!(opts.is_loopback());
+        assert_eq!(opts.network_label(), "private");
+    }
+}

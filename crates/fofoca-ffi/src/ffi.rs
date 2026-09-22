@@ -40,13 +40,12 @@ pub struct FofocaOpts {
     pub topic: *const c_char,
     pub nick: *const c_char,
     pub name: *const c_char,
-    pub is_public: c_int,
-    pub mdns: c_int,
-    pub dht: c_int,
-    /// The relay as a lookup.
-    pub relay_lookup: c_int,
-    /// The relay as a transport; off keeps all data peer to peer.
-    pub relay_transport: c_int,
+    /// Comma-separated lookups, any of `mdns`, `dht`, `relay`; NULL ⇒ none
+    /// (a loopback mesh on create).
+    pub lookup: *const c_char,
+    /// Comma-separated transports, `p2p` or `p2p,relay`; NULL ⇒ `p2p`, so
+    /// all data stays peer to peer.
+    pub transport: *const c_char,
     /// Comma-separated custom relay ladder; NULL ⇒ the default ladder.
     pub relay_urls: *const c_char,
     /// Nonzero disables direct UDP / hole-punched paths.
@@ -69,21 +68,18 @@ pub struct FofocaOpts {
 const _: () = {
     use std::mem::{align_of, offset_of, size_of};
 
-    assert!(size_of::<FofocaOpts>() == 80, "opts-struct.ts OPTS_BYTES");
+    assert!(size_of::<FofocaOpts>() == 72, "opts-struct.ts OPTS_BYTES");
     assert!(align_of::<FofocaOpts>() == 8);
     assert!(offset_of!(FofocaOpts, mesh) == 0);
     assert!(offset_of!(FofocaOpts, topic) == 8);
     assert!(offset_of!(FofocaOpts, nick) == 16);
     assert!(offset_of!(FofocaOpts, name) == 24);
-    assert!(offset_of!(FofocaOpts, is_public) == 32);
-    assert!(offset_of!(FofocaOpts, mdns) == 36);
-    assert!(offset_of!(FofocaOpts, dht) == 40);
-    assert!(offset_of!(FofocaOpts, relay_lookup) == 44);
-    assert!(offset_of!(FofocaOpts, relay_transport) == 48);
-    assert!(offset_of!(FofocaOpts, relay_urls) == 56);
-    assert!(offset_of!(FofocaOpts, disable_ip) == 64);
-    assert!(offset_of!(FofocaOpts, disable_webrtc) == 68);
-    assert!(offset_of!(FofocaOpts, max_peers) == 72);
+    assert!(offset_of!(FofocaOpts, lookup) == 32);
+    assert!(offset_of!(FofocaOpts, transport) == 40);
+    assert!(offset_of!(FofocaOpts, relay_urls) == 48);
+    assert!(offset_of!(FofocaOpts, disable_ip) == 56);
+    assert!(offset_of!(FofocaOpts, disable_webrtc) == 60);
+    assert!(offset_of!(FofocaOpts, max_peers) == 64);
 };
 
 /// One received frame's metadata, mirroring `fofoca_frame` in the header. The
@@ -213,6 +209,25 @@ unsafe fn optional_str(ptr: *const c_char) -> Result<Option<&'static str>, ()> {
     }
 }
 
+/// Split a comma-separated C list into its parsed entries. NULL and the empty
+/// string are the empty list; a name that is not one of the type's choices
+/// puts that type's own message (`unknown lookup ...`) in the error slot.
+fn comma_list<T: std::str::FromStr>(text: Option<&str>) -> Result<Vec<T>, ()>
+where
+    T::Err: std::fmt::Display,
+{
+    text.unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| {
+            entry.parse::<T>().map_err(|error| {
+                set_error(&error.to_string());
+            })
+        })
+        .collect()
+}
+
 /// Copy `text` into a caller buffer, NUL-terminating it. Returns the length
 /// `text` needs (excluding the NUL); when that does not fit in `cap` nothing is
 /// written and the caller retries with a bigger buffer.
@@ -275,8 +290,19 @@ pub unsafe extern "C" fn fofoca_open(opts: *const FofocaOpts) -> *mut FofocaPipe
         let (Ok(mesh), Ok(topic), Ok(nick), Ok(name)) = strings else {
             return std::ptr::null_mut();
         };
-        // SAFETY: NUL-terminated or NULL, per the header contract.
-        let Ok(relay_urls) = (unsafe { optional_str(opts.relay_urls) }) else {
+        // SAFETY: NUL-terminated or NULL, per the header contract, for each
+        // of the three comma lists.
+        let lists = unsafe {
+            (
+                optional_str(opts.lookup),
+                optional_str(opts.transport),
+                optional_str(opts.relay_urls),
+            )
+        };
+        let (Ok(lookup), Ok(transport), Ok(relay_urls)) = lists else {
+            return std::ptr::null_mut();
+        };
+        let (Ok(lookup), Ok(transport)) = (comma_list(lookup), comma_list(transport)) else {
             return std::ptr::null_mut();
         };
         let relay_urls: Vec<String> = relay_urls
@@ -287,13 +313,10 @@ pub unsafe extern "C" fn fofoca_open(opts: *const FofocaOpts) -> *mut FofocaPipe
             topic: topic.map(str::to_owned),
             nick: nick.map(str::to_owned),
             name: name.map(str::to_owned),
-            public: opts.is_public != 0,
-            mdns: opts.mdns != 0,
-            dht: opts.dht != 0,
-            relay_lookup: opts.relay_lookup != 0,
-            relay_transport: opts.relay_transport != 0,
+            lookup,
+            transport,
             relay_urls,
-            transports: fofoca_pipe::TransportFlags {
+            paths: fofoca_pipe::PathFlags {
                 ip: opts.disable_ip == 0,
                 webrtc: opts.disable_webrtc == 0,
             },

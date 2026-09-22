@@ -9,8 +9,8 @@
  * - `nick` — this peer's nickname.
  * - `relay` — a custom relay URL (repeatable); with `topic` it is part of
  *   the derived id, so the native side must pass the same.
- * - `relayTransport=1` — let payload fall back to the relay (id-changing,
- *   same rule).
+ * - `transport` — what payload may ride, `p2p` (the default) or
+ *   `p2p,relay` (id-changing, same rule).
  * - `log` — an `EnvFilter` for the engine's tracing, to the console.
  *
  * DOM contract (what a driver asserts on):
@@ -26,7 +26,7 @@
  */
 
 import { join } from '../src/index.ts'
-import type { Mesh } from '../src/index.ts'
+import type { Mesh, Transport } from '../src/index.ts'
 
 declare global {
   interface Window {
@@ -110,6 +110,9 @@ async function main(): Promise<void> {
   const id = params.get('mesh')
   const nick = params.get('nick')
   const relayUrls = params.getAll('relay')
+  // Passed through as typed: a name that is not a transport is the engine's
+  // error to raise, and it names the choices.
+  const transport = params.get('transport')?.split(',') as Transport[] | undefined
 
   let mesh: Mesh
   try {
@@ -117,7 +120,7 @@ async function main(): Promise<void> {
       ...(topic === null ? {} : { topic }),
       ...(id === null ? {} : { id }),
       ...(nick === null ? {} : { nick }),
-      relayTransport: params.get('relayTransport') === '1',
+      ...(transport === undefined ? {} : { transport }),
       relayUrls,
       log: params.get('log') ?? 'info',
     })

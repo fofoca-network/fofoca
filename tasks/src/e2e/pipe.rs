@@ -62,6 +62,8 @@ impl Cli {
             .args([
                 "--nick",
                 "terminal",
+                "--lookup",
+                "relay",
                 "--relay-url",
                 relay_url,
                 "--web-url",

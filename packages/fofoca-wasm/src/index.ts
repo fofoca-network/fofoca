@@ -40,7 +40,7 @@ export async function join(opts: JoinOpts & WasmOpts): Promise<Mesh> {
       mesh: opts.id,
       topic: opts.topic,
       nick: opts.nick,
-      relayTransport: opts.relayTransport ?? false,
+      transport: opts.transport ?? [],
       relayUrls: opts.relayUrls ?? [],
       maxPeers: opts.maxPeers ?? 0,
     },
@@ -49,19 +49,16 @@ export async function join(opts: JoinOpts & WasmOpts): Promise<Mesh> {
 }
 
 /** Create a new mesh. `create({})` is refused in a browser: a loopback mesh
- * is unreachable from a tab — pass `public: true` or name the legs. */
+ * is unreachable from a tab — name a lookup (`['relay']` at least). */
 export async function create(opts: CreateOpts & WasmOpts): Promise<Mesh> {
   return open(
     {
       name: opts.name,
       nick: opts.nick,
-      public: opts.public ?? false,
-      mdns: opts.mdns ?? false,
-      dht: opts.dht ?? false,
-      relayLookup: opts.relayLookup ?? false,
-      relayTransport: opts.relayTransport ?? false,
+      lookup: opts.lookup ?? [],
+      transport: opts.transport ?? [],
       relayUrls: opts.relayUrls ?? [],
-      transports: opts.transports ?? {},
+      paths: opts.paths ?? {},
       maxPeers: opts.maxPeers ?? 0,
     },
     opts,

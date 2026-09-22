@@ -10,12 +10,14 @@ export type {
   CreateOpts,
   JoinOpts,
   Lane,
+  Lookup,
   Mesh,
   MeshEvent,
   Message,
   Peer,
   Reach,
   StateDoc,
+  Transport,
 } from './types.ts'
 
 export { randomNick, randomTopic } from './random.ts'

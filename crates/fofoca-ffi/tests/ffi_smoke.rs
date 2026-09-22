@@ -27,11 +27,8 @@ fn create_opts(nick: &CStr) -> FofocaOpts {
         topic: std::ptr::null(),
         nick: nick.as_ptr(),
         name: std::ptr::null(),
-        is_public: 0,
-        mdns: 0,
-        dht: 0,
-        relay_lookup: 0,
-        relay_transport: 0,
+        lookup: std::ptr::null(),
+        transport: std::ptr::null(),
         relay_urls: std::ptr::null(),
         disable_ip: 0,
         disable_webrtc: 0,
@@ -320,11 +317,8 @@ fn create_opts_for_join(id: &CStr, nick: &CStr) -> FofocaOpts {
         topic: std::ptr::null(),
         nick: nick.as_ptr(),
         name: std::ptr::null(),
-        is_public: 0,
-        mdns: 0,
-        dht: 0,
-        relay_lookup: 0,
-        relay_transport: 0,
+        lookup: std::ptr::null(),
+        transport: std::ptr::null(),
         relay_urls: std::ptr::null(),
         disable_ip: 0,
         disable_webrtc: 0,
@@ -338,11 +332,8 @@ fn four_peers_converge(public: bool) {
     let creator_nick = CString::new("p0").expect("no interior NUL");
     let mut opts = create_opts(&creator_nick);
     if public {
-        // Match mallorca's default create-room discovery flags.
-        opts.is_public = 1;
-        opts.mdns = 1;
-        opts.dht = 1;
-        opts.relay_lookup = 1;
+        // Match mallorca's default create-room lookups.
+        opts.lookup = c"mdns,dht,relay".as_ptr();
     }
     let creator = open(&opts);
     assert!(

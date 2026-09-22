@@ -10,8 +10,8 @@
  * - `?nick=` — this peer's nickname.
  * - `?relay=` — a custom relay URL (repeatable); with `topic` it is part of
  *   the derived id, so every member must pass the same.
- * - `?relayTransport=1` — let payload fall back to the relay (id-changing,
- *   same rule).
+ * - `?transport=p2p,relay` — let payload fall back to the relay
+ *   (id-changing, same rule).
  * - `?log=` — an `EnvFilter` for the engine's tracing, to the console.
  *
  * DOM contract (what the driver — or a person — reads):
@@ -31,7 +31,7 @@
  * - `window.pipe` — the runtime's methods, promise-returning where they are.
  */
 
-import type { Mesh } from 'fofoca-wasm'
+import type { Mesh, Transport } from 'fofoca-wasm'
 import { join } from 'fofoca-wasm'
 
 import type { Pending, ViewKey } from './render.ts'
@@ -138,13 +138,16 @@ function selectors(): { id?: string; topic?: string } {
 async function main(): Promise<void> {
   const params = new URLSearchParams(window.location.search)
   const nick = params.get('nick')
+  // Passed through as typed: a name that is not a transport is the engine's
+  // error to raise, and it names the choices.
+  const transport = params.get('transport')?.split(',') as Transport[] | undefined
 
   let mesh: Mesh
   try {
     mesh = await join({
       ...selectors(),
       ...(nick === null ? {} : { nick }),
-      relayTransport: params.get('relayTransport') === '1',
+      ...(transport === undefined ? {} : { transport }),
       relayUrls: params.getAll('relay'),
       log: params.get('log') ?? 'warn',
     })
