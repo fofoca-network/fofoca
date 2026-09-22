@@ -150,24 +150,44 @@ F2 is a correctness fix against the code's own documented invariant
 rule. It did **not** change any observed outcome, so treat it as a
 correctness fix, not a cure for F2b.
 
-**F2b — Safari still does not form a direct path.** Open, not root-caused,
-and not the same bug as F2: Safari 27.0 offers the lane and still ends
-`relay-only` against both a terminal and a Chrome tab on the same machine,
-while Chrome for Testing 152 links in 40–130 s on that same setup.
-Broadcasts and state still flow over gossip; directed frames do not. Use
-Chrome until this is found.
+**F2b — a browser and a native peer never negotiate a session with each
+other on a topic mesh.** Open, and re-diagnosed. The old entry blamed
+Safari's WebRTC. That was wrong on every count I could check:
 
-Two facts narrow it. Both browsers advertise the same candidate shape
-(`host=0 mdns=1 srflx=1`), so Safari is not failing to gather: an mDNS
-`.local` candidate is one the native side (str0m) cannot resolve, leaving
-only the reflexive one for either browser. And on this machine **neither
-browser can reach a LAN address at all** — `fetch("http://<lan-ip>:3020/")`
-fails in both while `127.0.0.1` returns 200 and `curl` to the same LAN
-address from a shell returns 200, which points at per-app local-network
-permission rather than a firewall. Chrome pairs anyway and Safari does not,
-so the difference is in which candidate pair each browser will actually use.
-Whoever picks this up should start from `RTCPeerConnection.getStats()` in
-each browser, comparing the selected candidate pair.
+- Safari carries an unordered, `maxRetransmits: 0` data channel fine. A
+  loopback probe in the page sent 100 datagrams of 1200 bytes and received
+  100.
+- Safari's live session shows a nominated candidate pair at 1 ms round
+  trip, 20 KB sent and 26 KB received, with the data channel `open` at 35
+  messages out and 41 in. Its WebRTC works.
+- `binaryType` is already `arraybuffer` on both the offering and the
+  answering path, so the usual Safari trap does not apply.
+
+What actually happens, with a native peer and a Safari tab on one topic
+mesh: each of them negotiates a session **with the rendezvous** and neither
+ever negotiates one **with the other**. Safari's log holds eight mentions of
+the native's endpoint id and every one is a failed probe (`unicast dial
+timed out`, then `on cooldown after a recent failure`); it holds no
+`negotiating`, `attached` or `registered the webrtc` line for that peer.
+The native's log is the mirror image: one webrtc line, and it is the
+rendezvous. With no session between the pair, the direct-path probe has
+nothing to ride, so both sides settle on `relay-only`.
+
+So the next step is not `getStats()`. It is why `negotiate_session` never
+runs for that pair — start at `retry_sessions` in
+`crates/fofoca/src/transport/webrtc.rs`, which only considers peers present
+in `state.peer_endpoints`, and check whether each side ever learns the
+other's advertised address on a mesh where both reach the overlay through
+the rendezvous. Chrome pairs in the same setup, so whatever the condition
+is, it is not simply "a browser".
+
+**Correction to an earlier finding.** This document and PR #4 said neither
+browser can reach a LAN address, from a `fetch` test. HTTP to a LAN address
+is indeed blocked in both browsers here while `curl` to the same address
+works, but WebRTC to a LAN address is **not** blocked: the nominated pair
+above talks to the native's LAN host candidate at 1 ms. The `fetch` result
+says nothing about the ICE path, and should not be used as evidence about
+pairing.
 
 **F8 — the chat e2e suite fails on this machine, in the topic bootstrap.**
 Open, pre-existing, partly mitigated. `cargo task e2e --suite chat --quick`
@@ -201,17 +221,22 @@ integration test stays green; what stopped working is a browser pairing
 with a native peer at all. Two environment facts to check before suspecting
 the code:
 
-1. **Local network access.** Neither browser on this machine can reach a LAN
-   address: `fetch("http://<lan-ip>:3020/")` fails in Safari and in Chrome
-   for Testing while `127.0.0.1` returns 200 and `curl` to that same LAN
-   address returns 200. A browser that cannot send to a LAN address cannot
-   use a native peer's host candidate. On macOS this is granted per app
-   under System Settings, Privacy and Security, Local Network — check that
-   Safari and Google Chrome for Testing are enabled there.
+1. **Other agents on the same machine.** These suites each start a Chrome,
+   a relay and a mesh peer, and they are not the only ones running. A count
+   taken during a failing stretch found three other Chrome-for-Testing
+   instances alive, keyed to three other working copies, one of them another
+   session on this same repository, plus a stray `bun run serve.ts 3010`
+   from someone else's chat run. Check `pgrep -fl "Chrome for Testing"` and
+   the `user-data-dir` of each before blaming the code, and do not kill what
+   another session owns.
 2. **Machine load.** ICE and the beacon probes are deadline-driven. The
    failures began after hours of back-to-back suite runs, with the 15-minute
-   load average at 14. The suites passed earlier the same day on the same
-   commit with the machine idle.
+   load average at 14, and the suites had passed earlier the same day on the
+   same commit with the machine idle.
+
+Not the cause, though it reads like one: HTTP to a LAN address is blocked
+in both browsers here. WebRTC to a LAN address is not. See the correction
+under F2b.
 
 **F3 — a missed opening frame stalled a stream until 256 later frames.
 Fixed.** A hole older than `GAP_TIMEOUT` (3 s) is now skipped and the frames
