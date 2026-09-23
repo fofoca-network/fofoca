@@ -152,7 +152,7 @@ pub struct EventLoopConfig {
     pub(crate) rung_rx: watch::Receiver<Option<iroh::RelayUrl>>,
     /// The backgrounded startup probe behind `rung_rx`, released on the way
     /// out with the rendezvous. `None` for an empty ladder.
-    pub(crate) rung_probe: Option<super::setup::StartupRungProbe>,
+    pub(crate) rung_probe: Option<crate::lookup::StoppableTask>,
     /// When this member may serve the rendezvous (beacon role).
     pub(crate) cohost: CoHostPolicy,
     /// The consumer's per-user runtime base — the root the control socket, the

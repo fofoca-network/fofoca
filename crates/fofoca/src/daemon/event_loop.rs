@@ -477,7 +477,7 @@ struct EventLoop<A: NodeDriver> {
     /// self-monitor); the loop applies changes via the rung-update arm.
     rung_rx: watch::Receiver<Option<RelayUrl>>,
     /// The startup probe behind `rung_rx`, released with the rendezvous.
-    rung_probe: Option<super::setup::StartupRungProbe>,
+    rung_probe: Option<crate::lookup::StoppableTask>,
     /// When this member may serve the rendezvous (see [`CoHostPolicy`]).
     cohost: CoHostPolicy,
     /// Event-loop start, for the unmeshed-joiner co-host grace.

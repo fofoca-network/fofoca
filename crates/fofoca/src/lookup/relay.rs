@@ -26,7 +26,7 @@ use tokio::sync::watch;
 use crate::protocol::mesh::RelayChoice;
 use crate::util::tuning::{
     RELAY_LIVENESS_FAILS_TO_EVICT, RELAY_LIVENESS_INTERVAL_SECS, RELAY_REPROBE_BACKOFF_MAX_SECS,
-    RELAY_REPROBE_BACKOFF_MIN_SECS, RELAY_RUNG_PROBE_SECS,
+    RELAY_REPROBE_BACKOFF_MIN_SECS, RELAY_RUNG_PROBE_SECS, RENDEZVOUS_CLOSE_SECS,
 };
 
 /// The default relay **ladder** — n0's prod relay set, in fixed
@@ -205,7 +205,7 @@ async fn relay_rung_reachable(
     timeout: Duration,
     stop: Option<watch::Receiver<()>>,
 ) -> bool {
-    if stop.as_ref().is_some_and(|stop| stop.has_changed().is_err()) {
+    if stop.as_ref().is_some_and(is_stopped) {
         return false;
     }
     let Ok(endpoint) = Endpoint::builder(presets::Minimal)
@@ -228,6 +228,50 @@ async fn stopped(stop: Option<watch::Receiver<()>>) {
     match stop {
         Some(mut stop) => while stop.changed().await.is_ok() {},
         None => std::future::pending().await,
+    }
+}
+
+/// Whether `stop`'s sender is gone.
+fn is_stopped(stop: &watch::Receiver<()>) -> bool {
+    stop.has_changed().is_err()
+}
+
+/// A task that walks the relay ladder, held so its owner can stop it and wait
+/// for it on the way out. It is never aborted: the walk probes each rung on an
+/// endpoint of its own, and an abort mid-walk drops that endpoint open.
+/// Dropped without [`Self::stop_and_wait`], the task still stops and closes
+/// its endpoint on its own, as long as the runtime lives.
+pub(crate) struct StoppableTask {
+    task: JoinHandle<()>,
+    /// Dropped to tell the task to stop.
+    stop: watch::Sender<()>,
+}
+
+impl StoppableTask {
+    /// Spawn `run`, which must return promptly once its receiver reports the
+    /// sender gone (see [`select_bootstrap_rung`]).
+    pub(crate) fn spawn<Fut>(run: impl FnOnce(watch::Receiver<()>) -> Fut) -> Self
+    where
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        let (stop, stopped) = watch::channel(());
+        Self {
+            task: n0_future::task::spawn(run(stopped)),
+            stop,
+        }
+    }
+
+    /// Stop the task and wait for it, bounded by `RENDEZVOUS_CLOSE_SECS` like
+    /// the other closes on the way out.
+    pub(crate) async fn stop_and_wait(self) {
+        let Self { task, stop } = self;
+        drop(stop);
+        if n0_future::time::timeout(Duration::from_secs(RENDEZVOUS_CLOSE_SECS), task)
+            .await
+            .is_err()
+        {
+            tracing::debug!(target: "fofoca::lookup", "relay ladder walk did not stop in time; abandoning it");
+        }
     }
 }
 
@@ -302,21 +346,21 @@ fn next_relay_backoff(current: Duration) -> Duration {
 ///
 /// Every publish flows to the event loop's rung-update arm, which
 /// re-homes the beacon (drop + rebuild) — spawning a fresh monitor for
-/// the new state. So the monitor returns after publishing a change;
-/// teardown otherwise is by `beacon::Rendezvous` drop aborting it.
+/// the new state. So the monitor returns after publishing a change, or
+/// once `beacon::Rendezvous` stops it, publishing nothing.
 #[must_use]
 pub(crate) fn spawn_relay_monitor(
     endpoint: Endpoint,
     ladder: Vec<RelayUrl>,
     rung_tx: watch::Sender<Option<RelayUrl>>,
     homed: bool,
-) -> JoinHandle<()> {
+) -> StoppableTask {
     let probe = Duration::from_secs(RELAY_RUNG_PROBE_SECS);
-    n0_future::task::spawn(async move {
+    StoppableTask::spawn(|stop| async move {
         if homed {
-            monitor_homed_rung(&endpoint, &ladder, &rung_tx, probe).await;
+            monitor_homed_rung(&endpoint, &ladder, &rung_tx, probe, &stop).await;
         } else {
-            monitor_relay_less(&ladder, &rung_tx, probe).await;
+            monitor_relay_less(&ladder, &rung_tx, probe, &stop).await;
         }
     })
 }
@@ -329,14 +373,21 @@ async fn monitor_homed_rung(
     ladder: &[RelayUrl],
     rung_tx: &watch::Sender<Option<RelayUrl>>,
     probe: Duration,
+    stop: &watch::Receiver<()>,
 ) {
     let mut fails: u32 = 0;
     loop {
-        n0_future::time::sleep(Duration::from_secs(RELAY_LIVENESS_INTERVAL_SECS)).await;
-        if n0_future::time::timeout(probe, endpoint.online())
-            .await
-            .is_ok()
-        {
+        let poll = async {
+            n0_future::time::sleep(Duration::from_secs(RELAY_LIVENESS_INTERVAL_SECS)).await;
+            n0_future::time::timeout(probe, endpoint.online())
+                .await
+                .is_ok()
+        };
+        let online = tokio::select! {
+            online = poll => online,
+            () = stopped(Some(stop.clone())) => return,
+        };
+        if online {
             fails = 0;
             continue;
         }
@@ -349,7 +400,10 @@ async fn monitor_homed_rung(
             fails,
             "beacon relay rung unreachable; re-walking the ladder"
         );
-        let _ = rung_tx.send(select_bootstrap_rung(ladder, probe, None).await);
+        let selected = select_bootstrap_rung(ladder, probe, Some(stop)).await;
+        if !is_stopped(stop) {
+            let _ = rung_tx.send(selected);
+        }
         return;
     }
 }
@@ -362,10 +416,15 @@ async fn monitor_relay_less(
     ladder: &[RelayUrl],
     rung_tx: &watch::Sender<Option<RelayUrl>>,
     probe: Duration,
+    stop: &watch::Receiver<()>,
 ) {
     let mut backoff = Duration::from_secs(RELAY_REPROBE_BACKOFF_MIN_SECS);
     loop {
-        if let Some(rung) = select_bootstrap_rung(ladder, probe, None).await {
+        let selected = select_bootstrap_rung(ladder, probe, Some(stop)).await;
+        if is_stopped(stop) {
+            return;
+        }
+        if let Some(rung) = selected {
             tracing::info!(
                 target: "fofoca::lookup",
                 relay = %rung,
@@ -374,7 +433,10 @@ async fn monitor_relay_less(
             let _ = rung_tx.send(Some(rung));
             return;
         }
-        n0_future::time::sleep(backoff).await;
+        tokio::select! {
+            () = n0_future::time::sleep(backoff) => {}
+            () = stopped(Some(stop.clone())) => return,
+        }
         backoff = next_relay_backoff(backoff);
     }
 }

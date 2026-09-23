@@ -42,7 +42,7 @@ use crate::util::clock::Instant;
 pub(super) async fn release_rendezvous(
     rendezvous: &mut Option<beacon::Rendezvous>,
     probe: &mut Option<beacon::RivalProbe>,
-    rung_probe: &mut Option<super::setup::StartupRungProbe>,
+    rung_probe: &mut Option<crate::lookup::StoppableTask>,
 ) {
     let (rendezvous, probe, rung_probe) = (rendezvous.take(), probe.take(), rung_probe.take());
     tokio::join!(

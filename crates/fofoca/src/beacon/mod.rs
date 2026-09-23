@@ -101,7 +101,7 @@ pub(crate) struct Rendezvous {
     task: JoinHandle<()>,
     /// The relay-rung liveness/discovery monitor (`spawn_relay_monitor`).
     /// `None` for private / relay-disabled meshes (nothing to monitor).
-    monitor: Option<JoinHandle<()>>,
+    monitor: Option<crate::lookup::StoppableTask>,
     /// The co-hosted endpoint itself, retained so [`Self::shed`] and
     /// [`Self::shed_and_wait`] can close it gracefully — a plain drop (task
     /// abort) skips the orderly QUIC close, and the peer's link to its own
@@ -120,7 +120,7 @@ impl Rendezvous {
         n0_future::task::spawn(async move {
             endpoint.close().await;
         });
-        // `self` drops here, aborting both tasks.
+        // `self` drops here, aborting the co-host task and stopping the monitor.
     }
 
     /// The same graceful release, *awaited* — for the event loop's teardown.
@@ -135,22 +135,41 @@ impl Rendezvous {
     /// Bounded, because winding down must not hang on a relay that stopped
     /// answering. See `RENDEZVOUS_CLOSE_SECS`. Past the bound we are no worse
     /// off than before this existed.
-    pub(crate) async fn shed_and_wait(self) {
+    ///
+    /// The monitor is stopped and waited for in the same budget, not aborted:
+    /// mid re-walk it holds a probe endpoint of its own, which an abort drops
+    /// open.
+    pub(crate) async fn shed_and_wait(mut self) {
         let endpoint = self.endpoint.clone();
-        // Abort the co-host and monitor tasks first, so neither is still
-        // driving the endpoint while it closes.
+        let monitor = self.monitor.take();
+        // Abort the co-host task first, so it is not still driving the
+        // endpoint while it closes.
         drop(self);
-        if n0_future::time::timeout(Duration::from_secs(RENDEZVOUS_CLOSE_SECS), endpoint.close())
-            .await
-            .is_err()
-        {
-            tracing::debug!(target: "fofoca::beacon", "rendezvous endpoint close timed out; abandoning it");
-        }
+        tokio::join!(
+            async {
+                if n0_future::time::timeout(
+                    Duration::from_secs(RENDEZVOUS_CLOSE_SECS),
+                    endpoint.close(),
+                )
+                .await
+                .is_err()
+                {
+                    tracing::debug!(target: "fofoca::beacon", "rendezvous endpoint close timed out; abandoning it");
+                }
+            },
+            async {
+                if let Some(monitor) = monitor {
+                    monitor.stop_and_wait().await;
+                }
+            },
+        );
     }
 }
 
-/// Aborts both tasks — and **does not close the endpoint**, because it
-/// cannot: closing is async and `Drop` is not.
+/// Aborts the co-host task and stops the monitor (dropping it signals the
+/// stop, and the monitor then closes any probe endpoint of its own) — and
+/// **does not close the endpoint**, because it cannot: closing is async and
+/// `Drop` is not.
 ///
 /// So a bare `drop` (or `*slot = None`, which is the same thing wearing a
 /// disguise) abandons a live, still-registered socket: iroh logs `Endpoint
@@ -163,9 +182,6 @@ impl Rendezvous {
 impl Drop for Rendezvous {
     fn drop(&mut self) {
         self.task.abort();
-        if let Some(monitor) = &self.monitor {
-            monitor.abort();
-        }
     }
 }
 
@@ -900,6 +916,40 @@ mod tests {
         assert!(
             prober.is_closed(),
             "abort_and_close cut the probe's own close short; its drop logs the ungraceful-abort error"
+        );
+    }
+
+    /// Regression for `Endpoint dropped without calling Endpoint::close` on a
+    /// departure while the relay monitor re-walks the ladder: the walk probes
+    /// each rung on an endpoint of its own, and aborting the monitor mid-walk
+    /// dropped that endpoint open. Relay-less, the monitor walks at once.
+    #[cfg(feature = "host")]
+    #[test]
+    fn shed_and_wait_mid_rewalk_closes_the_monitor_probe_endpoint() {
+        let (_silent, rung) = crate::testing::silent_relay_rung();
+
+        let errors = crate::testing::errors_through_runtime_drop(async {
+            let endpoint = loopback_endpoint().await;
+            let monitor = crate::lookup::spawn_relay_monitor(
+                endpoint.clone(),
+                vec![rung],
+                watch::channel(None).0,
+                false,
+            );
+            // Let the walk bind its probe and start waiting for the relay.
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            let rendezvous = Rendezvous {
+                task: n0_future::task::spawn(std::future::pending()),
+                monitor: Some(monitor),
+                endpoint,
+            };
+
+            rendezvous.shed_and_wait().await;
+        });
+
+        assert!(
+            !errors.contains("Endpoint dropped without calling"),
+            "the relay monitor's probe endpoint reached its drop open:\n{errors}"
         );
     }
 

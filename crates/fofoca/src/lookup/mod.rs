@@ -67,7 +67,7 @@ pub mod test_relay {
 pub use capability::{NetworkCapability, probe as capability_probe};
 pub(crate) use relay::RungRefresh;
 pub use relay::{RENDEZVOUS_RELAY_LADDER, probe_ladder, relay_ladder};
-pub(crate) use relay::{plan_rung_refresh, select_bootstrap_rung, spawn_relay_monitor};
+pub(crate) use relay::{StoppableTask, plan_rung_refresh, select_bootstrap_rung, spawn_relay_monitor};
 
 /// Build an iroh endpoint for a mesh's lookups.
 ///
