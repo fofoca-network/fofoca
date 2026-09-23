@@ -133,9 +133,8 @@ impl Rendezvous {
     /// co-hosting member, which is all of them.
     ///
     /// Bounded, because winding down must not hang on a relay that stopped
-    /// answering: `Node::leave` gives the whole shutdown 3s and the `Left`
-    /// propagation sleep already spends 500ms of it. Past the bound we are no
-    /// worse off than before this existed.
+    /// answering. See `RENDEZVOUS_CLOSE_SECS`. Past the bound we are no worse
+    /// off than before this existed.
     pub(crate) async fn shed_and_wait(self) {
         let endpoint = self.endpoint.clone();
         // Abort the co-host and monitor tasks first, so neither is still
@@ -224,20 +223,30 @@ pub(crate) struct RivalProbe {
     /// cancels it first. `None` when the probe never dialed — an
     /// unanswerable target pre-resolves the verdict without an endpoint.
     endpoint: Option<Endpoint>,
+    /// Tells the task to stop dialing and go straight to its own close.
+    /// `None` when there is no dial to stop.
+    cancel: Option<oneshot::Sender<()>>,
 }
 
 impl RivalProbe {
-    /// Cancel the probe and close its endpoint gracefully — the departure
-    /// counterpart to letting the task finish, and the same bounded shape as
-    /// [`Rendezvous::shed_and_wait`] for the same reason.
-    pub(crate) async fn abort_and_close(self) {
-        let Some(endpoint) = self.endpoint.clone() else {
+    /// Stop the probe and wait for its endpoint to close gracefully — the
+    /// departure counterpart to letting the task finish, and the same bounded
+    /// shape as [`Rendezvous::shed_and_wait`] for the same reason.
+    ///
+    /// The task closes its own endpoint, so this cancels the dial and waits for
+    /// the task rather than aborting it. An abort could land while the task is
+    /// already inside `close()`, which cuts that close short, and a second
+    /// `close()` returns at once while one is in flight, so nothing would
+    /// finish it.
+    pub(crate) async fn abort_and_close(mut self) {
+        if self.endpoint.is_none() {
             // Never dialed, nothing to close.
             return;
-        };
-        // Abort first, so the task is not still dialing while we close.
-        drop(self);
-        if n0_future::time::timeout(Duration::from_secs(RENDEZVOUS_CLOSE_SECS), endpoint.close())
+        }
+        if let Some(cancel) = self.cancel.take() {
+            let _ = cancel.send(());
+        }
+        if n0_future::time::timeout(Duration::from_secs(RENDEZVOUS_CLOSE_SECS), &mut self.task)
             .await
             .is_err()
         {
@@ -328,6 +337,7 @@ async fn spawn_rival_probe(params: &RendezvousParams) -> Option<RivalProbe> {
                 rx,
                 task: n0_future::task::spawn(async {}),
                 endpoint: None,
+                cancel: None,
             });
         }
     };
@@ -352,8 +362,14 @@ async fn spawn_rival_probe(params: &RendezvousParams) -> Option<RivalProbe> {
     let budget = Duration::from_secs(HEAL_PROBE_SECS.min(heal_interval_secs()));
     let (tx, rx) = oneshot::channel();
     let endpoint = prober.clone();
+    let (cancel, cancelled) = oneshot::channel();
     let task = n0_future::task::spawn(async move {
-        let found_rival = probe_connect(&prober, target, budget).await;
+        let found_rival = tokio::select! {
+            found = probe_connect(&prober, target, budget) => found,
+            // A departure: no one will read the verdict, but the endpoint
+            // must still close below.
+            _ = cancelled => true,
+        };
         prober.close().await;
         // A closed receiver means the loop moved on (departure, or the
         // beacon arrived another way); the verdict is simply stale.
@@ -363,6 +379,7 @@ async fn spawn_rival_probe(params: &RendezvousParams) -> Option<RivalProbe> {
         rx,
         task,
         endpoint: Some(endpoint),
+        cancel: Some(cancel),
     })
 }
 
@@ -772,6 +789,7 @@ mod tests {
             rx,
             task: n0_future::task::spawn(std::future::pending()),
             endpoint: Some(loopback_endpoint().await),
+            cancel: None,
         }
     }
 
@@ -821,6 +839,68 @@ mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
+    }
+
+    /// Regression for `Endpoint dropped without calling Endpoint::close` on
+    /// every Ctrl-C that landed mid-probe. A probe still in its handshake has
+    /// sent a close frame nobody will acknowledge, so iroh's close waits out
+    /// the QUIC drain (about 3s) before it finishes. A budget shorter than that
+    /// abandoned the endpoint half-closed, and its drop logged the error.
+    #[tokio::test]
+    async fn abort_and_close_waits_out_a_probe_mid_handshake() {
+        // Bound and never read: the handshake's packets vanish without an
+        // answer, as they do into a relay rung nobody serves.
+        let silent = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .expect("a silent loopback socket");
+        let mut params = public_params();
+        params.bind_ports = vec![silent.local_addr().expect("its address").port()];
+        let probe = spawn_rival_probe(&params)
+            .await
+            .expect("a probe with a rung to dial");
+        let prober = probe.endpoint.clone().expect("the probe dials");
+        // Let the handshake start, so there is a connection to drain.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        probe.abort_and_close().await;
+
+        assert!(
+            prober.is_closed(),
+            "abort_and_close returned with the probe endpoint still open; its drop logs the ungraceful-abort error"
+        );
+    }
+
+    /// The other half of the same error: the probe's dial ran out on its own
+    /// and its task was already closing the endpoint when the departure came.
+    /// Aborting the task there cut that close short, and a second `close()`
+    /// returns at once while one is in flight, so nothing finished it.
+    #[tokio::test]
+    async fn abort_and_close_lets_a_probe_finish_closing_its_own_endpoint() {
+        let silent = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .expect("a silent loopback socket");
+        let target = super::EndpointAddr::new(SecretKey::generate().public())
+            .with_ip_addr(silent.local_addr().expect("its address"));
+        let prober = loopback_endpoint().await;
+        let dialer = prober.clone();
+        let task = n0_future::task::spawn(async move {
+            // The dial gives up almost at once, leaving a handshake to drain,
+            // and the task moves on to its own close, as the real one does.
+            super::probe_connect(&dialer, target, std::time::Duration::from_millis(200)).await;
+            dialer.close().await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        let probe = RivalProbe {
+            rx: oneshot::channel().1,
+            task,
+            endpoint: Some(prober.clone()),
+            cancel: None,
+        };
+
+        probe.abort_and_close().await;
+
+        assert!(
+            prober.is_closed(),
+            "abort_and_close cut the probe's own close short; its drop logs the ungraceful-abort error"
+        );
     }
 
     #[test]

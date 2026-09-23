@@ -12,7 +12,7 @@ use crate::daemon::app::NodeDriver;
 use crate::daemon::config::{DriverMode, EventLoopConfig};
 use crate::protocol::mesh::MeshName;
 use crate::protocol::{MeshId, Message, Nickname};
-use crate::util::tuning::SESSION_REQUEST_CAP;
+use crate::util::tuning::{NODE_LEAVE_SECS, SESSION_REQUEST_CAP};
 
 /// A live in-process membership over a background event loop, generic over the
 /// application driver `A`. Drop it (or call [`Node::leave`]) to wind the loop
@@ -122,7 +122,8 @@ impl<A: NodeDriver + 'static> Node<A> {
         self.req_tx.clone()
     }
 
-    /// Ask the loop to broadcast `Left` and wind down, waiting up to 3s. On
+    /// Ask the loop to broadcast `Left` and wind down, waiting up to
+    /// [`NODE_LEAVE_SECS`]. On
     /// timeout returns `Ok(())` and the task detaches.
     ///
     /// # Errors
@@ -130,7 +131,7 @@ impl<A: NodeDriver + 'static> Node<A> {
     pub async fn leave(mut self) -> anyhow::Result<()> {
         let _ = self.quit_tx.send(()).await;
         if let Some(task) = self.task.take() {
-            let timeout = n0_future::time::sleep(Duration::from_secs(3));
+            let timeout = n0_future::time::sleep(Duration::from_secs(NODE_LEAVE_SECS));
             tokio::select! {
                 joined = task => {
                     joined
