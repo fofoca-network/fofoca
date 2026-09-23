@@ -13,7 +13,7 @@ use crate::lookup::{add_peer_addr, build_mesh, relay_ladder, select_bootstrap_ru
 use crate::protocol::crypto::Password;
 use crate::protocol::mesh::{LookupOpts, Mesh, MeshConfig, MeshName};
 use crate::protocol::{MeshId, Nickname};
-use crate::util::tuning::RELAY_RUNG_PROBE_SECS;
+use crate::util::tuning::{RELAY_RUNG_PROBE_SECS, RENDEZVOUS_CLOSE_SECS};
 
 use crate::beacon::RendezvousParams;
 use crate::lifecycle;
@@ -101,18 +101,27 @@ fn rendezvous_params(
 /// is already out) and, if the first *reachable* rung differs from rung
 /// 0, publish it through `rung_tx`. Covers a rung-0-down-at-start for
 /// both creator and joiner; the joiner has no beacon self-monitor, so
-/// this is its only startup correction. No-op for an empty (private /
+/// this is its only startup correction. `None` for an empty (private /
 /// relay-disabled) ladder.
 fn spawn_startup_rung_confirmation(
     ladder: Vec<RelayUrl>,
     rung_tx: watch::Sender<Option<RelayUrl>>,
-) {
+) -> Option<StartupRungProbe> {
     if ladder.is_empty() {
-        return;
+        return None;
     }
-    n0_future::task::spawn(async move {
-        let confirmed =
-            select_bootstrap_rung(&ladder, Duration::from_secs(RELAY_RUNG_PROBE_SECS)).await;
+    let (stop, stopped) = watch::channel(());
+    let task = n0_future::task::spawn(async move {
+        let confirmed = select_bootstrap_rung(
+            &ladder,
+            Duration::from_secs(RELAY_RUNG_PROBE_SECS),
+            Some(&stopped),
+        )
+        .await;
+        if stopped.has_changed().is_err() {
+            // A departure ended the walk: its `None` is not a verdict.
+            return;
+        }
         rung_tx.send_if_modified(|current| {
             if *current == confirmed {
                 false
@@ -122,6 +131,33 @@ fn spawn_startup_rung_confirmation(
             }
         });
     });
+    Some(StartupRungProbe { task, stop })
+}
+
+/// The startup rung confirmation, held by the event loop so a departure can
+/// wait for the probe endpoint to close. Left detached, a Ctrl-C in the first
+/// seconds returned from `main` while the probe was still closing, and the
+/// runtime drop cut that close short.
+pub(crate) struct StartupRungProbe {
+    task: n0_future::task::JoinHandle<()>,
+    /// Dropped to stop the ladder walk; the probe then closes its own endpoint.
+    stop: watch::Sender<()>,
+}
+
+impl StartupRungProbe {
+    /// Stop the walk and wait for the probe to close its endpoint, bounded by
+    /// `RENDEZVOUS_CLOSE_SECS` like the other closes on the way out. The task
+    /// is not aborted: an abort mid-close is what drops an endpoint open.
+    pub(crate) async fn stop_and_wait(self) {
+        let Self { task, stop } = self;
+        drop(stop);
+        if n0_future::time::timeout(Duration::from_secs(RENDEZVOUS_CLOSE_SECS), task)
+            .await
+            .is_err()
+        {
+            tracing::debug!(target: "fofoca::lookup", "startup rung probe close timed out; abandoning it");
+        }
+    }
 }
 
 /// Pre-register `rendezvous_id`'s address so a cold joiner reaches it
@@ -538,7 +574,7 @@ pub async fn setup_mesh(kind: SetupKind, params: SetupParams) -> Result<EventLoo
     // Off the critical path: nothing below blocks `ready`, which `run` emits
     // once the IPC socket accepts. Confirm/correct the optimistic rung 0 in the
     // background (covers a joiner, which has no beacon self-monitor of its own).
-    spawn_startup_rung_confirmation(ladder, rung_tx);
+    let rung_probe = spawn_startup_rung_confirmation(ladder, rung_tx);
 
     Ok(EventLoopConfig {
         per_peer_gate,
@@ -558,6 +594,7 @@ pub async fn setup_mesh(kind: SetupKind, params: SetupParams) -> Result<EventLoo
         max_peers,
         rendezvous_params: rdv,
         rung_rx,
+        rung_probe,
         cohost: cohost_override.unwrap_or(cohost),
         runtime_base,
         state_file,
@@ -852,4 +889,73 @@ async fn setup_join(build: &SetupBuild<'_>, kind: SetupKind) -> Result<Assembled
         webrtc_ice,
         topic_string,
     })
+}
+
+#[cfg(all(test, feature = "host"))]
+mod tests {
+    use std::net::Ipv4Addr;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use iroh::RelayUrl;
+    use tokio::sync::watch;
+
+    /// Every log line, so a test can look for iroh's ungraceful-drop error.
+    #[derive(Clone, Default)]
+    struct Captured(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Captured {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("log buffer").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Regression for `Endpoint dropped without calling Endpoint::close` on a
+    /// Ctrl-C in the first seconds of a run. The startup probe was detached,
+    /// so `Node::leave` had nothing to wait for: `main` returned while the
+    /// probe was still waiting for its relay, or still closing, and the runtime
+    /// drop took its endpoint down open.
+    #[test]
+    fn a_departure_during_the_startup_rung_probe_closes_its_endpoint() {
+        let logs = Captured::default();
+        let writer = logs.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .with_max_level(tracing::Level::ERROR)
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        // Listens and never accepts: the relay handshake hangs, as it does on a
+        // rung that is slow to answer.
+        let silent = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .expect("a silent loopback listener");
+        let rung: RelayUrl = format!("http://{}", silent.local_addr().expect("its address"))
+            .parse()
+            .expect("a relay url");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime");
+
+        runtime.block_on(async {
+            let probe = super::spawn_startup_rung_confirmation(vec![rung], watch::channel(None).0)
+                .expect("a ladder to walk");
+            // Let the probe bind and start waiting for its relay.
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            probe.stop_and_wait().await;
+        });
+        // What returning from `main` does to every task still running.
+        drop(runtime);
+
+        let logs = String::from_utf8_lossy(&logs.0.lock().expect("log buffer")).into_owned();
+        assert!(
+            !logs.contains("Endpoint dropped without calling"),
+            "the startup rung probe's endpoint reached its drop open:\n{logs}"
+        );
+    }
 }

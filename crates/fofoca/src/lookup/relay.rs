@@ -133,13 +133,15 @@ pub(super) fn relay_mode(choice: &RelayChoice) -> RelayMode {
 ///
 /// `None` ⇒ the ladder is empty (relay disabled) or every rung was
 /// unreachable; the caller then leans on mDNS/DHT (the other reliability
-/// layers).
+/// layers). Also `None` once `stop`'s sender is dropped: the walk ends
+/// early, but every probe endpoint is still closed before this returns.
 pub(crate) async fn select_bootstrap_rung(
     ladder: &[RelayUrl],
     per_rung: Duration,
+    stop: Option<&watch::Receiver<()>>,
 ) -> Option<RelayUrl> {
     let selected = select_first_reachable(ladder, |rung| async move {
-        let reachable = relay_rung_reachable(&rung, per_rung).await;
+        let reachable = relay_rung_reachable(&rung, per_rung, stop.cloned()).await;
         if !reachable {
             tracing::debug!(target: "fofoca::lookup", relay = %rung, "bootstrap relay rung unreachable; trying next");
         }
@@ -189,16 +191,23 @@ where
 pub async fn probe_ladder(ladder: &[RelayUrl], per_rung: Duration) -> Vec<(RelayUrl, bool)> {
     let mut statuses = Vec::with_capacity(ladder.len());
     for rung in ladder {
-        let reachable = relay_rung_reachable(rung, per_rung).await;
+        let reachable = relay_rung_reachable(rung, per_rung, None).await;
         statuses.push((rung.clone(), reachable));
     }
     statuses
 }
 
 /// Probe a single relay rung: bind an ephemeral endpoint pinned to just
-/// this relay and wait for `online()` within `timeout`. Closes the probe
-/// endpoint before returning.
-async fn relay_rung_reachable(rung: &RelayUrl, timeout: Duration) -> bool {
+/// this relay and wait for `online()` within `timeout`, or until `stop`'s
+/// sender is dropped. Closes the probe endpoint before returning either way.
+async fn relay_rung_reachable(
+    rung: &RelayUrl,
+    timeout: Duration,
+    stop: Option<watch::Receiver<()>>,
+) -> bool {
+    if stop.as_ref().is_some_and(|stop| stop.has_changed().is_err()) {
+        return false;
+    }
     let Ok(endpoint) = Endpoint::builder(presets::Minimal)
         .relay_mode(RelayMode::custom([rung.clone()]))
         .bind()
@@ -206,11 +215,20 @@ async fn relay_rung_reachable(rung: &RelayUrl, timeout: Duration) -> bool {
     else {
         return false;
     };
-    let reachable = n0_future::time::timeout(timeout, endpoint.online())
-        .await
-        .is_ok();
+    let reachable = tokio::select! {
+        online = n0_future::time::timeout(timeout, endpoint.online()) => online.is_ok(),
+        () = stopped(stop) => false,
+    };
     endpoint.close().await;
     reachable
+}
+
+/// Resolves once `stop`'s sender is dropped; never without a `stop`.
+async fn stopped(stop: Option<watch::Receiver<()>>) {
+    match stop {
+        Some(mut stop) => while stop.changed().await.is_ok() {},
+        None => std::future::pending().await,
+    }
 }
 
 /// The outcome of comparing a freshly-selected rung against the current
@@ -331,7 +349,7 @@ async fn monitor_homed_rung(
             fails,
             "beacon relay rung unreachable; re-walking the ladder"
         );
-        let _ = rung_tx.send(select_bootstrap_rung(ladder, probe).await);
+        let _ = rung_tx.send(select_bootstrap_rung(ladder, probe, None).await);
         return;
     }
 }
@@ -347,7 +365,7 @@ async fn monitor_relay_less(
 ) {
     let mut backoff = Duration::from_secs(RELAY_REPROBE_BACKOFF_MIN_SECS);
     loop {
-        if let Some(rung) = select_bootstrap_rung(ladder, probe).await {
+        if let Some(rung) = select_bootstrap_rung(ladder, probe, None).await {
             tracing::info!(
                 target: "fofoca::lookup",
                 relay = %rung,
@@ -426,7 +444,7 @@ mod tests {
         // logic is unit-tested via `select_first_reachable` below; the
         // down-detection primitive by `unreachable_rung_*` below.
         assert!(
-            select_bootstrap_rung(&[], std::time::Duration::from_secs(1))
+            select_bootstrap_rung(&[], std::time::Duration::from_secs(1), None)
                 .await
                 .is_none()
         );
@@ -447,7 +465,7 @@ mod tests {
         // RFC-5737 TEST-NET-1, never routable ⇒ the relay handshake can
         // never connect ⇒ `select_bootstrap_rung` finds no reachable rung.
         let bogus: RelayUrl = "https://192.0.2.1./".parse().unwrap();
-        let selected = select_bootstrap_rung(&[bogus], std::time::Duration::from_secs(2)).await;
+        let selected = select_bootstrap_rung(&[bogus], std::time::Duration::from_secs(2), None).await;
         assert!(
             selected.is_none(),
             "an unreachable relay must not be selected as a live rung"
