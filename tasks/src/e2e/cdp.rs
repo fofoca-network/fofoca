@@ -26,7 +26,7 @@ use super::{Harvest, Skip, server};
 
 /// A launched headless window, quit when it goes out of scope.
 #[derive(Debug)]
-pub(super) struct Browser {
+pub(crate) struct Browser {
     folder: PathBuf,
 }
 
@@ -41,9 +41,13 @@ impl Drop for Browser {
 }
 
 impl Browser {
-    pub(super) fn launch() -> Result<Self, Skip> {
+    pub(crate) fn launch() -> Result<Self, Skip> {
+        // A counter beside the timestamp: the benchmark launches two of these
+        // back to back, and one Chrome per folder is the whole mechanism.
+        static LAUNCHES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let launch = LAUNCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let folder = std::env::temp_dir().join(format!(
-            "fofoca-matrix-{}-{:?}",
+            "fofoca-matrix-{}-{:?}-{launch}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -82,8 +86,8 @@ impl Browser {
     }
 
     /// Open `url` in the launched window.
-    #[cfg(feature = "mesh")]
-    pub(super) fn navigate(&self, url: &str) {
+    #[cfg(any(feature = "mesh", feature = "bench"))]
+    pub(crate) fn navigate(&self, url: &str) {
         self.cdp(
             "Page.navigate",
             &serde_json::json!({ "url": url }).to_string(),
@@ -107,7 +111,7 @@ impl Browser {
     }
 
     /// `Runtime.evaluate`, flattened to the string the expression produced.
-    pub(super) fn evaluate(&self, expression: &str) -> String {
+    pub(crate) fn evaluate(&self, expression: &str) -> String {
         let params = serde_json::json!({ "expression": expression, "returnByValue": true });
         self.cdp("Runtime.evaluate", &params.to_string())
             .and_then(|reply| reply.pointer("/result/value").map(super::json_to_string))
@@ -115,7 +119,7 @@ impl Browser {
     }
 
     /// What actually answered, never the name we gave it.
-    pub(super) fn version(&self) -> String {
+    pub(crate) fn version(&self) -> String {
         self.cdp("Browser.getVersion", "{}")
             .and_then(|reply| {
                 reply

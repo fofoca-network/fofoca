@@ -25,7 +25,7 @@ use super::{Harvest, Skip, server};
 /// Binding to port 0 and immediately releasing leaves a window where something
 /// else could take it. That window is microseconds and the alternative is a
 /// collision that lasts as long as the stale process does.
-pub(super) fn free_port() -> Result<u16, Skip> {
+pub(crate) fn free_port() -> Result<u16, Skip> {
     std::net::TcpListener::bind("127.0.0.1:0")
         .and_then(|listener| listener.local_addr())
         .map(|addr| addr.port())
@@ -239,16 +239,20 @@ pub(super) fn run(
 /// A live `WebDriver` session on one browser, for a suite that drives the page
 /// itself rather than harvesting a published table. The driver dies with the
 /// session (its `Drop` kills the process), which also closes the window.
-#[cfg(feature = "mesh")]
+#[cfg(any(feature = "mesh", feature = "bench"))]
 #[derive(Debug)]
-pub(super) struct Session {
+pub(crate) struct Session {
     driver: Driver,
     id: String,
     version: String,
 }
 
-#[cfg(feature = "mesh")]
+#[cfg(any(feature = "mesh", feature = "bench"))]
 impl Session {
+    #[cfg_attr(
+        not(feature = "mesh"),
+        expect(dead_code, reason = "the benchmark only ever opens a CDP browser")
+    )]
     pub(super) fn open(browser: &str, binary: &str) -> Result<Self, Skip> {
         let driver = Driver::start(browser)?;
         let created = driver
@@ -284,7 +288,7 @@ impl Session {
         })
     }
 
-    pub(super) fn navigate(&self, url: &str) {
+    pub(crate) fn navigate(&self, url: &str) {
         let _ = self.driver.post(
             &format!("/session/{}/url", self.id),
             &serde_json::json!({ "url": url }),
@@ -292,7 +296,7 @@ impl Session {
     }
 
     /// Run a script body (`return …;`) and read its value as a string.
-    pub(super) fn execute(&self, script: &str) -> String {
+    pub(crate) fn execute(&self, script: &str) -> String {
         self.driver
             .post(
                 &format!("/session/{}/execute/sync", self.id),
@@ -303,7 +307,7 @@ impl Session {
             .unwrap_or_default()
     }
 
-    pub(super) fn version(&self) -> String {
+    pub(crate) fn version(&self) -> String {
         self.version.clone()
     }
 }

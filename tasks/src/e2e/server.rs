@@ -64,7 +64,7 @@ impl Harness {
 ///
 /// Any reply counts, including an error status: the question is whether the
 /// socket is live, not whether this particular path exists.
-pub(super) fn reachable(url: &str) -> bool {
+pub(crate) fn reachable(url: &str) -> bool {
     ureq::get(url)
         .config()
         .timeout_global(Some(Duration::from_secs(1)))

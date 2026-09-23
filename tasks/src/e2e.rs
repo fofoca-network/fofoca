@@ -17,14 +17,16 @@ use crate::TaskOutcome;
 use crate::util::output;
 
 pub(crate) mod build;
-mod cdp;
+pub(crate) mod cdp;
 #[cfg(feature = "mesh")]
 mod chat;
 mod loopback;
 #[cfg(feature = "mesh")]
 mod mesh;
-mod server;
-mod webdriver;
+#[cfg(any(feature = "mesh", feature = "bench"))]
+pub(crate) mod page;
+pub(crate) mod server;
+pub(crate) mod webdriver;
 
 use server::Harness;
 
@@ -209,7 +211,7 @@ fn browsers() -> Vec<Browser> {
 }
 
 /// A cell that could not run at all, with a reason a reader can act on.
-struct Skip(String);
+pub(crate) struct Skip(pub(crate) String);
 
 /// What a cell's page published.
 struct Harvest {
@@ -270,27 +272,7 @@ fn run_engine_suite(args: &Args) -> TaskOutcome {
 /// build; a plain `--workspace` build never sees `iroh-test-utils`.
 #[cfg(not(feature = "mesh"))]
 fn run_engine_suite(_: &Args) -> TaskOutcome {
-    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    output::status("Rerunning", "with `--features mesh` (the engine suites)");
-    let status = std::process::Command::new(cargo)
-        .current_dir(crate::util::repo_root())
-        .args([
-            "run",
-            "--quiet",
-            "--package",
-            "tasks",
-            "--features",
-            "mesh",
-            "--",
-        ])
-        .args(std::env::args_os().skip(1))
-        .status()
-        .map_err(|error| format!("could not re-run cargo: {error}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("the engine suite failed: {status}").into())
-    }
+    crate::util::reexec_with_feature("mesh", "the engine suites", false)
 }
 
 pub(crate) fn run(args: &Args) -> TaskOutcome {
