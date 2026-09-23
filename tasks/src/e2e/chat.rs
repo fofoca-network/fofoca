@@ -26,6 +26,10 @@ use super::{Args, Skip, build};
 const LINK_TIMEOUT: Duration = Duration::from_secs(150);
 /// One payload hop on a linked pair.
 const PAYLOAD_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long the tab's console is recorded: past the page's one-minute open
+/// and the link wait, so a failure at either still has the whole console.
+const CONSOLE_WINDOW: Duration =
+    Duration::from_secs(60 + LINK_TIMEOUT.as_secs() + PAYLOAD_TIMEOUT.as_secs());
 
 // ── the terminal half ───────────────────────────────────────────────────
 
@@ -60,7 +64,10 @@ impl Robot {
                 relay_url,
                 "--robot",
             ])
-            .env("RUST_LOG", "fofoca=info")
+            .env(
+                "RUST_LOG",
+                std::env::var("RUST_LOG").unwrap_or_else(|_| "fofoca=info".to_owned()),
+            )
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -221,11 +228,14 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
     }
 
     let page = launch_page("cft").map_err(|Skip(reason)| reason)?;
-    page.navigate(&format!(
-        "{}/?topic={topic}&nick=browser&relay={}&log=fofoca=info",
-        server.url,
-        urlencode(relay_url.as_str()),
-    ));
+    page.navigate_watching_console(
+        &format!(
+            "{}/?topic={topic}&nick=browser&relay={}&log=fofoca=info",
+            server.url,
+            urlencode(relay_url.as_str()),
+        ),
+        CONSOLE_WINDOW,
+    );
     output::status("Running", "terminal \u{2194} browser chat");
 
     if wait_for(Duration::from_mins(1), Duration::from_millis(500), || {
@@ -261,7 +271,9 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
     // the page call itself blocks up to the payload budget, so one iteration
     // consumed the window while duplicate frames piled into the mesh.
     robot.send_line("hello-from-terminal")?;
-    call_page(&page, "chat", "send('hello-from-web')")?;
+    if let Err(error) = call_page(&page, "chat", "send('hello-from-web')") {
+        return fail(&mut robot, Some(&page), &error);
+    }
     let broadcast = wait_for(PAYLOAD_TIMEOUT, Duration::from_millis(500), || {
         (page_text(&page, "messages").contains("hello-from-terminal")
             && robot.saw_frame("hello-from-web", false))
@@ -277,7 +289,9 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
 
     // Directed both ways, same shape.
     robot.send_line("/msg browser direct-from-terminal")?;
-    call_page(&page, "chat", "send('/msg terminal direct-from-web')")?;
+    if let Err(error) = call_page(&page, "chat", "send('/msg terminal direct-from-web')") {
+        return fail(&mut robot, Some(&page), &error);
+    }
     let directed = wait_for(PAYLOAD_TIMEOUT, Duration::from_millis(500), || {
         (page_text(&page, "messages").contains("direct-from-terminal")
             && robot.saw_frame("direct-from-web", true))
@@ -303,16 +317,25 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
 /// Dump both surfaces to a file and fail the suite — twenty lines of tail
 /// answered nothing, twice, in the mesh suite's bring-up.
 fn fail(robot: &mut Robot, page: Option<&Page>, reason: &str) -> TaskOutcome {
-    let mut dump = robot.transcript();
+    // The page first, the console last among them: the console blocks until
+    // its window closes, and the native transcript is read after it so both
+    // logs cover the same stretch of time.
+    let mut browser = String::new();
     if let Some(page) = page {
         for id in ["status", "messages", "peers", "events"] {
             let _ = write!(
-                dump,
+                browser,
                 "\n\u{2500}\u{2500} browser {id} \u{2500}\u{2500}\n{}\n",
                 page_text(page, id)
             );
         }
+        let _ = write!(
+            browser,
+            "\n\u{2500}\u{2500} browser console \u{2500}\u{2500}\n{}\n",
+            page.console()
+        );
     }
+    let dump = robot.transcript() + &browser;
     let path = repo_root().join("target/chat-e2e.log");
     let _ = std::fs::write(&path, dump);
     output::detail(&format!("full log: {}", path.display()));

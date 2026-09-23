@@ -30,6 +30,10 @@ type Failure = Box<dyn std::error::Error>;
 const LINK_TIMEOUT: Duration = Duration::from_secs(150);
 /// One payload hop on a linked pair.
 const PAYLOAD_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long the tab's console is recorded: past the page's one-minute open
+/// and the link wait, so a failure at either still has the whole console.
+const CONSOLE_WINDOW: Duration =
+    Duration::from_secs(60 + LINK_TIMEOUT.as_secs() + PAYLOAD_TIMEOUT.as_secs());
 /// The CLI's departure grace plus the process winding down.
 const EXIT_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -70,7 +74,10 @@ impl Cli {
                 web_url,
                 "--robot",
             ])
-            .env("RUST_LOG", "fofoca=info")
+            .env(
+                "RUST_LOG",
+                std::env::var("RUST_LOG").unwrap_or_else(|_| "fofoca=info".to_owned()),
+            )
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -304,10 +311,13 @@ fn link(cli: &mut Cli, web_url: &str, relay_url: &str) -> Result<(Page, String),
     // The relay and the nickname ride the query; the selector stays in the
     // fragment exactly as printed.
     let (base, fragment) = url.split_once('#').unwrap_or((url, ""));
-    page.navigate(&format!(
-        "{base}?nick=browser&relay={}&log=fofoca=info#{fragment}",
-        urlencode(relay_url),
-    ));
+    page.navigate_watching_console(
+        &format!(
+            "{base}?nick=browser&relay={}&log=fofoca=info#{fragment}",
+            urlencode(relay_url),
+        ),
+        CONSOLE_WINDOW,
+    );
     output::status("Running", "fofoca-pipe \u{2194} the pipe page");
 
     if wait_for(Duration::from_mins(1), Duration::from_millis(500), || {
@@ -368,8 +378,9 @@ fn exchange(cli: &mut Cli, page: &Page, sent: &str) -> Result<(), Failure> {
     }
 
     // Page → terminal, through the same runtime the WebMCP tools call.
-    call_page(page, "pipe", "send('hello-from-web')")?;
-    call_page(page, "pipe", "sendEof()")?;
+    call_page(page, "pipe", "send('hello-from-web')")
+        .or_else(|error| fail(cli, Some(page), &error))?;
+    call_page(page, "pipe", "sendEof()").or_else(|error| fail(cli, Some(page), &error))?;
     // The tab shows its own send, whoever asked for it.
     let own = page.evaluate(
         "(document.querySelector('#streams pre[data-self=\"true\"]')||{}).textContent||''",
@@ -396,7 +407,8 @@ fn exchange(cli: &mut Cli, page: &Page, sent: &str) -> Result<(), Failure> {
         page,
         "pipe",
         "read({ waitMs: 0 }).then(r => { window.__read = JSON.stringify(r) })",
-    )?;
+    )
+    .or_else(|error| fail(cli, Some(page), &error))?;
     let read = page.evaluate("window.__read||''");
     let parsed: serde_json::Value = serde_json::from_str(&read)
         .map_err(|error| format!("pipe.read returned no JSON ({error}): {read}"))?;
@@ -438,16 +450,25 @@ fn exchange(cli: &mut Cli, page: &Page, sent: &str) -> Result<(), Failure> {
 
 /// Dump both surfaces to a file and fail the suite.
 fn fail<T>(cli: &mut Cli, page: Option<&Page>, reason: &str) -> Result<T, Failure> {
-    let mut dump = cli.transcript();
+    // The page first, the console last among them: the console blocks until
+    // its window closes, and the native transcript is read after it so both
+    // logs cover the same stretch of time.
+    let mut browser = String::new();
     if let Some(page) = page {
         for id in ["status", "webmcp", "streams", "peers", "events"] {
             let _ = write!(
-                dump,
+                browser,
                 "\n\u{2500}\u{2500} browser {id} \u{2500}\u{2500}\n{}\n",
                 page_text(page, id)
             );
         }
+        let _ = write!(
+            browser,
+            "\n\u{2500}\u{2500} browser console \u{2500}\u{2500}\n{}\n",
+            page.console()
+        );
     }
+    let dump = cli.transcript() + &browser;
     let path = repo_root().join("target/pipe-e2e.log");
     let _ = std::fs::write(&path, dump);
     output::detail(&format!("full log: {}", path.display()));
