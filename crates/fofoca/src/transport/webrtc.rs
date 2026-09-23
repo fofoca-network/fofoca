@@ -723,8 +723,12 @@ fn spawn_offer_round(
 /// is the liveness proof — so [`negotiate_rendezvous_session`] reports it
 /// through the loop's `DirectOutcome` channel and the graft fires there,
 /// within the freshly proven window.
+///
+/// An IP-capable node joins that rule once it falls back to offering: a
+/// beacon it could not punch to in a whole heal interval is a tab, and a
+/// timer graft there is the same doomed dial.
 pub(crate) fn rendezvous_graftable(state: &crate::daemon::state::EventLoopState) -> bool {
-    !state.rendezvous_graft_needs_session
+    !state.rendezvous_graft_needs_session && !state.rendezvous_offer_fallback
 }
 
 /// Offer a `WebRTC` session to the **rendezvous** itself.
@@ -1961,5 +1965,23 @@ mod tests {
 
         router.shutdown().await.expect("shutdown");
         client.close().await;
+    }
+
+    /// An IP-capable node that fell back to offering the rendezvous a
+    /// session — the beacon is a tab, with no UDP to punch to — grafts on the
+    /// attach, never on a timer. A timer graft dials before the session
+    /// exists, so its connection has only the relay path; the tab's accept
+    /// gate holds it and refuses it after `PROBE_DEADLINE`, and the attach
+    /// that follows does not replace it. Observed every 30 s for a whole
+    /// browser-first cell.
+    #[test]
+    fn an_offer_fallback_holds_the_timer_graft() {
+        let mut state = crate::testing::fresh_state();
+        assert!(
+            rendezvous_graftable(&state),
+            "an IP-capable node grafts on its timer until it falls back"
+        );
+        state.rendezvous_offer_fallback = true;
+        assert!(!rendezvous_graftable(&state));
     }
 }
