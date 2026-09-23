@@ -56,14 +56,15 @@ use crate::util::tuning::{
 /// from before it home on the retired `swarm-relay.…` host, so they
 /// cannot relay-direct rendezvous with binaries from after.
 pub const RENDEZVOUS_RELAY_LADDER: [&str; 5] = [
-    // No trailing-dot FQDN on rung 0: Cloudflare routes by exact Host
-    // header and 404s the dotted form (including the /relay websocket
-    // upgrade); n0's infra tolerates the dot.
-    "https://relay.agent-habilis.com/",    // ours (rung 0)
-    "https://use1-1.relay.n0.iroh.link./", // NA-east
-    "https://usw1-1.relay.n0.iroh.link./", // NA-west
-    "https://euc1-1.relay.n0.iroh.link./", // EU
-    "https://aps1-1.relay.n0.iroh.link./", // AP
+    // No trailing-dot FQDN on any rung. Safari rejects the certificate of a
+    // dotted host, so a browser member could reach none of them. Rung 0 has
+    // a second reason: Cloudflare routes by exact Host header and 404s the
+    // dotted form (including the /relay websocket upgrade).
+    "https://relay.agent-habilis.com/",   // ours (rung 0)
+    "https://use1-1.relay.n0.iroh.link/", // NA-east
+    "https://usw1-1.relay.n0.iroh.link/", // NA-west
+    "https://euc1-1.relay.n0.iroh.link/", // EU
+    "https://aps1-1.relay.n0.iroh.link/", // AP
 ];
 
 /// Parsed once; `RelayUrl` clones are `Arc`-backed (cheap).
@@ -485,6 +486,18 @@ mod tests {
             "RENDEZVOUS_RELAY_LADDER drifted from iroh's prod relay set \
              (sendme #121): review the RENDEZVOUS_RELAY_LADDER doc comment before bumping iroh"
         );
+    }
+
+    /// Safari refuses the TLS certificate of a host written with a trailing
+    /// dot, so a browser member could reach no dotted rung at all.
+    #[test]
+    fn no_ladder_rung_has_a_trailing_dot() {
+        let dotted: Vec<&str> = RENDEZVOUS_RELAY_LADDER_URLS
+            .iter()
+            .filter_map(|url| url.host_str())
+            .filter(|host| host.ends_with('.'))
+            .collect();
+        assert!(dotted.is_empty(), "dotted ladder hosts: {dotted:?}");
     }
 
     #[test]
