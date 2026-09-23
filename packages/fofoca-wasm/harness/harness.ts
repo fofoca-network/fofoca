@@ -23,6 +23,8 @@
  * - `#state` holds the shared state JSON.
  * - `window.harness = { send, sendEof, stateMerge, close }`, all
  *   promise-returning.
+ * - `window.harnessLog` holds every mirrored console line, timestamped in
+ *   UTC. `#log` keeps only the tail, and a failure needs the start.
  */
 
 import { join } from '../src/index.ts'
@@ -36,6 +38,7 @@ declare global {
       stateMerge(json: string): Promise<void>
       close(): Promise<void>
     }
+    harnessLog?: string[]
   }
 }
 
@@ -74,6 +77,8 @@ function mirrorConsole(): void {
   target.style.display = 'none'
   document.body.append(target)
   const original = console.log.bind(console)
+  const full: string[] = []
+  window.harnessLog = full
   // Buffered and flushed on a timer: rebuilding a 20KB text node per line
   // was itself enough main-thread work to starve the mesh at debug volume.
   let pending: string[] = []
@@ -99,7 +104,10 @@ function mirrorConsole(): void {
     ) {
       return
     }
-    pending.push(line)
+    // The time of day as the native log spells it, so the two line up.
+    const stamped = `${new Date().toISOString().slice(11, 23)}Z ${line}`
+    full.push(stamped)
+    pending.push(stamped)
   }
 }
 

@@ -808,7 +808,7 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
                     ),
                     (
                         "console",
-                        "(document.getElementById('log')||{}).textContent||''",
+                        "(window.harnessLog||[]).join('\\n')",
                     ),
                 ]
                 .map(|(name, expr)| {
