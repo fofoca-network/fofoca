@@ -806,10 +806,7 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
                         "frames",
                         "(document.getElementById('frames')||{}).textContent||''",
                     ),
-                    (
-                        "console",
-                        "(window.harnessLog||[]).join('\\n')",
-                    ),
+                    ("console", "(window.harnessLog||[]).join('\\n')"),
                 ]
                 .map(|(name, expr)| {
                     format!(
