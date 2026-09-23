@@ -812,6 +812,23 @@ pub(crate) fn negotiate_rendezvous_session(
     );
 }
 
+/// The first rendezvous offer, made when the loop starts. The heal tick that
+/// otherwise makes it is a whole interval away, and until it runs a
+/// browser-shaped node has no path onto a lookup-only mesh; a beacon that
+/// re-checks inside that window finds nobody negotiating and sheds.
+///
+/// Only a node that needs the lane: an IP-capable node's first call arms the
+/// offer fallback, which holds its timer grafts before its punch has had a
+/// heal interval to land.
+pub(crate) fn offer_rendezvous_at_start(
+    state: &mut crate::daemon::state::EventLoopState,
+    ctx: &crate::daemon::ctx::HandlerCtx<'_>,
+) {
+    if local_needs_webrtc_lane(state.local_ip_transport) {
+        negotiate_rendezvous_session(state, ctx);
+    }
+}
+
 // ── Per-target JSEP ───────────────────────────────────────────────────────
 //
 // Only these two helpers differ by backend. Everything above — the ALPN, the

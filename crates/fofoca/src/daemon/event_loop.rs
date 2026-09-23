@@ -589,6 +589,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
     {
         let ctx = parts.ctx(&sender);
         app.on_startup(&mut state, &ctx).await;
+        crate::transport::webrtc::offer_rendezvous_at_start(&mut state, &ctx);
     }
 
     loop {
