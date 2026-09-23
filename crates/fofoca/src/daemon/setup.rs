@@ -9,7 +9,9 @@ use tokio::sync::{mpsc, watch};
 use crate::gossip::event::{NodeEvent, NodeSink};
 #[cfg(feature = "host")]
 use crate::lookup::build_peer_multihop;
-use crate::lookup::{StoppableTask, add_peer_addr, build_mesh, relay_ladder, select_bootstrap_rung};
+use crate::lookup::{
+    StoppableTask, add_peer_addr, build_mesh, relay_ladder, select_bootstrap_rung,
+};
 use crate::protocol::crypto::Password;
 use crate::protocol::mesh::{LookupOpts, Mesh, MeshConfig, MeshName};
 use crate::protocol::{MeshId, Nickname};

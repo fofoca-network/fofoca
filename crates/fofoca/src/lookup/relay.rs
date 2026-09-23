@@ -540,7 +540,8 @@ mod tests {
         // RFC-5737 TEST-NET-1, never routable ⇒ the relay handshake can
         // never connect ⇒ `select_bootstrap_rung` finds no reachable rung.
         let bogus: RelayUrl = "https://192.0.2.1./".parse().unwrap();
-        let selected = select_bootstrap_rung(&[bogus], std::time::Duration::from_secs(2), None).await;
+        let selected =
+            select_bootstrap_rung(&[bogus], std::time::Duration::from_secs(2), None).await;
         assert!(
             selected.is_none(),
             "an unreachable relay must not be selected as a live rung"
