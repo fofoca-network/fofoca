@@ -290,10 +290,10 @@ pub(super) fn next_recheck_delay(round: u32, roster: usize, endpoint_id: Endpoin
 /// otherwise never merge.
 const MAX_SHED_DEFERRALS: u32 = 3;
 
-/// Whether this due shed waits a round: someone is on the data channel and
-/// we have not already waited our limit.
-pub(super) fn defer_shed(sessions: usize, deferrals: u32) -> bool {
-    sessions > 0 && deferrals < MAX_SHED_DEFERRALS
+/// Whether this due shed waits a round: someone is on the data channel, or
+/// negotiating one, and we have not already waited our limit.
+pub(super) fn defer_shed(dependents: usize, deferrals: u32) -> bool {
+    dependents > 0 && deferrals < MAX_SHED_DEFERRALS
 }
 
 /// Arm the next rival re-check after a fresh claim (a `None` → live
@@ -338,17 +338,16 @@ pub(super) fn shed_rival_beacon_if_due(
     if !due {
         return false;
     }
-    let sessions = state
-        .webrtc
+    let dependents = rendezvous
         .as_ref()
-        .map_or(0, fofoca_iroh_webrtc_transport::WebRtcHandle::session_count);
-    if defer_shed(sessions, state.rival_recheck_deferrals) {
+        .map_or(0, beacon::Rendezvous::dependents);
+    if defer_shed(dependents, state.rival_recheck_deferrals) {
         state.rival_recheck_deferrals = state.rival_recheck_deferrals.saturating_add(1);
         state.next_rival_recheck =
             Some(Instant::now() + Duration::from_secs(crate::util::tuning::rival_recheck_secs()));
         tracing::info!(
             target: "fofoca::gossip",
-            sessions,
+            dependents,
             deferrals = state.rival_recheck_deferrals,
             "beacon rival re-check deferred: a data-channel peer is hanging off this beacon"
         );
@@ -399,6 +398,60 @@ mod tests {
     fn a_due_shed_waits_while_a_data_channel_peer_depends_on_us() {
         assert!(defer_shed(1, 0), "a tab is hanging off this beacon");
         assert!(!defer_shed(0, 0), "nobody on the channel: shed on time");
+    }
+
+    /// A tab negotiating with the beacon has no session yet, and a shed then
+    /// cuts the rendezvous it is about to link through. Observed: a shed 7 ms
+    /// before the tab's session attached, after which the tab found the
+    /// rendezvous free and claimed it. The count is the beacon's own answerer:
+    /// the peer's handle never holds a tab's session with the beacon.
+    #[tokio::test]
+    async fn a_due_shed_waits_for_a_tab_negotiating_with_the_beacon() {
+        use crate::beacon::{Rendezvous, RendezvousParams};
+        use crate::transport::{MAX_DIRECT_PEERS, SignalAdmission};
+        use crate::util::clock::Instant;
+        use iroh::SecretKey;
+
+        let secret = SecretKey::generate();
+        let params = RendezvousParams {
+            topic_id: iroh_gossip::proto::TopicId::from_bytes([7u8; 32]),
+            id: secret.public(),
+            secret,
+            bind_ports: Vec::new(),
+            lookups: crate::protocol::mesh::LookupOpts::loopback(),
+            relay_transport: false,
+            bootstrap_relay: None,
+            rung_tx: tokio::sync::watch::channel(None).0,
+        };
+        let arm = super::CohostArm {
+            policy: CoHostPolicy::EagerProbed,
+            params: &params,
+            started: Instant::now(),
+        };
+        let mut state = crate::testing::fresh_state();
+        state.next_rival_recheck = Some(Instant::now());
+
+        let handle = crate::lookup::new_webrtc_handle(params.id);
+        let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
+        let tab = SecretKey::generate().public();
+        let _round = admission.try_admit(tab, &handle).expect("a free slot");
+        let endpoint = crate::lookup::build_endpoint(
+            &crate::protocol::mesh::LookupOpts::loopback(),
+            None,
+            None,
+            Vec::new(),
+            crate::lookup::TransportHandles::default(),
+        )
+        .await
+        .expect("loopback endpoint");
+        let mut rendezvous = Some(Rendezvous::for_test(endpoint, Some((handle, admission))));
+
+        assert!(!super::shed_rival_beacon_if_due(
+            &mut state,
+            &arm,
+            &mut rendezvous
+        ));
+        assert!(rendezvous.is_some(), "the beacon is still held");
     }
 
     /// Bounded, or two holders that each kept a tab would never find each

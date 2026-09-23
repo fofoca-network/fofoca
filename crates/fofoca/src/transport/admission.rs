@@ -176,7 +176,6 @@ impl SignalAdmission {
         self.lock().inflight.remove(&peer);
     }
 
-    #[cfg(test)]
     pub(crate) fn in_flight(&self) -> usize {
         self.lock().inflight.len()
     }
