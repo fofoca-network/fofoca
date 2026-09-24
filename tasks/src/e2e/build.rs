@@ -110,7 +110,7 @@ pub(super) fn build(
             "-p",
             "fofoca-iroh-webrtc-transport",
             "--features",
-            "web",
+            "web,bench",
             "--test",
             test,
             "--message-format=json",
@@ -169,13 +169,29 @@ pub(crate) fn check_wasm_bindgen() -> TaskOutcome {
 
 /// Build the browser peer (`fofoca-wasm`) and emit its ES-module glue into
 /// `packages/fofoca-wasm/wasm/`, returning the glue's path.
+pub(crate) fn build_wasm_peer(env: &BTreeMap<String, String>) -> Result<PathBuf, String> {
+    build_wasm_cdylib(
+        "fofoca-wasm",
+        env,
+        &repo_root().join("packages/fofoca-wasm/wasm"),
+    )
+}
+
+/// Build one wasm-bindgen cdylib `package` for the browser and emit its
+/// ES-module glue into `out_dir`, returning the glue's path.
 ///
 /// The `.wasm` path comes from cargo's own JSON for the same reason
 /// [`build`]'s does — a stale artefact is indistinguishable by filename —
 /// except a cdylib reports through `filenames`, not `executable`.
 /// `--release` for the same reason too: the debug wasm is enormous and the
 /// browser gives up loading it.
-pub(crate) fn build_wasm_peer(env: &BTreeMap<String, String>) -> Result<PathBuf, String> {
+pub(crate) fn build_wasm_cdylib(
+    package: &str,
+    env: &BTreeMap<String, String>,
+    out_dir: &Path,
+) -> Result<PathBuf, String> {
+    let stem = package.replace('-', "_");
+    let wasm_name = format!("{stem}.wasm");
     let built = Command::new("cargo")
         .current_dir(repo_root())
         .args([
@@ -185,7 +201,7 @@ pub(crate) fn build_wasm_peer(env: &BTreeMap<String, String>) -> Result<PathBuf,
             "--target",
             "wasm32-unknown-unknown",
             "-p",
-            "fofoca-wasm",
+            package,
             "--message-format=json",
         ])
         .envs(env)
@@ -199,22 +215,21 @@ pub(crate) fn build_wasm_peer(env: &BTreeMap<String, String>) -> Result<PathBuf,
             message.get("filenames").and_then(|filenames| {
                 filenames.as_array()?.iter().find_map(|name| {
                     let path = PathBuf::from(name.as_str()?);
-                    (path.file_name()? == "fofoca_wasm.wasm").then_some(path)
+                    (path.file_name()? == wasm_name.as_str()).then_some(path)
                 })
             })
         })
         .next_back();
     let Some(artifact) = artifact.filter(|path| path.is_file()) else {
         return Err(format!(
-            "could not build the fofoca-wasm cdylib:\n{}",
+            "could not build the {package} cdylib:\n{}",
             String::from_utf8_lossy(&built.stderr).trim()
         ));
     };
 
-    let out_dir = repo_root().join("packages/fofoca-wasm/wasm");
     let bound = Command::new("wasm-bindgen")
         .args(["--target", "web", "--out-dir"])
-        .arg(&out_dir)
+        .arg(out_dir)
         .arg(&artifact)
         .output()
         .map_err(|error| format!("could not run wasm-bindgen: {error}"))?;
@@ -224,7 +239,7 @@ pub(crate) fn build_wasm_peer(env: &BTreeMap<String, String>) -> Result<PathBuf,
             String::from_utf8_lossy(&bound.stderr).trim()
         ));
     }
-    Ok(out_dir.join("fofoca_wasm.js"))
+    Ok(out_dir.join(format!("{stem}.js")))
 }
 
 /// Bun serves both e2e suites' pages; probe for it before anything builds.

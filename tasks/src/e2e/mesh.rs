@@ -24,6 +24,7 @@ use std::time::Duration;
 use crate::TaskOutcome;
 use crate::util::{output, repo_root, wait_for};
 
+use super::page::{Page, call_page, rand_token, urlencode, wait_ready};
 use super::{Args, Skip, build, cdp, webdriver};
 
 /// A linked pair has to survive the beacon claim (~8 s), a WebRTC
@@ -269,38 +270,6 @@ impl Native {
     }
 }
 
-// ── the browser page ────────────────────────────────────────────────────
-
-/// One browser on the harness page, behind whichever driver reaches it.
-pub(super) enum Page {
-    Cdp(cdp::Browser),
-    WebDriver(webdriver::Session),
-}
-
-impl Page {
-    pub(super) fn navigate(&self, url: &str) {
-        match self {
-            Self::Cdp(browser) => browser.navigate(url),
-            Self::WebDriver(session) => session.navigate(url),
-        }
-    }
-
-    /// Evaluate a JS expression (no `return`), reading its value as a string.
-    pub(super) fn evaluate(&self, expression: &str) -> String {
-        match self {
-            Self::Cdp(browser) => browser.evaluate(expression),
-            Self::WebDriver(session) => session.execute(&format!("return ({expression});")),
-        }
-    }
-
-    fn version(&self) -> String {
-        match self {
-            Self::Cdp(browser) => browser.version(),
-            Self::WebDriver(session) => session.version(),
-        }
-    }
-}
-
 /// Every payload lane, both directions: broadcast, directed, state merge.
 /// Send from the native side, retrying inside the payload window. The first
 /// directed frame to a fresh peer can race the very path it needs — a dial
@@ -388,36 +357,6 @@ async fn check_payload_lanes(page: &Page, native: &mut Native) -> Result<(), Cel
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
-}
-
-/// A page object's promise-returning controls (`window.harness`,
-/// `window.chat`), awaited via a completion flag the driver polls — neither
-/// backend can await a JS promise directly.
-pub(super) fn call_page(page: &Page, object: &str, call: &str) -> Result<(), String> {
-    let token = format!("call{}", rand_token());
-    let expression = format!(
-        "window.{token}='pending',window.{object}.{call}.then(()=>window.{token}='ok',(e)=>window.{token}='error: '+e),'started'"
-    );
-    let started = page.evaluate(&expression);
-    if started != "started" {
-        return Err(format!("{object} call {call} did not start: {started:?}"));
-    }
-    let outcome = wait_for(PAYLOAD_TIMEOUT, Duration::from_millis(250), || {
-        let state = page.evaluate(&format!("window.{token}"));
-        (state != "pending").then_some(state)
-    })
-    .ok_or_else(|| format!("{object} call {call} never settled"))?;
-    if outcome == "ok" {
-        return Ok(());
-    }
-    Err(format!("{object} call {call} failed: {outcome}"))
-}
-
-pub(super) fn rand_token() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|since| since.subsec_nanos().into())
-        .unwrap_or_default()
 }
 
 // ── the served page ─────────────────────────────────────────────────────
@@ -521,13 +460,6 @@ fn page_url(base: &str, cell: &Cell, relay_url: &str, selector: &str) -> String 
     )
 }
 
-pub(super) fn urlencode(raw: &str) -> String {
-    raw.replace('%', "%25")
-        .replace('&', "%26")
-        .replace('+', "%2B")
-        .replace('#', "%23")
-}
-
 async fn run_cell(
     cell: &Cell,
     relay_url: &str,
@@ -591,15 +523,8 @@ async fn run_cell(
 
     // The page must open the mesh — even the refusal cell (the mesh opens;
     // the *pair* never links).
-    let ready = wait_for(Duration::from_secs(30), Duration::from_millis(500), || {
-        let failed = page.evaluate("(document.getElementById('failed')||{}).textContent||''");
-        if !failed.is_empty() {
-            return Some(Err(failed));
-        }
-        let ready = page.evaluate("document.getElementById('ready')?'1':'0'");
-        (ready == "1").then_some(Ok(()))
-    })
-    .ok_or_else(|| fail("the harness page never became ready".to_owned()))?;
+    let ready = wait_ready(page, Duration::from_secs(30), Duration::from_millis(500))
+        .ok_or_else(|| fail("the harness page never became ready".to_owned()))?;
     ready.map_err(|error| fail(format!("the harness page failed to open the mesh: {error}")))?;
 
     // ── link expectation ────────────────────────────────────────────
