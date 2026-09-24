@@ -101,7 +101,7 @@ pub(crate) struct Rendezvous {
     task: JoinHandle<()>,
     /// The relay-rung liveness/discovery monitor (`spawn_relay_monitor`).
     /// `None` for private / relay-disabled meshes (nothing to monitor).
-    monitor: Option<JoinHandle<()>>,
+    monitor: Option<crate::lookup::StoppableTask>,
     /// The co-hosted endpoint itself, retained so [`Self::shed`] and
     /// [`Self::shed_and_wait`] can close it gracefully — a plain drop (task
     /// abort) skips the orderly QUIC close, and the peer's link to its own
@@ -120,7 +120,7 @@ impl Rendezvous {
         n0_future::task::spawn(async move {
             endpoint.close().await;
         });
-        // `self` drops here, aborting both tasks.
+        // `self` drops here, aborting the co-host task and stopping the monitor.
     }
 
     /// The same graceful release, *awaited* — for the event loop's teardown.
@@ -133,25 +133,43 @@ impl Rendezvous {
     /// co-hosting member, which is all of them.
     ///
     /// Bounded, because winding down must not hang on a relay that stopped
-    /// answering: `Node::leave` gives the whole shutdown 3s and the `Left`
-    /// propagation sleep already spends 500ms of it. Past the bound we are no
-    /// worse off than before this existed.
-    pub(crate) async fn shed_and_wait(self) {
+    /// answering. See `RENDEZVOUS_CLOSE_SECS`. Past the bound we are no worse
+    /// off than before this existed.
+    ///
+    /// The monitor is stopped and waited for in the same budget, not aborted:
+    /// mid re-walk it holds a probe endpoint of its own, which an abort drops
+    /// open.
+    pub(crate) async fn shed_and_wait(mut self) {
         let endpoint = self.endpoint.clone();
-        // Abort the co-host and monitor tasks first, so neither is still
-        // driving the endpoint while it closes.
+        let monitor = self.monitor.take();
+        // Abort the co-host task first, so it is not still driving the
+        // endpoint while it closes.
         drop(self);
-        if n0_future::time::timeout(Duration::from_secs(RENDEZVOUS_CLOSE_SECS), endpoint.close())
-            .await
-            .is_err()
-        {
-            tracing::debug!(target: "fofoca::beacon", "rendezvous endpoint close timed out; abandoning it");
-        }
+        tokio::join!(
+            async {
+                if n0_future::time::timeout(
+                    Duration::from_secs(RENDEZVOUS_CLOSE_SECS),
+                    endpoint.close(),
+                )
+                .await
+                .is_err()
+                {
+                    tracing::debug!(target: "fofoca::beacon", "rendezvous endpoint close timed out; abandoning it");
+                }
+            },
+            async {
+                if let Some(monitor) = monitor {
+                    monitor.stop_and_wait().await;
+                }
+            },
+        );
     }
 }
 
-/// Aborts both tasks — and **does not close the endpoint**, because it
-/// cannot: closing is async and `Drop` is not.
+/// Aborts the co-host task and stops the monitor (dropping it signals the
+/// stop, and the monitor then closes any probe endpoint of its own) — and
+/// **does not close the endpoint**, because it cannot: closing is async and
+/// `Drop` is not.
 ///
 /// So a bare `drop` (or `*slot = None`, which is the same thing wearing a
 /// disguise) abandons a live, still-registered socket: iroh logs `Endpoint
@@ -164,9 +182,6 @@ impl Rendezvous {
 impl Drop for Rendezvous {
     fn drop(&mut self) {
         self.task.abort();
-        if let Some(monitor) = &self.monitor {
-            monitor.abort();
-        }
     }
 }
 
@@ -224,20 +239,30 @@ pub(crate) struct RivalProbe {
     /// cancels it first. `None` when the probe never dialed — an
     /// unanswerable target pre-resolves the verdict without an endpoint.
     endpoint: Option<Endpoint>,
+    /// Tells the task to stop dialing and go straight to its own close.
+    /// `None` when there is no dial to stop.
+    cancel: Option<oneshot::Sender<()>>,
 }
 
 impl RivalProbe {
-    /// Cancel the probe and close its endpoint gracefully — the departure
-    /// counterpart to letting the task finish, and the same bounded shape as
-    /// [`Rendezvous::shed_and_wait`] for the same reason.
-    pub(crate) async fn abort_and_close(self) {
-        let Some(endpoint) = self.endpoint.clone() else {
+    /// Stop the probe and wait for its endpoint to close gracefully — the
+    /// departure counterpart to letting the task finish, and the same bounded
+    /// shape as [`Rendezvous::shed_and_wait`] for the same reason.
+    ///
+    /// The task closes its own endpoint, so this cancels the dial and waits for
+    /// the task rather than aborting it. An abort could land while the task is
+    /// already inside `close()`, which cuts that close short, and a second
+    /// `close()` returns at once while one is in flight, so nothing would
+    /// finish it.
+    pub(crate) async fn abort_and_close(mut self) {
+        if self.endpoint.is_none() {
             // Never dialed, nothing to close.
             return;
-        };
-        // Abort first, so the task is not still dialing while we close.
-        drop(self);
-        if n0_future::time::timeout(Duration::from_secs(RENDEZVOUS_CLOSE_SECS), endpoint.close())
+        }
+        if let Some(cancel) = self.cancel.take() {
+            let _ = cancel.send(());
+        }
+        if n0_future::time::timeout(Duration::from_secs(RENDEZVOUS_CLOSE_SECS), &mut self.task)
             .await
             .is_err()
         {
@@ -328,6 +353,7 @@ async fn spawn_rival_probe(params: &RendezvousParams) -> Option<RivalProbe> {
                 rx,
                 task: n0_future::task::spawn(async {}),
                 endpoint: None,
+                cancel: None,
             });
         }
     };
@@ -352,8 +378,14 @@ async fn spawn_rival_probe(params: &RendezvousParams) -> Option<RivalProbe> {
     let budget = Duration::from_secs(HEAL_PROBE_SECS.min(heal_interval_secs()));
     let (tx, rx) = oneshot::channel();
     let endpoint = prober.clone();
+    let (cancel, cancelled) = oneshot::channel();
     let task = n0_future::task::spawn(async move {
-        let found_rival = probe_connect(&prober, target, budget).await;
+        let found_rival = tokio::select! {
+            found = probe_connect(&prober, target, budget) => found,
+            // A departure: no one will read the verdict, but the endpoint
+            // must still close below.
+            _ = cancelled => true,
+        };
         prober.close().await;
         // A closed receiver means the loop moved on (departure, or the
         // beacon arrived another way); the verdict is simply stale.
@@ -363,6 +395,7 @@ async fn spawn_rival_probe(params: &RendezvousParams) -> Option<RivalProbe> {
         rx,
         task,
         endpoint: Some(endpoint),
+        cancel: Some(cancel),
     })
 }
 
@@ -772,6 +805,7 @@ mod tests {
             rx,
             task: n0_future::task::spawn(std::future::pending()),
             endpoint: Some(loopback_endpoint().await),
+            cancel: None,
         }
     }
 
@@ -821,6 +855,102 @@ mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
+    }
+
+    /// Regression for `Endpoint dropped without calling Endpoint::close` on
+    /// every Ctrl-C that landed mid-probe. A probe still in its handshake has
+    /// sent a close frame nobody will acknowledge, so iroh's close waits out
+    /// the QUIC drain (about 3s) before it finishes. A budget shorter than that
+    /// abandoned the endpoint half-closed, and its drop logged the error.
+    #[tokio::test]
+    async fn abort_and_close_waits_out_a_probe_mid_handshake() {
+        // Bound and never read: the handshake's packets vanish without an
+        // answer, as they do into a relay rung nobody serves.
+        let silent = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .expect("a silent loopback socket");
+        let mut params = public_params();
+        params.bind_ports = vec![silent.local_addr().expect("its address").port()];
+        let probe = spawn_rival_probe(&params)
+            .await
+            .expect("a probe with a rung to dial");
+        let prober = probe.endpoint.clone().expect("the probe dials");
+        // Let the handshake start, so there is a connection to drain.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        probe.abort_and_close().await;
+
+        assert!(
+            prober.is_closed(),
+            "abort_and_close returned with the probe endpoint still open; its drop logs the ungraceful-abort error"
+        );
+    }
+
+    /// The other half of the same error: the probe's dial ran out on its own
+    /// and its task was already closing the endpoint when the departure came.
+    /// Aborting the task there cut that close short, and a second `close()`
+    /// returns at once while one is in flight, so nothing finished it.
+    #[tokio::test]
+    async fn abort_and_close_lets_a_probe_finish_closing_its_own_endpoint() {
+        let silent = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .expect("a silent loopback socket");
+        let target = super::EndpointAddr::new(SecretKey::generate().public())
+            .with_ip_addr(silent.local_addr().expect("its address"));
+        let prober = loopback_endpoint().await;
+        let dialer = prober.clone();
+        let task = n0_future::task::spawn(async move {
+            // The dial gives up almost at once, leaving a handshake to drain,
+            // and the task moves on to its own close, as the real one does.
+            super::probe_connect(&dialer, target, std::time::Duration::from_millis(200)).await;
+            dialer.close().await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        let probe = RivalProbe {
+            rx: oneshot::channel().1,
+            task,
+            endpoint: Some(prober.clone()),
+            cancel: None,
+        };
+
+        probe.abort_and_close().await;
+
+        assert!(
+            prober.is_closed(),
+            "abort_and_close cut the probe's own close short; its drop logs the ungraceful-abort error"
+        );
+    }
+
+    /// Regression for `Endpoint dropped without calling Endpoint::close` on a
+    /// departure while the relay monitor re-walks the ladder: the walk probes
+    /// each rung on an endpoint of its own, and aborting the monitor mid-walk
+    /// dropped that endpoint open. Relay-less, the monitor walks at once.
+    #[cfg(feature = "host")]
+    #[test]
+    fn shed_and_wait_mid_rewalk_closes_the_monitor_probe_endpoint() {
+        let (_silent, rung) = crate::testing::silent_relay_rung();
+
+        let errors = crate::testing::errors_through_runtime_drop(async {
+            let endpoint = loopback_endpoint().await;
+            let monitor = crate::lookup::spawn_relay_monitor(
+                endpoint.clone(),
+                vec![rung],
+                watch::channel(None).0,
+                false,
+            );
+            // Let the walk bind its probe and start waiting for the relay.
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            let rendezvous = Rendezvous {
+                task: n0_future::task::spawn(std::future::pending()),
+                monitor: Some(monitor),
+                endpoint,
+            };
+
+            rendezvous.shed_and_wait().await;
+        });
+
+        assert!(
+            !errors.contains("Endpoint dropped without calling"),
+            "the relay monitor's probe endpoint reached its drop open:\n{errors}"
+        );
     }
 
     #[test]

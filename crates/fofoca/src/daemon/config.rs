@@ -150,6 +150,9 @@ pub struct EventLoopConfig {
     /// a change the loop re-registers the rendezvous and re-homes the
     /// beacon, so the ladder walk never runs on the sole loop.
     pub(crate) rung_rx: watch::Receiver<Option<iroh::RelayUrl>>,
+    /// The backgrounded startup probe behind `rung_rx`, released on the way
+    /// out with the rendezvous. `None` for an empty ladder.
+    pub(crate) rung_probe: Option<crate::lookup::StoppableTask>,
     /// When this member may serve the rendezvous (beacon role).
     pub(crate) cohost: CoHostPolicy,
     /// The consumer's per-user runtime base — the root the control socket, the

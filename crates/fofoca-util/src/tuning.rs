@@ -587,23 +587,30 @@ pub const RENDEZVOUS_PROBE_ATTEMPTS: u32 = 3;
 /// starting up inside.
 pub const RENDEZVOUS_PROBE_RETRY_MS: u64 = 250;
 
-/// How long a departing member waits for its co-hosted rendezvous endpoint
-/// to close (`beacon::Rendezvous::shed_and_wait`).
+/// How long a departing member waits for its co-hosted rendezvous endpoint,
+/// and for an outstanding rival probe's endpoint, to close
+/// (`beacon::Rendezvous::shed_and_wait`, `beacon::RivalProbe::abort_and_close`).
 ///
-/// Bounded because shutdown must not hang on a relay that stopped answering:
-/// `Node::leave` allows the whole wind-down 3s and the `Left` propagation
-/// sleep already spends 500ms of it, so this has to fit in what is left with
-/// room to spare. Exceeding the bound abandons the endpoint exactly as it was
-/// abandoned before this wait existed — a fallback to the old behaviour, never
-/// worse than it.
+/// Bounded because shutdown must not hang on a relay that stopped answering.
+/// Exceeding the bound abandons the endpoint exactly as it was abandoned
+/// before this wait existed — a fallback to the old behaviour, never worse
+/// than it. [`NODE_LEAVE_SECS`] is derived from this, so the two cannot drift.
 ///
 /// **Not a round number picked for looks.** At 1s it timed out on a live
 /// three-peer share: an endpoint homed on two relay rungs spends most of a
 /// second shutting its relay actors down (measured ~770ms under
-/// `iroh=debug`), so a one-second budget sits on the edge and the ungraceful
-/// drop this exists to prevent came straight back. 2s clears the measured cost
-/// with headroom and still leaves ~500ms of `Node::leave`'s budget unspent.
-pub const RENDEZVOUS_CLOSE_SECS: u64 = 2;
+/// `iroh=debug`). At 2s it timed out on every departure that landed while a
+/// rival probe was still in its handshake: the probe's close frame is never
+/// acknowledged, so iroh's close waits out the QUIC drain, which it documents
+/// as "usually 3 seconds". 4s clears that with headroom.
+pub const RENDEZVOUS_CLOSE_SECS: u64 = 4;
+
+/// How long `Node::leave` waits for the event loop to wind down before it
+/// detaches it: the 500ms `Left` propagation sleep, then the endpoint closes,
+/// which run concurrently and so cost one [`RENDEZVOUS_CLOSE_SECS`], plus
+/// headroom. A shorter budget let `serve` return and drop the runtime while a
+/// close was still in flight, which aborts that close.
+pub const NODE_LEAVE_SECS: u64 = RENDEZVOUS_CLOSE_SECS + 2;
 
 /// Roster size (known live members) at or below which a *meshed* holder uses
 /// the brisk lone cadence ([`RIVAL_RECHECK_SECS`]) instead of the slow

@@ -86,6 +86,7 @@ pub async fn run<A: NodeDriver>(
         max_peers,
         rendezvous_params,
         rung_rx,
+        rung_probe,
         cohost,
         runtime_base,
         state_file,
@@ -329,6 +330,7 @@ pub async fn run<A: NodeDriver>(
         rival_probe,
         rendezvous_params,
         rung_rx,
+        rung_probe,
         cohost,
         started,
         external_quit_rx,
@@ -474,6 +476,8 @@ struct EventLoop<A: NodeDriver> {
     /// Bootstrap rung chosen off-loop (startup probe + beacon
     /// self-monitor); the loop applies changes via the rung-update arm.
     rung_rx: watch::Receiver<Option<RelayUrl>>,
+    /// The startup probe behind `rung_rx`, released with the rendezvous.
+    rung_probe: Option<crate::lookup::StoppableTask>,
     /// When this member may serve the rendezvous (see [`CoHostPolicy`]).
     cohost: CoHostPolicy,
     /// Event-loop start, for the unmeshed-joiner co-host grace.
@@ -535,6 +539,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
         mut rival_probe,
         mut rendezvous_params,
         mut rung_rx,
+        mut rung_probe,
         cohost,
         started,
         mut external_quit_rx,
@@ -690,7 +695,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
                         &mut app,
                         GossipLink { sender: &mut sender, receiver: &mut receiver, attempts: &mut resubscribe_attempts },
                     ).await {
-                        release_rendezvous(&mut rendezvous, &mut rival_probe).await;
+                        release_rendezvous(&mut rendezvous, &mut rival_probe, &mut rung_probe).await;
                         return Err(error);
                     }
                     let ctx = parts.ctx(&sender);
@@ -802,7 +807,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
         app.drain_surfaced();
     }
 
-    release_rendezvous(&mut rendezvous, &mut rival_probe).await;
+    release_rendezvous(&mut rendezvous, &mut rival_probe, &mut rung_probe).await;
     Ok(())
 }
 

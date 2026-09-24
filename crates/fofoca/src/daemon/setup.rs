@@ -9,7 +9,9 @@ use tokio::sync::{mpsc, watch};
 use crate::gossip::event::{NodeEvent, NodeSink};
 #[cfg(feature = "host")]
 use crate::lookup::build_peer_multihop;
-use crate::lookup::{add_peer_addr, build_mesh, relay_ladder, select_bootstrap_rung};
+use crate::lookup::{
+    StoppableTask, add_peer_addr, build_mesh, relay_ladder, select_bootstrap_rung,
+};
 use crate::protocol::crypto::Password;
 use crate::protocol::mesh::{LookupOpts, Mesh, MeshConfig, MeshName};
 use crate::protocol::{MeshId, Nickname};
@@ -101,18 +103,26 @@ fn rendezvous_params(
 /// is already out) and, if the first *reachable* rung differs from rung
 /// 0, publish it through `rung_tx`. Covers a rung-0-down-at-start for
 /// both creator and joiner; the joiner has no beacon self-monitor, so
-/// this is its only startup correction. No-op for an empty (private /
+/// this is its only startup correction. `None` for an empty (private /
 /// relay-disabled) ladder.
 fn spawn_startup_rung_confirmation(
     ladder: Vec<RelayUrl>,
     rung_tx: watch::Sender<Option<RelayUrl>>,
-) {
+) -> Option<StoppableTask> {
     if ladder.is_empty() {
-        return;
+        return None;
     }
-    n0_future::task::spawn(async move {
-        let confirmed =
-            select_bootstrap_rung(&ladder, Duration::from_secs(RELAY_RUNG_PROBE_SECS)).await;
+    Some(StoppableTask::spawn(|stopped| async move {
+        let confirmed = select_bootstrap_rung(
+            &ladder,
+            Duration::from_secs(RELAY_RUNG_PROBE_SECS),
+            Some(&stopped),
+        )
+        .await;
+        if stopped.has_changed().is_err() {
+            // A departure ended the walk: its `None` is not a verdict.
+            return;
+        }
         rung_tx.send_if_modified(|current| {
             if *current == confirmed {
                 false
@@ -121,7 +131,7 @@ fn spawn_startup_rung_confirmation(
                 true
             }
         });
-    });
+    }))
 }
 
 /// Pre-register `rendezvous_id`'s address so a cold joiner reaches it
@@ -538,7 +548,7 @@ pub async fn setup_mesh(kind: SetupKind, params: SetupParams) -> Result<EventLoo
     // Off the critical path: nothing below blocks `ready`, which `run` emits
     // once the IPC socket accepts. Confirm/correct the optimistic rung 0 in the
     // background (covers a joiner, which has no beacon self-monitor of its own).
-    spawn_startup_rung_confirmation(ladder, rung_tx);
+    let rung_probe = spawn_startup_rung_confirmation(ladder, rung_tx);
 
     Ok(EventLoopConfig {
         per_peer_gate,
@@ -558,6 +568,7 @@ pub async fn setup_mesh(kind: SetupKind, params: SetupParams) -> Result<EventLoo
         max_peers,
         rendezvous_params: rdv,
         rung_rx,
+        rung_probe,
         cohost: cohost_override.unwrap_or(cohost),
         runtime_base,
         state_file,
@@ -852,4 +863,36 @@ async fn setup_join(build: &SetupBuild<'_>, kind: SetupKind) -> Result<Assembled
         webrtc_ice,
         topic_string,
     })
+}
+
+#[cfg(all(test, feature = "host"))]
+mod tests {
+    use std::time::Duration;
+
+    use tokio::sync::watch;
+
+    use crate::testing::{errors_through_runtime_drop, silent_relay_rung};
+
+    /// Regression for `Endpoint dropped without calling Endpoint::close` on a
+    /// Ctrl-C in the first seconds of a run. The startup probe was detached,
+    /// so `Node::leave` had nothing to wait for: `main` returned while the
+    /// probe was still waiting for its relay, or still closing, and the runtime
+    /// drop took its endpoint down open.
+    #[test]
+    fn a_departure_during_the_startup_rung_probe_closes_its_endpoint() {
+        let (_silent, rung) = silent_relay_rung();
+
+        let errors = errors_through_runtime_drop(async {
+            let probe = super::spawn_startup_rung_confirmation(vec![rung], watch::channel(None).0)
+                .expect("a ladder to walk");
+            // Let the probe bind and start waiting for its relay.
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            probe.stop_and_wait().await;
+        });
+
+        assert!(
+            !errors.contains("Endpoint dropped without calling"),
+            "the startup rung probe's endpoint reached its drop open:\n{errors}"
+        );
+    }
 }
