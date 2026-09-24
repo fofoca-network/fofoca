@@ -41,7 +41,7 @@ use n0_future::task::JoinHandle;
 use tokio::sync::{oneshot, watch};
 
 use crate::lookup::{TransportHandles, add_peer_addr, build_endpoint, build_mesh, probe_connect};
-use crate::protocol::mesh::{LookupOpts, RelayChoice};
+use crate::protocol::mesh::{LookupOpts, NostrChoice, RelayChoice};
 use crate::util::tuning::{
     HEAL_PROBE_SECS, RENDEZVOUS_CLOSE_SECS, RENDEZVOUS_PROBE_ATTEMPTS, RENDEZVOUS_PROBE_RETRY_MS,
     RENDEZVOUS_PROBE_SECS, heal_interval_secs,
@@ -451,6 +451,8 @@ fn beacon_lookups(params: &RendezvousParams) -> LookupOpts {
             .map_or(RelayChoice::Disabled, |rung| {
                 RelayChoice::Custom(vec![rung])
             }),
+        // The beacon is the relay lane's rendezvous; Nostr pairs never need it.
+        nostr: NostrChoice::Disabled,
     }
 }
 

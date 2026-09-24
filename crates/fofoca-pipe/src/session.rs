@@ -271,15 +271,16 @@ pub fn resolve_kind(opts: &Opts, nickname: Option<Nickname>) -> Result<(SetupKin
         (None, Some(string)) => {
             // Note what this ignores: `lookup`. `TopicParams::resolve` always
             // derives through the all-on preset, so a topic mesh is always
-            // mDNS + DHT + the relay. That is what lets a tab and a terminal
+            // mDNS + DHT + the relay + Nostr (`LookupOpts::public_preset`). That is what lets a tab and a terminal
             // derive the same id from the same string — the lookups are mixed
             // into the derivation, so two reaches over one string are two
             // different meshes. `relay_urls` and `transport` are the two
             // choices that *do* change the id, and every member must pass the
             // same values.
             let config = MeshConfig::resolve(
-                &[Lookup::Mdns, Lookup::Dht, Lookup::Relay],
+                &[Lookup::Mdns, Lookup::Dht, Lookup::Relay, Lookup::Nostr],
                 relay_ladder(&opts.relay_urls)?,
+                None,
                 &opts.transport,
             )?;
             let mesh =
@@ -296,6 +297,7 @@ pub fn resolve_kind(opts: &Opts, nickname: Option<Nickname>) -> Result<(SetupKin
             let config = MeshConfig::resolve(
                 &opts.lookup,
                 relay_ladder(&opts.relay_urls)?,
+                None,
                 &opts.transport,
             )?;
             let name = MeshName::new(opts.name.clone().unwrap_or_else(|| "fofoca".to_string()))
@@ -327,7 +329,7 @@ mod tests {
     }
 
     fn all_lookups() -> Vec<Lookup> {
-        vec![Lookup::Mdns, Lookup::Dht, Lookup::Relay]
+        vec![Lookup::Mdns, Lookup::Dht, Lookup::Relay, Lookup::Nostr]
     }
 
     fn create_config(opts: &Opts) -> MeshConfig {

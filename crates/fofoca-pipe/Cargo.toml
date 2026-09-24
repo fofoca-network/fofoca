@@ -43,7 +43,7 @@ n0-future.workspace = true
 # base64-encoded in the frame body. Crate-local rather than a workspace entry:
 # this is the only crate that names it, and that is the point — the codec has one
 # call site, so a browser and a terminal cannot disagree about padding.
-base64 = "0.22"
+base64.workspace = true
 
 # No plain `[dev-dependencies]`, and that is load-bearing rather than
 # incidental. The workspace `tokio` dev-dep turns on `net` -> `mio`, and

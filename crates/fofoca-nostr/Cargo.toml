@@ -37,7 +37,7 @@ serde_json.workspace = true
 sha2.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-url = "2"
+url.workspace = true
 
 # The same WebSocket client iroh's relay client already links, with the same
 # features, so native adds no crate. TLS is ours: iroh-relay builds its own

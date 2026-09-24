@@ -108,6 +108,7 @@ async fn main() -> anyhow::Result<()> {
                     mdns: true,
                     dht: true,
                     relay_lookup: ladder,
+                    nostr: fofoca::protocol::mesh::NostrChoice::Disabled,
                 },
                 password: None,
                 issuer_pubkey: None,
