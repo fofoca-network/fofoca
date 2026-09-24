@@ -201,7 +201,7 @@ a build-profile and main-thread-pressure sweep: `cargo task e2e`, or
 The native↔browser matrix — the one that proves a terminal and a tab exchange
 payload on every lane under every relay policy — is
 `cargo task e2e --suite mesh` (`--quick` for the four-cell pass). It needs the
-wasm glue built first (`cargo task wasm-peer` — the mesh suite also builds
+wasm glue built first (`cargo task build-wasm` — the mesh suite also builds
 it itself), bun, and
 `agent-browse` with Chrome for Testing. The suite runs with the task runner's
 `mesh` feature, which it turns on by re-running itself through cargo, so the

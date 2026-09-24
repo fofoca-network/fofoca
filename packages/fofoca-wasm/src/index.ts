@@ -6,7 +6,7 @@
  * const mesh = await join({ topic: 'standup' })
  * ```
  *
- * The wasm glue must exist first: `cargo task wasm-peer` drops it under
+ * The wasm glue must exist first: `cargo task build-wasm` drops it under
  * `wasm/`.
  */
 

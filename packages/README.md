@@ -52,7 +52,7 @@ and nothing about its role.
 ## The harness page
 
 `fofoca-wasm` ships a driverless test page: build the wasm
-(`cargo task wasm-peer`), serve it
+(`cargo task build-wasm`), serve it
 (`bun run harness -- 3000`), and open
 
 ```

@@ -18,7 +18,7 @@ and outside a browser its direct lane has no WebRTC to stand on.
 Build the wasm once, serve the page, start a terminal peer, meet on a topic:
 
 ```sh
-cargo task wasm-peer                               # once, and after engine changes
+cargo task build-wasm                              # once, and after engine changes
 cd examples/chat/web && bun run serve              # http://127.0.0.1:3010/
 cargo run -p fofoca-pipe --example chat -- --topic room --nick terminal
 ```

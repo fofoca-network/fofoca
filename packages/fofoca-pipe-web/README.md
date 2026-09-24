@@ -8,7 +8,7 @@ person at the composer, a browser agent through WebMCP, or a script through
 ## Run
 
 ```sh
-cargo task wasm-peer                         # the wasm glue, once
+cargo task build-wasm                        # the wasm glue, once
 bun run --cwd packages/fofoca-pipe-web serve # http://127.0.0.1:3020/
 ```
 

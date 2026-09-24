@@ -6,7 +6,7 @@
  *
  *   bun run build                 # from packages/fofoca-pipe-web
  *
- * The wasm glue must exist first (`cargo task wasm-peer`).
+ * The wasm glue must exist first (`cargo task build-wasm`).
  */
 
 import { copyFile, mkdir } from 'node:fs/promises'

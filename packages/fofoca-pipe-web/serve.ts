@@ -5,7 +5,7 @@
  *
  *   bun run serve [port]          # from packages/fofoca-pipe-web
  *
- * The wasm glue must exist first (`cargo task wasm-peer`). For a deployable
+ * The wasm glue must exist first (`cargo task build-wasm`). For a deployable
  * copy, see `build.ts`.
  */
 

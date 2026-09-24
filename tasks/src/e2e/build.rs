@@ -243,7 +243,7 @@ pub(crate) fn ensure_bun(why: &str) -> TaskOutcome {
 }
 
 /// The whole browser-peer preamble the two e2e suites and `cargo task
-/// wasm-peer` share: tooling check, wasm env, build, announce.
+/// build-wasm` share: tooling check, wasm env, build, announce.
 pub(crate) fn build_browser_peer() -> Result<PathBuf, String> {
     check_wasm_bindgen().map_err(|error| error.to_string())?;
     let env = wasm_env()?;

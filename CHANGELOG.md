@@ -12,7 +12,7 @@ published to a registry; pin it with
 
 - `fofoca-wasm`: the browser peer, the byte pipe as a wasm-bindgen class,
   with `packages/fofoca-wasm` as its JS backend and a driverless harness
-  page. `cargo task wasm-peer` builds it.
+  page. `cargo task build-wasm` builds it.
 - A custom relay ladder (`relay_urls` / `relayUrls` / `--relay-url`) and the
   per-node path switches (`paths.ip`, `paths.webrtc`; `disable_ip` /
   `disable_webrtc` in C) on every create surface. The ladder is mixed into a

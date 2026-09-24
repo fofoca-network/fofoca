@@ -2,7 +2,7 @@
  * The wasm-bindgen module's shape, as this package consumes it.
  *
  * Declared here rather than imported from the generated `.d.ts` because the
- * glue under `../wasm/` is a build artifact (`cargo task wasm-peer`), and the
+ * glue under `../wasm/` is a build artifact (`cargo task build-wasm`), and the
  * package must type-check before it has been built. The contract's source of
  * truth is `crates/fofoca-wasm/src/lib.rs`; change one, change the other.
  */
@@ -49,7 +49,7 @@ let cached: Promise<FofocaWasmModule> | null = null
  * wasm-bindgen's one-shot `default()`.
  *
  * `glueUrl` overrides where the generated glue lives; the default expects
- * `wasm/fofoca_wasm.js` beside `src/`, which `cargo task wasm-peer` produces.
+ * `wasm/fofoca_wasm.js` beside `src/`, which `cargo task build-wasm` produces.
  */
 export function loadWasm(glueUrl?: string): Promise<FofocaWasmModule> {
   cached ??= (async () => {

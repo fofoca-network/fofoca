@@ -6,7 +6,7 @@
  *
  *   bun run harness [port]        # from packages/fofoca-wasm
  *
- * The wasm glue must exist first (`cargo task wasm-peer`).
+ * The wasm glue must exist first (`cargo task build-wasm`).
  */
 
 import { join } from 'node:path'

@@ -19,7 +19,7 @@ rather than falling back to the relay.
 Build the wasm first, then the harness page serves:
 
 ```sh
-cargo task wasm-peer          # writes wasm/, which is gitignored
+cargo task build-wasm         # writes wasm/, which is gitignored
 bun install                   # once, at the repo root
 bun harness/serve.ts          # then open the printed URL
 ```
