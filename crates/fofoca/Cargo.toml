@@ -172,6 +172,10 @@ fofoca-protocol = { path = "../fofoca-protocol", default-features = false, featu
 # build still wants str0m, not the browser hub.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 fofoca-iroh-webrtc-transport = { path = "../fofoca-iroh-webrtc-transport", features = ["native"] }
+# The Nostr lookup and JSEP carrier. Native only until its browser WebSocket
+# backend lands; a browser meshes over the relay meanwhile.
+fofoca-nostr = { path = "../fofoca-nostr" }
+url.workspace = true
 # iroh's own defaults, re-added by name because the workspace entry turns them
 # off for the browser's sake. `unstable-net-report` is what 1.0.0 gated
 # `Endpoint::net_report()` behind; `lookup::capability` reads the report.
@@ -199,6 +203,7 @@ iroh-gossip.workspace = true
 # so leaving these unscoped makes `cargo check --target wasm32-unknown-unknown`
 # fail before it reaches any code of ours.
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+fofoca-nostr = { path = "../fofoca-nostr", features = ["test-relay"] }
 proptest.workspace = true
 insta.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

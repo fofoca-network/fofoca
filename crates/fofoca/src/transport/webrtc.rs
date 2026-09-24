@@ -36,6 +36,9 @@ use iroh::{Endpoint, EndpointAddr, EndpointId};
 use super::LOG_TARGET;
 use super::admission::{Refusal, SignalAdmission};
 
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod nostr;
+
 /// ALPN for the JSEP exchange. Wire-load-bearing in the same way
 /// [`super::UNICAST_ALPN`] is: both ends must agree, so it moves only with a
 /// deliberate protocol break.
@@ -417,6 +420,7 @@ async fn answer_one(
     // negotiation. The offerer cannot finish ICE until it has our SDP, so
     // completing first deadlocks both sides into their full gathering budget
     // and then fails — which is exactly what it did.
+    // `nostr::answer` mirrors this tail for the Nostr carrier.
     let answer = build_answer(local, &offer, ice).await?;
     send.write_all(&serde_json::to_vec(answer.envelope())?)
         .await
