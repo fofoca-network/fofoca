@@ -268,6 +268,14 @@ pub struct EventLoopState {
     /// session — true for a webrtc-shaped node on a lookup-only mesh; see
     /// `transport::webrtc::rendezvous_graftable`.
     pub(crate) rendezvous_graft_needs_session: bool,
+    /// This node has no IP transport (a browser, or IP turned off), so every
+    /// peer reaches it over a data channel. Said out loud in our `PeerInfo`
+    /// rather than inferred from our address: with no relay either, that
+    /// address is empty, which reads as "unknown", not "browser".
+    pub(crate) own_needs_lane: bool,
+    /// Peers whose `PeerInfo` said they need a data channel. The shape of a
+    /// peer's address says the same only when it carries a relay.
+    pub(crate) lane_peers: HashSet<EndpointId>,
     /// Set once we've broadcast our arrival (`joined` + `PeerInfo`).
     /// The announce is deferred to the first `NeighborUp` so it isn't
     /// lost into an unconnected overlay; subsequent neighbors only get
@@ -618,6 +626,8 @@ impl EventLoopState {
             rendezvous_offer_fallback: false,
             rendezvous_probe_read_free: false,
             rendezvous_graft_needs_session: false,
+            own_needs_lane: false,
+            lane_peers: HashSet::new(),
             announced: false,
             meshed: false,
             unicast_pool: crate::transport::UnicastPool::disconnected(),
@@ -783,6 +793,7 @@ impl EventLoopState {
     pub(crate) fn forget_peer_endpoint(&mut self, nick: &str) -> Option<EndpointAddr> {
         let addr = self.peer_endpoints.remove(nick)?;
         self.direct.remove(&addr.id);
+        self.lane_peers.remove(&addr.id);
         Some(addr)
     }
 
@@ -2010,5 +2021,18 @@ mod tests {
         );
         assert!(state.meshed);
         assert!(!state.degraded);
+    }
+
+    /// A departed peer leaves every per-peer map, the lane flag included.
+    #[test]
+    fn forgetting_a_peer_forgets_its_lane_flag() {
+        let mut state = fresh_state();
+        let bob = endpoint_id(9);
+        state
+            .peer_endpoints
+            .insert(nick("bob"), iroh::EndpointAddr::new(bob));
+        state.lane_peers.insert(bob);
+        state.forget_peer_endpoint("bob");
+        assert!(!state.lane_peers.contains(&bob));
     }
 }

@@ -177,8 +177,10 @@ pub struct EventLoopConfig {
     /// `TransportOpts::webrtc`: off, the handle above is detached — not on
     /// the endpoint, answering nothing — and the loop negotiates no session.
     pub(crate) webrtc_enabled: bool,
-    /// See `EventLoopState::rendezvous_graft_needs_session`.
-    pub(crate) rendezvous_graft_needs_session: bool,
+    /// `TransportOpts::ip` (always `false` in a browser). The loop derives
+    /// `EventLoopState::rendezvous_graft_needs_session` and
+    /// `EventLoopState::own_needs_lane` from it.
+    pub(crate) has_ip_transport: bool,
     /// The negotiation-slot table this peer's Router acceptor was built with.
     /// `run()` moves it into `EventLoopState::webrtc_admission`, so the dialing
     /// side and the answering side share one direct-peer ceiling.

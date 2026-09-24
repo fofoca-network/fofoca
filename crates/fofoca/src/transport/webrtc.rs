@@ -594,6 +594,17 @@ pub(crate) fn needs_webrtc_lane(addr: &EndpointAddr) -> bool {
     !addr.is_empty() && addr.ip_addrs().next().is_none()
 }
 
+/// Whether a pair needs the data-channel lane: this node has no IP, the peer
+/// said in its `PeerInfo` that it has none, or its address shows only a relay.
+/// Either end is enough (see `negotiate_session`).
+pub(crate) fn pair_needs_lane(
+    state: &crate::daemon::state::EventLoopState,
+    peer: EndpointId,
+    addr: &EndpointAddr,
+) -> bool {
+    state.own_needs_lane || state.lane_peers.contains(&peer) || needs_webrtc_lane(addr)
+}
+
 /// The local-node twin of [`needs_webrtc_lane`]: whether *this* node's
 /// rendezvous graft must wait for a data-channel session. A wasm node never
 /// has IP transports whatever the flags say; with the relay allowed as a
@@ -626,7 +637,7 @@ pub(crate) fn negotiate_session(
     // browser that evaluates this. It would see the native peer's IP, skip,
     // and the native — waiting to be dialled — would never offer. The pair
     // would silently never get a channel.
-    if !needs_webrtc_lane(&addr) && !needs_webrtc_lane(&ctx.endpoint.addr()) {
+    if !pair_needs_lane(state, peer, &addr) {
         tracing::debug!(
             target: LOG_TARGET,
             %peer,
@@ -738,7 +749,7 @@ pub(crate) fn negotiate_rendezvous_session(
     let Some(handle) = state.webrtc.clone() else {
         return;
     };
-    if !needs_webrtc_lane(&ctx.endpoint.addr()) && !state.rendezvous_offer_fallback {
+    if !state.own_needs_lane && !state.rendezvous_offer_fallback {
         // An IP-capable peer normally reaches the rendezvous by punching
         // inside the bootstrap connection — the data channel would be a
         // worse path — so the punch gets the first heal tick. But IP
@@ -1038,13 +1049,11 @@ pub(crate) fn retry_sessions(
     // them. The cheap disqualifiers run before the clone — a peer whose
     // session is already attached (admission would refuse it with
     // `HaveSession` anyway) or a pure-IP pair costs a map walk, nothing more.
-    let own_addr = ctx.endpoint.addr();
-    let own_needs_lane = needs_webrtc_lane(&own_addr);
     let mut peers: Vec<EndpointAddr> = state
         .peer_endpoints
         .values()
         .filter(|addr| addr.id != ctx.rendezvous_id)
-        .filter(|addr| own_needs_lane || needs_webrtc_lane(addr))
+        .filter(|addr| pair_needs_lane(state, addr.id, addr))
         .filter(|addr| {
             !state
                 .webrtc
@@ -1145,6 +1154,29 @@ mod tests {
         );
         // The real relay-only shape still must.
         assert!(needs_webrtc_lane(&browser_shaped(id)));
+    }
+
+    /// With no relay and no IP, a peer's address is empty, and the shape rule
+    /// reads it as unknown. Its own word in `PeerInfo` is what says "browser".
+    #[test]
+    fn a_peer_that_says_it_needs_the_lane_gets_it_with_an_empty_address() {
+        let peer = SecretKey::from_bytes(&[8u8; 32]).public();
+        let empty = EndpointAddr::new(peer);
+        let mut state = crate::testing::fresh_state();
+        assert!(
+            !pair_needs_lane(&state, peer, &empty),
+            "unknown stays unknown"
+        );
+
+        state.lane_peers.insert(peer);
+        assert!(pair_needs_lane(&state, peer, &empty), "its word decides");
+
+        state.lane_peers.clear();
+        state.own_needs_lane = true;
+        assert!(
+            pair_needs_lane(&state, peer, &empty),
+            "a node with no IP needs the lane with everyone"
+        );
     }
 
     #[test]

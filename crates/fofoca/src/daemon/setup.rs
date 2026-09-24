@@ -11,7 +11,7 @@ use crate::gossip::event::{NodeEvent, NodeSink};
 use crate::lookup::build_peer_multihop;
 use crate::lookup::{add_peer_addr, build_mesh, relay_ladder, select_bootstrap_rung};
 use crate::protocol::crypto::Password;
-use crate::protocol::mesh::{LookupOpts, Mesh, MeshConfig, MeshName};
+use crate::protocol::mesh::{LookupOpts, Mesh, MeshConfig, MeshName, RelayChoice};
 use crate::protocol::{MeshId, Nickname};
 use crate::util::tuning::RELAY_RUNG_PROBE_SECS;
 
@@ -84,6 +84,9 @@ fn rendezvous_params(
     // via `rung_tx` if rung 0 turns out to be unreachable. Empty for
     // private / relay-disabled ⇒ `None`.
     let bootstrap_relay = relay_ladder(&lookups.relay_lookup).first().cloned();
+    let has_rendezvous = !bind_ports.is_empty()
+        || lookups.relay_lookup != RelayChoice::Disabled
+        || crate::beacon::bare_id_resolvable(lookups);
     RendezvousParams {
         topic_id,
         secret: mesh.rendezvous_secret(),
@@ -93,6 +96,22 @@ fn rendezvous_params(
         relay_transport: mesh.config.transport.relay_transport,
         bootstrap_relay,
         rung_tx,
+        has_rendezvous,
+    }
+}
+
+/// The co-host policy a member runs under: the caller's override, else the
+/// setup kind's default, and `Never` on a mesh with no rendezvous, where
+/// nothing could reach a beacon.
+fn effective_cohost(
+    has_rendezvous: bool,
+    cohost_override: Option<CoHostPolicy>,
+    default: CoHostPolicy,
+) -> CoHostPolicy {
+    if has_rendezvous {
+        cohost_override.unwrap_or(default)
+    } else {
+        CoHostPolicy::Never
     }
 }
 
@@ -556,19 +575,16 @@ pub async fn setup_mesh(kind: SetupKind, params: SetupParams) -> Result<EventLoo
         endpoint,
         router,
         max_peers,
+        cohost: effective_cohost(rdv.has_rendezvous, cohost_override, cohost),
         rendezvous_params: rdv,
         rung_rx,
-        cohost: cohost_override.unwrap_or(cohost),
         runtime_base,
         state_file,
         #[cfg(feature = "host")]
         multihop: multihop_handle,
         webrtc,
         webrtc_enabled: transports.webrtc,
-        rendezvous_graft_needs_session: crate::transport::webrtc::node_graft_needs_session(
-            relay_transport,
-            transports.ip,
-        ),
+        has_ip_transport: transports.ip && !cfg!(target_arch = "wasm32"),
         webrtc_admission,
         webrtc_ice,
         unicast_rx,
@@ -814,7 +830,12 @@ async fn setup_join(build: &SetupBuild<'_>, kind: SetupKind) -> Result<Assembled
         build.relay_transport,
         build.transports.ip,
     );
-    let bootstrap = if needs_session { vec![] } else { vec![rdv.id] };
+    // A mesh with no rendezvous (Nostr only) has no bare id worth dialing.
+    let bootstrap = if needs_session || !rdv.has_rendezvous {
+        vec![]
+    } else {
+        vec![rdv.id]
+    };
     let topic = gossip.subscribe(topic_id, bootstrap).await?;
 
     // `ready` is emitted by `run`, once the IPC socket accepts — not here.

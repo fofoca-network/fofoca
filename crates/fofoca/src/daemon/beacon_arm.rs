@@ -408,6 +408,7 @@ mod tests {
             relay_transport: false,
             bootstrap_relay: None,
             rung_tx: tokio::sync::watch::channel(None).0,
+            has_rendezvous: true,
         };
 
         let endpoint = crate::lookup::build_endpoint(

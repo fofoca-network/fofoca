@@ -90,6 +90,11 @@ pub(crate) struct RendezvousParams {
     /// rendezvous, and re-homes the beacon — so the heavy ladder walk
     /// never runs on the sole event loop.
     pub(crate) rung_tx: watch::Sender<Option<RelayUrl>>,
+    /// Whether anything can reach `rendezvous_id` at all: a loopback ladder,
+    /// a relay rung, or an address lookup that resolves a bare id. A mesh
+    /// whose only lookup is Nostr has none, so its members neither host a
+    /// beacon nor dial one; they meet over Nostr.
+    pub(crate) has_rendezvous: bool,
 }
 
 /// A live co-hosted rendezvous endpoint. Dropping it aborts both tasks,
@@ -370,7 +375,7 @@ async fn spawn_rival_probe(params: &RendezvousParams) -> Option<RivalProbe> {
 /// only condition a probe may dial one. mDNS and DHT are compile-time
 /// features and `host`-only, so a browser or a feature-trimmed build
 /// resolves nothing regardless of what the mesh id asks for.
-fn bare_id_resolvable(lookups: &LookupOpts) -> bool {
+pub(crate) fn bare_id_resolvable(lookups: &LookupOpts) -> bool {
     (cfg!(all(feature = "host", feature = "mdns")) && lookups.mdns)
         || (cfg!(all(feature = "host", feature = "dht")) && lookups.dht)
 }
@@ -811,6 +816,7 @@ mod tests {
             relay_transport: false,
             bootstrap_relay: None,
             rung_tx: watch::channel(None).0,
+            has_rendezvous: true,
         }
     }
 
