@@ -15,7 +15,8 @@
  *   int disable_ip;          // offset 56
  *   int disable_webrtc;      // offset 60
  *   size_t max_peers;        // offset 64
- * } fofoca_opts;             // 72 bytes
+ *   const char *nostr_urls;  // offset 72
+ * } fofoca_opts;             // 80 bytes
  * ```
  *
  * 64-bit little-endian only, the same scope `frame.ts` claims for the same
@@ -34,8 +35,9 @@ const RELAY_URLS_OFFSET = 48
 const DISABLE_IP_OFFSET = 56
 const DISABLE_WEBRTC_OFFSET = 60
 const MAX_PEERS_OFFSET = 64
+const NOSTR_URLS_OFFSET = 72
 
-export const OPTS_BYTES = 72
+export const OPTS_BYTES = 80
 
 const LITTLE_ENDIAN = new Uint8Array(new Uint32Array([1]).buffer)[0] === 1
 
@@ -91,6 +93,7 @@ export function encodeOpts(opts: WireOpts, pointerOf: (buffer: Uint8Array) => bi
   view.setInt32(DISABLE_IP_OFFSET, opts.disableIp ? 1 : 0, LITTLE_ENDIAN)
   view.setInt32(DISABLE_WEBRTC_OFFSET, opts.disableWebrtc ? 1 : 0, LITTLE_ENDIAN)
   view.setBigUint64(MAX_PEERS_OFFSET, BigInt(opts.maxPeers), LITTLE_ENDIAN)
+  field(NOSTR_URLS_OFFSET, opts.nostrUrls)
 
   return { struct, keepAlive }
 }

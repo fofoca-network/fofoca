@@ -30,6 +30,7 @@ anyhow.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 tracing.workspace = true
+url.workspace = true
 # `sync` only: `mpsc` for the inbound and event queues, `oneshot` for the
 # per-request replies. No `rt`, no `time` — wasm32 has no thread pool, and
 # `tokio::time` has no driver there. The one sleep this crate does uses

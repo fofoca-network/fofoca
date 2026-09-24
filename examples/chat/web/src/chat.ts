@@ -82,6 +82,7 @@ async function main(): Promise<void> {
       ...(nick === null ? {} : { nick }),
       ...(transport === undefined ? {} : { transport }),
       relayUrls: params.getAll('relay'),
+      nostrUrls: params.getAll('nostr'),
       log: params.get('log') ?? 'warn',
     })
   } catch (error) {

@@ -217,6 +217,7 @@ describe('wire opts', () => {
       lookup: null,
       transport: null,
       relayUrls: null,
+      nostrUrls: null,
       disableIp: false,
       disableWebrtc: false,
       maxPeers: 0,
@@ -234,6 +235,12 @@ describe('wire opts', () => {
       relayUrls: 'http://a/,http://b/',
     })
     expect(createWire({ relayUrls: [], transport: [] })).toMatchObject({ relayUrls: null, transport: null })
+    expect(createWire({ lookup: ['nostr'], nostrUrls: ['wss://a/', 'wss://b/'] })).toMatchObject({
+      lookup: 'nostr',
+      nostrUrls: 'wss://a/,wss://b/',
+    })
+    expect(joinWire({ topic: 't', nostrUrls: ['wss://a/'] })).toMatchObject({ nostrUrls: 'wss://a/' })
+    expect(createWire({ nostrUrls: [] })).toMatchObject({ nostrUrls: null })
     expect(createWire({ paths: { webrtc: false } })).toMatchObject({
       disableIp: false,
       disableWebrtc: true,

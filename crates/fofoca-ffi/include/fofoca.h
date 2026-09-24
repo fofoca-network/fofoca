@@ -43,10 +43,11 @@ typedef struct fofoca_pipe fofoca_pipe;
  *   - neither — create a fresh mesh; `lookup` says how far it reaches, and
  *               fofoca_id() returns the minted id.
  *
- * Three comma-separated lists name the mesh-wide choices a create bakes into
- * the id, one concept each: `lookup` is how members find each other,
- * `transport` is what payload may ride, `relay_urls` is which relay. A joiner
- * inherits all three from the id; a topic fixes `lookup` to all three lookups.
+ * Comma-separated lists name the mesh-wide choices a create bakes into the id,
+ * one concept each: `lookup` is how members find each other, `transport` is
+ * what payload may ride, `relay_urls` and `nostr_urls` are which relays. A
+ * joiner inherits all of them from the id; a topic fixes `lookup` to all four
+ * lookups.
  *
  * String fields are NUL-terminated or NULL. `max_peers == 0` takes the engine's
  * default active-view cap.
@@ -56,7 +57,7 @@ typedef struct {
   const char *topic;
   const char *nick;       /* NULL mints a random nickname */
   const char *name;       /* mesh name on create; NULL falls back to "fofoca" */
-  const char *lookup;     /* "mdns,dht,relay", any subset; NULL = none, a
+  const char *lookup;     /* "mdns,dht,relay,nostr", any subset; NULL = none, a
                              loopback mesh reachable from this machine only */
   const char *transport;  /* "p2p" or "p2p,relay"; NULL = "p2p", so every byte
                              of data goes peer to peer. "relay" needs "relay" in
@@ -66,6 +67,9 @@ typedef struct {
   int disable_ip;         /* nonzero: no direct UDP / hole-punched paths */
   int disable_webrtc;     /* nonzero: no WebRTC lane */
   size_t max_peers;
+  const char *nostr_urls; /* comma-separated ws:// or wss:// Nostr relays;
+                             NULL = the pinned public list. Needs "nostr" in
+                             `lookup` */
 } fofoca_opts;
 
 /*

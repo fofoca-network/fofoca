@@ -12,6 +12,7 @@ const OPTS: WireOpts = {
   lookup: null,
   transport: null,
   relayUrls: null,
+  nostrUrls: null,
   disableIp: false,
   disableWebrtc: false,
   maxPeers: 0,

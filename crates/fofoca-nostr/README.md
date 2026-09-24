@@ -24,6 +24,25 @@ offer and answer when the iroh relay is not available.
   - A relay that is dialing counts as usable for up to 10 s. Until then, a
     pool on dead relays opens no spares.
 
+## Risks
+
+- **Public relays.** The pinned list is public relays that anyone runs. They
+  can drop ephemeral events, rate-limit, require auth or proof of work, or
+  go away, and the list goes stale. A relay sees each client IP, the timing
+  and the tags. It cannot read a signal, because the engine seals every one.
+  `nostr_urls` replaces the list with relays you run.
+- **Replay window.** A signal is valid for ±120 s, and the engine remembers
+  each nonce it has seen in memory. So a node that restarts inside those
+  120 s accepts one replay of a signal it saw before the restart. A wall
+  clock that is wrong by more than 120 s blocks signalling.
+- **Who can reach the room.** On an open mesh the id is the bearer
+  credential: anyone who holds it can derive the room tag and send offers,
+  so they can fill a node's direct slots, the same as over the iroh relay.
+  On a password or invite-only mesh the room tag derives from the stretched
+  key or the invite root, so only a member can reach the room. No mesh stops
+  a member from using other members' slots, because gossip admission does
+  not see a WebRTC session. That is the same exposure as the relay lane.
+
 ## Probe
 
 `cargo run -p fofoca-nostr --example probe` tests which public relays forward

@@ -40,7 +40,7 @@ pub struct FofocaOpts {
     pub topic: *const c_char,
     pub nick: *const c_char,
     pub name: *const c_char,
-    /// Comma-separated lookups, any of `mdns`, `dht`, `relay`; NULL ⇒ none
+    /// Comma-separated lookups, any of `mdns`, `dht`, `relay`, `nostr`; NULL ⇒ none
     /// (a loopback mesh on create).
     pub lookup: *const c_char,
     /// Comma-separated transports, `p2p` or `p2p,relay`; NULL ⇒ `p2p`, so
@@ -53,6 +53,8 @@ pub struct FofocaOpts {
     /// Nonzero disables the `WebRTC` lane.
     pub disable_webrtc: c_int,
     pub max_peers: usize,
+    /// Comma-separated custom Nostr relays; NULL ⇒ the pinned public list.
+    pub nostr_urls: *const c_char,
 }
 
 /// The layout `packages/fofoca-ffi/src/dlopen/opts-struct.ts` hand-encodes,
@@ -68,7 +70,7 @@ pub struct FofocaOpts {
 const _: () = {
     use std::mem::{align_of, offset_of, size_of};
 
-    assert!(size_of::<FofocaOpts>() == 72, "opts-struct.ts OPTS_BYTES");
+    assert!(size_of::<FofocaOpts>() == 80, "opts-struct.ts OPTS_BYTES");
     assert!(align_of::<FofocaOpts>() == 8);
     assert!(offset_of!(FofocaOpts, mesh) == 0);
     assert!(offset_of!(FofocaOpts, topic) == 8);
@@ -80,6 +82,7 @@ const _: () = {
     assert!(offset_of!(FofocaOpts, disable_ip) == 56);
     assert!(offset_of!(FofocaOpts, disable_webrtc) == 60);
     assert!(offset_of!(FofocaOpts, max_peers) == 64);
+    assert!(offset_of!(FofocaOpts, nostr_urls) == 72);
 };
 
 /// One received frame's metadata, mirroring `fofoca_frame` in the header. The
@@ -288,23 +291,25 @@ pub unsafe extern "C" fn fofoca_open(opts: *const FofocaOpts) -> *mut FofocaPipe
             return std::ptr::null_mut();
         };
         // SAFETY: NUL-terminated or NULL, per the header contract, for each
-        // of the three comma lists.
+        // of the four comma lists.
         let lists = unsafe {
             (
                 optional_str(opts.lookup),
                 optional_str(opts.transport),
                 optional_str(opts.relay_urls),
+                optional_str(opts.nostr_urls),
             )
         };
-        let (Ok(lookup), Ok(transport), Ok(relay_urls)) = lists else {
+        let (Ok(lookup), Ok(transport), Ok(relay_urls), Ok(nostr_urls)) = lists else {
             return std::ptr::null_mut();
         };
         let (Ok(lookup), Ok(transport)) = (comma_list(lookup), comma_list(transport)) else {
             return std::ptr::null_mut();
         };
-        let relay_urls: Vec<String> = relay_urls
-            .map(|urls| urls.split(',').map(|url| url.trim().to_owned()).collect())
-            .unwrap_or_default();
+        let url_list = |urls: Option<&str>| -> Vec<String> {
+            urls.map(|urls| urls.split(',').map(|url| url.trim().to_owned()).collect())
+                .unwrap_or_default()
+        };
         let parsed = Opts {
             mesh: mesh.map(str::to_owned),
             topic: topic.map(str::to_owned),
@@ -312,7 +317,8 @@ pub unsafe extern "C" fn fofoca_open(opts: *const FofocaOpts) -> *mut FofocaPipe
             name: name.map(str::to_owned),
             lookup,
             transport,
-            relay_urls,
+            relay_urls: url_list(relay_urls),
+            nostr_urls: url_list(nostr_urls),
             paths: fofoca_pipe::PathFlags {
                 ip: opts.disable_ip == 0,
                 webrtc: opts.disable_webrtc == 0,

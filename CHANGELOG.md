@@ -10,6 +10,12 @@ published to a registry; pin it with
 
 ### Added
 
+- The `nostr` lookup: members find each other over public Nostr relays and
+  carry the WebRTC offer and answer over them, as Trystero does. It runs on
+  native and in the browser, so a mesh whose only lookup is `nostr` forms
+  with no iroh relay. `fofoca-nostr` is the relay client. A custom relay
+  list is `nostr_urls` / `nostrUrls` / `--nostr-url`; it is part of the id.
+
 - `fofoca-wasm`: the browser peer, the byte pipe as a wasm-bindgen class,
   with `packages/fofoca-wasm` as its JS backend and a driverless harness
   page. `cargo task wasm-peer` builds it.
@@ -30,10 +36,15 @@ published to a registry; pin it with
 
 ### Changed
 
-- **Breaking (C ABI):** `fofoca_opts` is now 72 bytes: the five discovery
+- **Breaking:** every topic id and directory id changed. A topic mesh now
+  uses Nostr too (`LookupOpts::public_preset`), and the lookups are mixed
+  into the id. The id format gains two lookup flag bits, and a decoder
+  refuses a lookup bit it does not know.
+- **Breaking (C ABI):** `fofoca_opts` is now 80 bytes: the five discovery
   ints (`is_public`, `mdns`, `dht`, `relay_lookup`, `relay_transport`) are
   replaced by two comma-list strings, `lookup` and `transport`, ahead of
-  `relay_urls`, and `disable_ip` / `disable_webrtc` follow. A consumer
+  `relay_urls`, and `disable_ip` / `disable_webrtc` follow. `nostr_urls`
+  comes last, at offset 72, after `max_peers`. A consumer
   compiled against the old header keeps passing the old struct and the
   engine reads it wrong — there is no version field to catch that, so relink
   against the new `include/fofoca.h`. The layout is pinned by a compile-time
@@ -43,7 +54,7 @@ published to a registry; pin it with
   subset) is how members find each other. `transport` (`['p2p']` or
   `['p2p', 'relay']`) is what payload may ride. `relay_urls` is which relay.
   The `public`, `mdns`, `dht`, `relay_lookup` and `relay_transport` booleans
-  are gone; `public: true` is spelled `lookup: ['mdns', 'dht', 'relay']`, and
+  are gone; `public: true` is spelled `lookup: ['mdns', 'dht', 'relay', 'nostr']`, and
   naming no lookup is a loopback mesh. A ladder no longer implies the relay
   lookup: both it and `'relay'` in `transport` need `'relay'` in `lookup`,
   and a config that breaks either rule is rejected before any network. The

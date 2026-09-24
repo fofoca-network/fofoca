@@ -93,7 +93,10 @@ pub(crate) struct RendezvousParams {
     /// Whether anything can reach `rendezvous_id` at all: a loopback ladder,
     /// a relay rung, or an address lookup that resolves a bare id. A mesh
     /// whose only lookup is Nostr has none, so its members neither host a
-    /// beacon nor dial one; they meet over Nostr.
+    /// beacon nor dial one; they meet over Nostr. Decided per build, not per
+    /// mesh: mDNS and DHT count only where this build compiles them in, so a
+    /// browser on a `dht` + `nostr` mesh has no rendezvous while a native
+    /// member of the same mesh does.
     pub(crate) has_rendezvous: bool,
 }
 
