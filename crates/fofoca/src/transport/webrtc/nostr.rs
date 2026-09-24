@@ -13,10 +13,6 @@
 //! Who offers is the caller's rule, as for the ALPN (the lower id, in
 //! `negotiate_session`). Here two peers offering to each other at once each
 //! refuse the other as `InFlight` and both rounds run to their deadline.
-#![expect(
-    dead_code,
-    reason = "the discovery service wires this into the event loop; drop this then"
-)]
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -38,6 +34,50 @@ use super::{
 /// Relays a node holds while it has no link, so a newcomer's first events
 /// reach the relays incumbents listen on.
 pub(crate) const JOINING_WIDTH: usize = 3;
+/// Relays a linked node holds: the first healthy one in the shared ranking,
+/// which every joiner also holds.
+pub(crate) const LINKED_WIDTH: usize = 1;
+
+/// When the `Hello`s go out, in seconds since the service started: fast while
+/// a newcomer is likely alone, then every [`HELLO_STEADY`].
+const HELLO_SCHEDULE_SECS: [u64; 9] = [0, 1, 3, 5, 10, 15, 20, 25, 30];
+const HELLO_STEADY: std::time::Duration = std::time::Duration::from_mins(1);
+/// A `Hello`'s addresses are explicit, so a slow probe is a failed one; the
+/// data channel is the fallback.
+const IP_PROBE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(3);
+/// At most one wake-up `Hello` to a given peer this often.
+const POKE_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
+/// A peer heard over Nostr this recently is offered to over Nostr.
+const SEEN_FRESH: std::time::Duration = std::time::Duration::from_mins(5);
+const HELLO_BACKLOG: usize = 64;
+/// How long a node stays linked before it narrows to one relay, so a link
+/// that flaps does not flap the relay set with it.
+const LINK_SETTLE: std::time::Duration = std::time::Duration::from_secs(10);
+/// Addresses a `Hello` carries; the codec refuses more.
+const MAX_HELLO_ADDRS: usize = 8;
+
+/// What the event loop needs to start the carrier: the mesh's Nostr keys and
+/// its relays, ranked.
+#[derive(Debug, Clone)]
+pub(crate) struct NostrParams {
+    pub(crate) keys: NostrKeys,
+    pub(crate) relays: Vec<Url>,
+}
+
+impl NostrParams {
+    /// `None` when the mesh has no Nostr lookup.
+    pub(crate) fn for_mesh(
+        lookups: &crate::protocol::LookupOpts,
+        topic: &[u8; 32],
+    ) -> Option<Self> {
+        if lookups.nostr == crate::protocol::mesh::NostrChoice::Disabled {
+            return None;
+        }
+        let keys = NostrKeys::derive(&crate::protocol::TopicId::from_bytes(*topic));
+        let relays = keys.ranked_relays(&lookups.nostr);
+        Some(Self { keys, relays })
+    }
+}
 
 /// The Nostr signalling carrier for one mesh.
 ///
@@ -68,6 +108,8 @@ struct Inner {
     admission: SignalAdmission,
     ice: IceProfile,
     deadlines: SignalDeadlines,
+    /// See `NostrSignalParts::answers`.
+    answers: bool,
     /// Offer rounds waiting for their answer.
     replies: Replies,
     _dispatch: n0_future::task::AbortOnDropHandle<()>,
@@ -82,19 +124,23 @@ pub(crate) struct NostrSignalParts {
     pub(crate) keys: NostrKeys,
     /// Ranked the same way by every member (`NostrKeys::ranked_relays`).
     pub(crate) relays: Vec<Url>,
+    /// `TransportOpts::webrtc`. Off, the carrier still finds peers and still
+    /// offers nothing, and it answers no offer: a session would attach into a
+    /// transport the endpoint never registered.
+    pub(crate) answers: bool,
 }
 
 impl NostrSignal {
     /// Subscribe to the room and to our own tag, and start answering offers.
     /// `Hello`s are handed to the returned receiver: discovery is the caller's.
-    pub(crate) fn start(parts: NostrSignalParts) -> (Self, mpsc::UnboundedReceiver<Signal>) {
+    pub(crate) fn start(parts: NostrSignalParts) -> (Self, mpsc::Receiver<Signal>) {
         Self::start_with(parts, SignalDeadlines::DEFAULT)
     }
 
     pub(crate) fn start_with(
         parts: NostrSignalParts,
         deadlines: SignalDeadlines,
-    ) -> (Self, mpsc::UnboundedReceiver<Signal>) {
+    ) -> (Self, mpsc::Receiver<Signal>) {
         let local = parts.endpoint.id();
         let secret = parts.endpoint.secret_key().clone();
         let (pool, events) = Pool::open(
@@ -102,7 +148,9 @@ impl NostrSignal {
             JOINING_WIDTH,
             &[parts.keys.room_tag(), parts.keys.self_tag(&local)],
         );
-        let (hellos_tx, hellos) = mpsc::unbounded_channel();
+        // Bounded: `Hello`s repeat on a timer, so one dropped while the loop
+        // is busy costs nothing.
+        let (hellos_tx, hellos) = mpsc::channel(HELLO_BACKLOG);
         let inner = Arc::new_cyclic(|weak: &std::sync::Weak<Inner>| {
             let dispatch = n0_future::task::spawn(dispatch(
                 weak.clone(),
@@ -120,6 +168,7 @@ impl NostrSignal {
                 admission: parts.admission,
                 ice: parts.ice,
                 deadlines,
+                answers: parts.answers,
                 replies: Replies::default(),
                 _dispatch: n0_future::task::AbortOnDropHandle::new(dispatch),
             }
@@ -245,6 +294,315 @@ fn expect_reply(
     (pending, receiver)
 }
 
+/// Discovery: what the event loop does with the carrier.
+///
+/// Every member announces a `Hello` on the room tag. A `Hello` from a peer we
+/// hold nothing with starts a link: an IP probe when both ends have IP and the
+/// peer gave addresses, else (or when the probe fails) a data channel offered
+/// over Nostr by the lower id. The higher id wakes the lower one with a
+/// `Hello` on its own tag instead. Every path ends in a `DirectOutcome`, which
+/// the loop turns into a gossip graft.
+pub(crate) mod discovery {
+    use iroh::{EndpointAddr, TransportAddr};
+
+    use super::{
+        EndpointId, HELLO_SCHEDULE_SECS, HELLO_STEADY, IP_PROBE_DEADLINE, JOINING_WIDTH,
+        LINK_SETTLE, LINKED_WIDTH, LOG_TARGET, MAX_HELLO_ADDRS, NostrSignal, POKE_EVERY,
+        SEEN_FRESH, Signal, SignalAdmission, SignalKind,
+    };
+    use crate::daemon::ctx::HandlerCtx;
+    use crate::daemon::state::{DirectState, EventLoopState};
+    use crate::transport::probe::DirectOutcome;
+    use crate::util::clock::Instant;
+
+    /// Announce ourselves, and schedule the next announce.
+    pub(crate) fn announce(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
+        let Some(nostr) = state.nostr.clone() else {
+            state.next_hello = None;
+            return;
+        };
+        let mut hello = nostr.signal(SignalKind::Hello);
+        hello.webrtc = state.own_needs_lane;
+        if !state.own_needs_lane {
+            hello.addrs = ctx
+                .endpoint
+                .addr()
+                .ip_addrs()
+                .copied()
+                .take(MAX_HELLO_ADDRS)
+                .collect();
+        }
+        nostr.send(&hello);
+        let sent = state.hellos_sent;
+        state.hellos_sent = sent.saturating_add(1);
+        let next = HELLO_SCHEDULE_SECS
+            .get(sent as usize + 1)
+            .zip(HELLO_SCHEDULE_SECS.get(sent as usize))
+            .map_or(HELLO_STEADY, |(next, now)| {
+                std::time::Duration::from_secs(next - now)
+            });
+        if next == HELLO_STEADY {
+            // A Hello on our own tag, which we subscribe to: its echo is what
+            // tells the pool a relay still carries directed events, which the
+            // room tag's echo cannot.
+            let mut probe = nostr.signal(SignalKind::Hello);
+            probe.to = Some(ctx.endpoint.id());
+            nostr.send(&probe);
+        }
+        state.next_hello = Some(n0_future::time::Instant::now() + next);
+        update_width(state);
+    }
+
+    /// What a `Hello` from a peer calls for.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum HelloAction {
+        Nothing,
+        /// A path exists but the peer is not in the overlay: graft it.
+        Graft,
+        /// Both ends have IP and the peer gave addresses: try them first.
+        Probe,
+        /// A data channel is needed and we are the lower id: offer it.
+        Offer,
+        /// A data channel is needed and the peer offers: wake it.
+        Poke,
+    }
+
+    /// Decide what a `Hello` calls for. Pure, so the rules can be tested.
+    pub(crate) fn hello_action(
+        state: &EventLoopState,
+        local: EndpointId,
+        hello: &Signal,
+        now: Instant,
+    ) -> HelloAction {
+        let peer = hello.from;
+        let has_session = state
+            .webrtc
+            .as_ref()
+            .is_some_and(|handle| handle.has_session(&peer));
+        if state.linked_endpoints.contains(&peer) {
+            return HelloAction::Nothing;
+        }
+        // A path without a link: the graft failed or the view was full. The
+        // loop's graft path checks the room again.
+        if has_session || state.direct.get(&peer) == Some(&DirectState::Direct) {
+            return HelloAction::Graft;
+        }
+        let addr = hello_addr(hello);
+        if !hello.webrtc && !crate::transport::webrtc::pair_needs_lane(state, peer, &addr) {
+            // No addresses from a peer with IP means it has not found its own
+            // yet; its next `Hello` is a second or two away.
+            if addr.is_empty() || state.direct.get(&peer) == Some(&DirectState::Pending) {
+                return HelloAction::Nothing;
+            }
+            return HelloAction::Probe;
+        }
+        if local < peer {
+            HelloAction::Offer
+        } else if state
+            .nostr_poked
+            .get(&peer)
+            .is_none_or(|at| now.duration_since(*at) >= POKE_EVERY)
+        {
+            HelloAction::Poke
+        } else {
+            HelloAction::Nothing
+        }
+    }
+
+    fn hello_addr(hello: &Signal) -> EndpointAddr {
+        EndpointAddr::from_parts(
+            hello.from,
+            hello.addrs.iter().copied().map(TransportAddr::Ip),
+        )
+    }
+
+    /// A peer announced itself over Nostr; see the module note above.
+    pub(crate) fn on_hello(state: &mut EventLoopState, ctx: &HandlerCtx<'_>, hello: &Signal) {
+        let peer = hello.from;
+        let now = Instant::now();
+        state.nostr_seen.insert(peer, now);
+        // Signed by the peer's endpoint key (the opener checked), so its word
+        // on needing a data channel is as good as a `PeerInfo`'s.
+        if hello.webrtc {
+            state.lane_peers.insert(peer);
+        } else {
+            state.lane_peers.remove(&peer);
+        }
+        state.known_endpoints.insert(peer);
+        match hello_action(state, ctx.endpoint.id(), hello, now) {
+            HelloAction::Nothing => {}
+            HelloAction::Graft => {
+                let _ = state
+                    .direct_proven
+                    .send(DirectOutcome { peer, direct: true });
+            }
+            HelloAction::Probe => probe_then_offer(state, ctx, hello_addr(hello)),
+            HelloAction::Offer => offer(state, peer),
+            HelloAction::Poke => {
+                state.nostr_poked.insert(peer, now);
+                if let Some(nostr) = state.nostr.as_ref() {
+                    let mut wake = nostr.signal(SignalKind::Hello);
+                    wake.to = Some(peer);
+                    wake.webrtc = state.own_needs_lane;
+                    nostr.send(&wake);
+                }
+            }
+        }
+    }
+
+    /// Forget peers heard over Nostr who went quiet, so the maps are bounded
+    /// by the mesh rather than by its history.
+    pub(crate) fn prune(state: &mut EventLoopState, now: Instant) {
+        state
+            .nostr_seen
+            .retain(|_, at| now.duration_since(*at) < SEEN_FRESH);
+        state
+            .nostr_poked
+            .retain(|_, at| now.duration_since(*at) < SEEN_FRESH);
+    }
+
+    /// Try the peer's IP addresses; if they fail and we are the lower id,
+    /// offer a data channel over Nostr.
+    fn probe_then_offer(state: &mut EventLoopState, ctx: &HandlerCtx<'_>, addr: EndpointAddr) {
+        let peer = addr.id;
+        let _ = crate::lookup::add_peer_addr(ctx.endpoint, addr);
+        state.direct.insert(peer, DirectState::Pending);
+        let pool = state.unicast_pool.clone();
+        let proven = state.direct_proven.clone();
+        let fallback = (ctx.endpoint.id() < peer)
+            .then(|| Some((state.nostr.clone()?, state.webrtc.clone()?)))
+            .flatten();
+        let admission = state.webrtc_admission.clone();
+        n0_future::task::spawn(async move {
+            let direct = match pool.warm_or_dial(peer).await {
+                Ok(conn) => crate::transport::path::wait_direct(&conn, IP_PROBE_DEADLINE).await,
+                Err(_) => false,
+            };
+            if direct {
+                tracing::info!(target: LOG_TARGET, %peer, "linked over IP, found through nostr");
+                let _ = proven.send(DirectOutcome { peer, direct: true });
+                return;
+            }
+            let attached = match fallback {
+                Some((nostr, handle)) => match admission.try_admit(peer, &handle) {
+                    // Its own task, tracked, so shutdown can abort the round.
+                    Ok(guard) => {
+                        let round_admission = admission.clone();
+                        let round = n0_future::task::spawn(async move {
+                            let _guard = guard;
+                            run_offer(&nostr, &round_admission, peer).await
+                        });
+                        admission.track(peer, round.abort_handle());
+                        round.await.unwrap_or(false)
+                    }
+                    Err(_) => false,
+                },
+                None => false,
+            };
+            let _ = proven.send(DirectOutcome {
+                peer,
+                direct: attached,
+            });
+        });
+    }
+
+    /// Offer a data channel to `peer` over Nostr, if admission lets us.
+    pub(crate) fn offer(state: &mut EventLoopState, peer: EndpointId) {
+        let Some(handle) = state.webrtc.clone() else {
+            return;
+        };
+        let Ok(guard) = state.webrtc_admission.try_admit(peer, &handle) else {
+            return;
+        };
+        spawn_offer(state, peer, guard);
+    }
+
+    /// Run an admitted offer round over Nostr and report an attach as a proven
+    /// path. Shared with `negotiate_session`'s Nostr branch.
+    pub(crate) fn spawn_offer(
+        state: &mut EventLoopState,
+        peer: EndpointId,
+        guard: crate::transport::admission::AdmissionGuard,
+    ) {
+        let Some(nostr) = state.nostr.clone() else {
+            return;
+        };
+        let admission = state.webrtc_admission.clone();
+        let proven = state.direct_proven.clone();
+        let task = n0_future::task::spawn(async move {
+            let _guard = guard;
+            if run_offer(&nostr, &admission, peer).await {
+                let _ = proven.send(DirectOutcome { peer, direct: true });
+            }
+        });
+        state.webrtc_admission.track(peer, task.abort_handle());
+    }
+
+    async fn run_offer(nostr: &NostrSignal, admission: &SignalAdmission, peer: EndpointId) -> bool {
+        match Box::pin(nostr.offer(peer)).await {
+            Ok(()) => {
+                tracing::info!(target: LOG_TARGET, %peer, "webrtc session attached (nostr)");
+                true
+            }
+            Err(error) => {
+                if super::super::is_cap_refusal(&error) {
+                    admission.note_refused(peer);
+                }
+                tracing::debug!(target: LOG_TARGET, %peer, %error, "nostr offer failed");
+                false
+            }
+        }
+    }
+
+    /// Whether to offer to `peer` over Nostr rather than the signal ALPN: we
+    /// heard it over Nostr lately, or the mesh has no rendezvous for the ALPN
+    /// to reach it through.
+    pub(crate) fn prefer_nostr(state: &EventLoopState, peer: EndpointId) -> bool {
+        state.nostr.is_some()
+            && (!state.has_rendezvous
+                || state
+                    .nostr_seen
+                    .get(&peer)
+                    .is_some_and(|at| at.elapsed() < SEEN_FRESH))
+    }
+
+    /// How many relays to hold now: 3 while unlinked and for [`LINK_SETTLE`]
+    /// after, then 1.
+    pub(crate) fn target_width(state: &EventLoopState, now: Instant) -> usize {
+        if needs_wide(state) || state.nostr_wide_until.is_some_and(|until| now < until) {
+            JOINING_WIDTH
+        } else {
+            LINKED_WIDTH
+        }
+    }
+
+    /// Only an unlinked node needs the wide set. An offer round does not: the
+    /// joiner holds our first-ranked relay too, so offers reach it at width 1,
+    /// and widening per round would re-dial relays on every join.
+    fn needs_wide(state: &EventLoopState) -> bool {
+        state.linked_endpoints.is_empty()
+    }
+
+    /// Adjust the relay set and forget quiet peers; run on gossip events,
+    /// alive ticks and announces. The wide set outlives the last unlinked
+    /// moment by [`LINK_SETTLE`].
+    pub(crate) fn update_width(state: &mut EventLoopState) {
+        let now = Instant::now();
+        prune(state, now);
+        if needs_wide(state) {
+            state.nostr_wide_until = Some(now + LINK_SETTLE);
+        }
+        let width = target_width(state, now);
+        let Some(nostr) = state.nostr.as_ref() else {
+            return;
+        };
+        if width != state.nostr_width {
+            state.nostr_width = width;
+            nostr.set_width(width);
+        }
+    }
+}
+
 /// Hand a reply to the round waiting on its `re`, if it came from the peer
 /// that round offered to. Checked before the wait is taken: every member can
 /// read an offer's nonce off the addressee's tag, and a wait consumed by the
@@ -273,7 +631,7 @@ async fn dispatch(
     inner: std::sync::Weak<Inner>,
     mut events: mpsc::UnboundedReceiver<fofoca_nostr::Event>,
     mut opener: Opener,
-    hellos: mpsc::UnboundedSender<Signal>,
+    hellos: mpsc::Sender<Signal>,
 ) {
     while let Some(event) = events.recv().await {
         let signal = match opener.open(&event.content, now()) {
@@ -286,7 +644,7 @@ async fn dispatch(
         let Some(inner) = inner.upgrade() else { return };
         match signal.kind {
             SignalKind::Hello => {
-                let _ = hellos.send(signal);
+                let _ = hellos.try_send(signal);
             }
             SignalKind::Answer | SignalKind::Refuse => {
                 deliver_reply(&inner.replies, signal);
@@ -300,6 +658,10 @@ async fn dispatch(
 /// TLS-proven id.
 fn answer(inner: &Arc<Inner>, offer: Signal) {
     let remote = offer.from;
+    if !inner.answers {
+        tracing::debug!(target: LOG_TARGET, %remote, "ignored a nostr offer: webrtc is off");
+        return;
+    }
     // A signed re-offer from a peer we hold a session with means its half is
     // gone; see `WebRtcSignalAcceptor::accept`. Safe on the signature alone.
     if inner.handle.has_session(&remote) && inner.handle.detach(&remote) {
@@ -417,6 +779,10 @@ mod tests {
     }
 
     async fn node(relay: &TestRelay, topic: [u8; 32], cap: usize) -> Node {
+        node_with(relay, topic, cap, true).await
+    }
+
+    async fn node_with(relay: &TestRelay, topic: [u8; 32], cap: usize, answers: bool) -> Node {
         let (endpoint, handle) = webrtc_only().await;
         let admission = SignalAdmission::new(cap);
         let (signal, _hellos) = NostrSignal::start_with(
@@ -427,6 +793,7 @@ mod tests {
                 ice: IceProfile { host_only: true },
                 keys: NostrKeys::derive(&TopicId::from_bytes(topic)),
                 relays: vec![relay.url()],
+                answers,
             },
             quick(),
         );
@@ -610,5 +977,124 @@ mod tests {
         }
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert_eq!(bob.admission.in_flight(), 0);
+    }
+
+    /// A node with `WebRTC` off answers no offer: the session would attach
+    /// into a transport its endpoint never registered.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_node_with_webrtc_off_answers_no_offer() {
+        let relay = TestRelay::spawn().await.unwrap();
+        let alice = node(&relay, [6u8; 32], MAX_DIRECT_PEERS).await;
+        let bob = node_with(&relay, [6u8; 32], MAX_DIRECT_PEERS, false).await;
+        settled(&relay).await;
+        assert!(offer(&alice, &bob).await.is_err(), "no answer comes");
+        assert!(!bob.handle.has_session(&alice.endpoint.id()));
+    }
+
+    mod discovery_rules {
+        use std::time::Duration;
+
+        use super::super::discovery::{HelloAction, hello_action, prune, target_width};
+        use super::*;
+        use crate::testing::{endpoint_id, fresh_state};
+        use crate::util::clock::Instant;
+
+        fn hello(from: EndpointId, addrs: &[&str], webrtc: bool) -> Signal {
+            let mut hello = Signal::new(SignalKind::Hello, from, now());
+            hello.addrs = addrs.iter().map(|addr| addr.parse().unwrap()).collect();
+            hello.webrtc = webrtc;
+            hello
+        }
+
+        /// A proven path to a peer that never made it into the overlay (a
+        /// failed join, a full view) is grafted again on its next `Hello`,
+        /// not skipped forever.
+        #[test]
+        fn a_direct_but_unlinked_peer_is_grafted_again() {
+            let mut state = fresh_state();
+            let peer = endpoint_id(9);
+            state
+                .direct
+                .insert(peer, crate::daemon::state::DirectState::Direct);
+            let unlinked = hello_action(
+                &state,
+                endpoint_id(1),
+                &hello(peer, &[], false),
+                Instant::now(),
+            );
+            assert_eq!(unlinked, HelloAction::Graft);
+
+            state.linked_endpoints.insert(peer);
+            let linked = hello_action(
+                &state,
+                endpoint_id(1),
+                &hello(peer, &[], false),
+                Instant::now(),
+            );
+            assert_eq!(linked, HelloAction::Nothing, "linked peers are left alone");
+        }
+
+        /// An IP peer's first `Hello` can go out before it knows its own
+        /// addresses. That is "not yet", not "open a data channel".
+        #[test]
+        fn an_ip_peer_with_no_addresses_yet_is_not_offered_a_channel() {
+            let state = fresh_state();
+            let peer = endpoint_id(9);
+            let no_addrs = hello_action(
+                &state,
+                endpoint_id(1),
+                &hello(peer, &[], false),
+                Instant::now(),
+            );
+            assert_eq!(no_addrs, HelloAction::Nothing);
+            let with_addrs = hello_action(
+                &state,
+                endpoint_id(1),
+                &hello(peer, &["192.0.2.1:4433"], false),
+                Instant::now(),
+            );
+            assert_eq!(with_addrs, HelloAction::Probe, "with addresses, probe");
+            let no_ip = hello_action(
+                &state,
+                endpoint_id(1),
+                &hello(peer, &[], true),
+                Instant::now(),
+            );
+            assert_eq!(
+                no_ip,
+                HelloAction::Offer,
+                "a peer with no IP gets a channel"
+            );
+        }
+
+        /// A node that just linked keeps its wide relay set for a while, so a
+        /// flapping link does not flap the relay set.
+        #[test]
+        fn the_relay_set_narrows_only_after_the_link_settles() {
+            let mut state = fresh_state();
+            state.linked_endpoints.insert(endpoint_id(9));
+            let now = Instant::now();
+            state.nostr_wide_until = Some(now + Duration::from_secs(30));
+            assert_eq!(target_width(&state, now), JOINING_WIDTH);
+            assert_eq!(
+                target_width(&state, now + Duration::from_secs(31)),
+                LINKED_WIDTH
+            );
+        }
+
+        #[test]
+        fn peers_heard_long_ago_are_forgotten() {
+            let mut state = fresh_state();
+            let (old, fresh) = (endpoint_id(8), endpoint_id(9));
+            let then = Instant::now();
+            state.nostr_seen.insert(old, then);
+            state.nostr_poked.insert(old, then);
+            let later = then + Duration::from_mins(10);
+            state.nostr_seen.insert(fresh, later);
+            prune(&mut state, later);
+            assert!(!state.nostr_seen.contains_key(&old));
+            assert!(!state.nostr_poked.contains_key(&old));
+            assert!(state.nostr_seen.contains_key(&fresh));
+        }
     }
 }

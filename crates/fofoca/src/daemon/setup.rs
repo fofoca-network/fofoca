@@ -17,6 +17,8 @@ use crate::util::tuning::RELAY_RUNG_PROBE_SECS;
 
 use crate::beacon::RendezvousParams;
 use crate::lifecycle;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::transport::webrtc::nostr::NostrParams;
 
 use super::{CoHostPolicy, DriverMode, EventLoopConfig};
 
@@ -575,6 +577,8 @@ pub async fn setup_mesh(kind: SetupKind, params: SetupParams) -> Result<EventLoo
         endpoint,
         router,
         max_peers,
+        #[cfg(not(target_arch = "wasm32"))]
+        nostr: NostrParams::for_mesh(&lookups, rdv.topic_id.as_bytes()),
         cohost: effective_cohost(rdv.has_rendezvous, cohost_override, cohost),
         rendezvous_params: rdv,
         rung_rx,

@@ -28,7 +28,20 @@ const RECHOOSE_EVERY: Duration = Duration::from_secs(5);
 /// to swallow events. Public relays echo in about a second. It must stay above
 /// the connect timeout (10 s in `conn`), or a relay still dialing when we
 /// first publish could be flagged before it had a chance to echo.
-const ECHO_DEADLINE: Duration = Duration::from_secs(10);
+const ECHO_DEADLINE: Duration = if cfg!(test) {
+    Duration::from_secs(1)
+} else {
+    Duration::from_secs(10)
+};
+/// A relay swallowing this much longer gets its socket dropped and dialed
+/// again: a half-open TCP connection (a NAT rebinding, a sleeping laptop)
+/// otherwise stays "up" until the kernel's retransmission timeout, around
+/// 15 minutes.
+const SWALLOW_RECONNECT: Duration = if cfg!(test) {
+    Duration::from_secs(1)
+} else {
+    Duration::from_mins(1)
+};
 const SEEN_CAPACITY: usize = 4096;
 
 enum Command {
@@ -170,6 +183,18 @@ impl Chooser {
             self.leases.push((url.clone(), lease));
         }
         // `old` now holds the relays we no longer want; dropping it releases them.
+        for (url, lease) in &self.leases {
+            if self
+                .owed_echo
+                .get(url)
+                .is_some_and(|since| since.elapsed() >= ECHO_DEADLINE + SWALLOW_RECONNECT)
+            {
+                lease.reconnect();
+                // Re-armed, so a relay that goes on swallowing is dialed again
+                // once a round, not on every choose.
+                self.owed_echo.insert(url.clone(), Instant::now());
+            }
+        }
         self.owed_echo
             .retain(|url, _| self.leases.iter().any(|(held, _)| held == url));
     }
@@ -349,5 +374,26 @@ mod tests {
             "the first relay is back"
         );
         assert_eq!(first.accepted(), dials, "on the same socket");
+    }
+
+    /// A socket that stays up while nothing comes back (a half-open TCP
+    /// connection after a NAT rebinding looks exactly like this) is dropped
+    /// and dialed again, rather than left for the kernel's retransmission
+    /// timeout. (The unit-test build shortens both deadlines.)
+    #[tokio::test]
+    async fn a_relay_that_keeps_swallowing_is_dialed_again() {
+        let relay = TestRelay::spawn().await.unwrap();
+        relay.swallow_events(true);
+        let (pool, _rx) = Pool::open(vec![relay.url()], 1, &[TAG]);
+        eventually("connected", || pool.connected() == vec![relay.url()]).await;
+        let dials = relay.accepted();
+        for _ in 0..60 {
+            pool.publish(&TAG, "anyone there?".to_owned());
+            if relay.accepted() > dials {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        panic!("the swallowing relay was never dialed again");
     }
 }

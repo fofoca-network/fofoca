@@ -181,6 +181,9 @@ pub struct EventLoopConfig {
     /// `EventLoopState::rendezvous_graft_needs_session` and
     /// `EventLoopState::own_needs_lane` from it.
     pub(crate) has_ip_transport: bool,
+    /// The Nostr carrier's keys and relays, on a mesh with the Nostr lookup.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) nostr: Option<crate::transport::webrtc::nostr::NostrParams>,
     /// The negotiation-slot table this peer's Router acceptor was built with.
     /// `run()` moves it into `EventLoopState::webrtc_admission`, so the dialing
     /// side and the answering side share one direct-peer ceiling.

@@ -276,6 +276,27 @@ pub struct EventLoopState {
     /// Peers whose `PeerInfo` said they need a data channel. The shape of a
     /// peer's address says the same only when it carries a relay.
     pub(crate) lane_peers: HashSet<EndpointId>,
+    /// Whether anything can reach the rendezvous (`RendezvousParams`). Without
+    /// one, the signal ALPN has nothing to ride and offers go over Nostr.
+    pub(crate) has_rendezvous: bool,
+    /// The Nostr carrier, on a mesh with the Nostr lookup.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) nostr: Option<crate::transport::webrtc::nostr::NostrSignal>,
+    /// When each peer was last heard over Nostr.
+    pub(crate) nostr_seen: HashMap<EndpointId, Instant>,
+    /// When each peer was last woken with a `Hello` on its own tag.
+    pub(crate) nostr_poked: HashMap<EndpointId, Instant>,
+    /// When the next `Hello` goes out; `None` without the carrier.
+    pub(crate) next_hello: Option<TokioInstant>,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) hellos_sent: u32,
+    /// How many relays the carrier holds now.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) nostr_width: usize,
+    /// Hold the wide relay set until then: the end of the last offer round,
+    /// plus a cooldown.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) nostr_wide_until: Option<Instant>,
     /// Set once we've broadcast our arrival (`joined` + `PeerInfo`).
     /// The announce is deferred to the first `NeighborUp` so it isn't
     /// lost into an unconnected overlay; subsequent neighbors only get
@@ -628,6 +649,18 @@ impl EventLoopState {
             rendezvous_graft_needs_session: false,
             own_needs_lane: false,
             lane_peers: HashSet::new(),
+            has_rendezvous: true,
+            #[cfg(not(target_arch = "wasm32"))]
+            nostr: None,
+            nostr_seen: HashMap::new(),
+            nostr_poked: HashMap::new(),
+            next_hello: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            hellos_sent: 0,
+            #[cfg(not(target_arch = "wasm32"))]
+            nostr_width: 0,
+            #[cfg(not(target_arch = "wasm32"))]
+            nostr_wide_until: None,
             announced: false,
             meshed: false,
             unicast_pool: crate::transport::UnicastPool::disconnected(),
@@ -794,6 +827,8 @@ impl EventLoopState {
         let addr = self.peer_endpoints.remove(nick)?;
         self.direct.remove(&addr.id);
         self.lane_peers.remove(&addr.id);
+        self.nostr_seen.remove(&addr.id);
+        self.nostr_poked.remove(&addr.id);
         Some(addr)
     }
 

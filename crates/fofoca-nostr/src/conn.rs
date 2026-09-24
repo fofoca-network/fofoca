@@ -113,6 +113,8 @@ enum Command {
         sub_id: String,
     },
     Publish(String),
+    /// Drop the socket and dial again.
+    Reconnect,
 }
 
 /// A pool's hold on a relay. Dropping the last lease closes the socket.
@@ -138,6 +140,12 @@ impl Lease {
 
     pub(crate) fn publish(&self, frame: String) {
         let _ = self.conn.commands.send(Command::Publish(frame));
+    }
+
+    /// Drop the socket and dial again. It is shared, so every pool on it
+    /// reconnects: fine, since the socket is the suspect.
+    pub(crate) fn reconnect(&self) {
+        let _ = self.conn.commands.send(Command::Reconnect);
     }
 }
 
@@ -431,6 +439,7 @@ impl Task {
                 }
                 frame
             }
+            Command::Reconnect => return Err(Outcome::Dropped),
         };
         sender.send(frame).await.map_err(|_| Outcome::Dropped)
     }
@@ -507,8 +516,8 @@ impl Task {
                     Some(Command::Unsubscribe { sub_id }) => {
                         self.subs.remove(&sub_id);
                     }
-                    // Nowhere to send it.
-                    Some(Command::Publish(_)) => {}
+                    // Nowhere to send it, or already reconnecting.
+                    Some(Command::Publish(_) | Command::Reconnect) => {}
                 },
             }
         }
