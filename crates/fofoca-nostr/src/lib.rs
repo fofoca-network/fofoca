@@ -10,6 +10,9 @@ mod pool;
 mod wire;
 #[cfg(not(target_arch = "wasm32"))]
 mod ws;
+#[cfg(target_arch = "wasm32")]
+#[path = "ws_web.rs"]
+mod ws;
 
 #[cfg(all(feature = "test-relay", not(target_arch = "wasm32")))]
 pub mod test_relay;

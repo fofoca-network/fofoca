@@ -94,7 +94,6 @@ pub async fn run<A: NodeDriver>(
         webrtc,
         webrtc_enabled,
         has_ip_transport,
-        #[cfg(not(target_arch = "wasm32"))]
         nostr,
         webrtc_admission,
         webrtc_ice,
@@ -180,7 +179,6 @@ pub async fn run<A: NodeDriver>(
     // The direct-path transport the session manager fills; `None` leaves
     // every pair to iroh's own paths.
     state.has_rendezvous = rendezvous_params.has_rendezvous;
-    #[cfg(not(target_arch = "wasm32"))]
     let nostr_rx = nostr.map(|params| {
         let (signal, hellos) = crate::transport::webrtc::nostr::NostrSignal::start(
             crate::transport::webrtc::nostr::NostrSignalParts {
@@ -198,8 +196,6 @@ pub async fn run<A: NodeDriver>(
         state.next_hello = Some(TokioInstant::now());
         hellos
     });
-    #[cfg(target_arch = "wasm32")]
-    let nostr_rx: Option<mpsc::Receiver<crate::protocol::nostr::Signal>> = None;
     state.webrtc = webrtc_enabled.then_some(webrtc);
     state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), relay_transport);
     // Before the first write, so the initial advertisement carries a real count.
@@ -901,10 +897,7 @@ fn spawn_ipc_rx<C: serde::de::DeserializeOwned + Send + 'static>(
 /// is active. Lets the event loop's `select!` carry a ping-finalize arm
 /// that only fires while a round is in flight, without borrowing
 /// `state` across the await (the deadline is copied out beforehand).
-/// The Nostr lane's loop hooks. Native only until the browser gets the
-/// carrier; the arms stay in the `select!` on both targets and never fire in a
-/// browser.
-#[cfg(not(target_arch = "wasm32"))]
+/// The Nostr lane's loop hooks.
 fn nostr_hello(
     state: &mut EventLoopState,
     ctx: &HandlerCtx<'_>,
@@ -913,31 +906,13 @@ fn nostr_hello(
     crate::transport::webrtc::nostr::discovery::on_hello(state, ctx, hello);
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn nostr_announce(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
     crate::transport::webrtc::nostr::discovery::announce(state, ctx);
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn nostr_width(state: &mut EventLoopState) {
     crate::transport::webrtc::nostr::discovery::update_width(state);
 }
-
-#[cfg(target_arch = "wasm32")]
-fn nostr_hello(
-    _state: &mut EventLoopState,
-    _ctx: &HandlerCtx<'_>,
-    _hello: &crate::protocol::nostr::Signal,
-) {
-}
-
-#[cfg(target_arch = "wasm32")]
-fn nostr_announce(state: &mut EventLoopState, _ctx: &HandlerCtx<'_>) {
-    state.next_hello = None;
-}
-
-#[cfg(target_arch = "wasm32")]
-fn nostr_width(_state: &mut EventLoopState) {}
 
 async fn sleep_until_opt(deadline: Option<TokioInstant>) {
     match deadline {

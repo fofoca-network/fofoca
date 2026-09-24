@@ -314,6 +314,7 @@ pub(crate) mod discovery {
     use crate::daemon::state::{DirectState, EventLoopState};
     use crate::transport::probe::DirectOutcome;
     use crate::util::clock::Instant;
+    use n0_future::time::Instant as TokioInstant;
 
     /// Announce ourselves, and schedule the next announce.
     pub(crate) fn announce(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
@@ -349,7 +350,7 @@ pub(crate) mod discovery {
             probe.to = Some(ctx.endpoint.id());
             nostr.send(&probe);
         }
-        state.next_hello = Some(n0_future::time::Instant::now() + next);
+        state.next_hello = Some(TokioInstant::now() + next);
         update_width(state);
     }
 
@@ -567,13 +568,28 @@ pub(crate) mod discovery {
     }
 
     /// How many relays to hold now: 3 while unlinked and for [`LINK_SETTLE`]
-    /// after, then 1.
-    pub(crate) fn target_width(state: &EventLoopState, now: Instant) -> usize {
-        if needs_wide(state) || state.nostr_wide_until.is_some_and(|until| now < until) {
+    /// after, then 1. A hidden browser tab holds 1: it saves the sockets, and
+    /// the first-ranked relay is the one every member listens on.
+    pub(crate) fn target_width(state: &EventLoopState, now: Instant, hidden: bool) -> usize {
+        let wide = needs_wide(state) || state.nostr_wide_until.is_some_and(|until| now < until);
+        if wide && !hidden {
             JOINING_WIDTH
         } else {
             LINKED_WIDTH
         }
+    }
+
+    /// A Worker has no `window`, and reads as visible.
+    #[cfg(target_arch = "wasm32")]
+    fn tab_hidden() -> bool {
+        web_sys::window()
+            .and_then(|window| window.document())
+            .is_some_and(|document| document.visibility_state() == web_sys::VisibilityState::Hidden)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn tab_hidden() -> bool {
+        false
     }
 
     /// Only an unlinked node needs the wide set. An offer round does not: the
@@ -592,7 +608,7 @@ pub(crate) mod discovery {
         if needs_wide(state) {
             state.nostr_wide_until = Some(now + LINK_SETTLE);
         }
-        let width = target_width(state, now);
+        let width = target_width(state, now, tab_hidden());
         let Some(nostr) = state.nostr.as_ref() else {
             return;
         };
@@ -1075,11 +1091,21 @@ mod tests {
             state.linked_endpoints.insert(endpoint_id(9));
             let now = Instant::now();
             state.nostr_wide_until = Some(now + Duration::from_secs(30));
-            assert_eq!(target_width(&state, now), JOINING_WIDTH);
+            assert_eq!(target_width(&state, now, false), JOINING_WIDTH);
             assert_eq!(
-                target_width(&state, now + Duration::from_secs(31)),
+                target_width(&state, now + Duration::from_secs(31), false),
                 LINKED_WIDTH
             );
+        }
+
+        /// A hidden tab holds one relay even while it joins: the browser
+        /// throttles its timers, and every member listens on that first relay.
+        #[test]
+        fn a_hidden_tab_holds_one_relay() {
+            let state = fresh_state();
+            let now = Instant::now();
+            assert_eq!(target_width(&state, now, false), JOINING_WIDTH);
+            assert_eq!(target_width(&state, now, true), LINKED_WIDTH);
         }
 
         #[test]

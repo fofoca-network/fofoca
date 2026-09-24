@@ -280,7 +280,6 @@ pub struct EventLoopState {
     /// one, the signal ALPN has nothing to ride and offers go over Nostr.
     pub(crate) has_rendezvous: bool,
     /// The Nostr carrier, on a mesh with the Nostr lookup.
-    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) nostr: Option<crate::transport::webrtc::nostr::NostrSignal>,
     /// When each peer was last heard over Nostr.
     pub(crate) nostr_seen: HashMap<EndpointId, Instant>,
@@ -288,14 +287,11 @@ pub struct EventLoopState {
     pub(crate) nostr_poked: HashMap<EndpointId, Instant>,
     /// When the next `Hello` goes out; `None` without the carrier.
     pub(crate) next_hello: Option<TokioInstant>,
-    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) hellos_sent: u32,
     /// How many relays the carrier holds now.
-    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) nostr_width: usize,
     /// Hold the wide relay set until then: the end of the last offer round,
     /// plus a cooldown.
-    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) nostr_wide_until: Option<Instant>,
     /// Set once we've broadcast our arrival (`joined` + `PeerInfo`).
     /// The announce is deferred to the first `NeighborUp` so it isn't
@@ -650,16 +646,12 @@ impl EventLoopState {
             own_needs_lane: false,
             lane_peers: HashSet::new(),
             has_rendezvous: true,
-            #[cfg(not(target_arch = "wasm32"))]
             nostr: None,
             nostr_seen: HashMap::new(),
             nostr_poked: HashMap::new(),
             next_hello: None,
-            #[cfg(not(target_arch = "wasm32"))]
             hellos_sent: 0,
-            #[cfg(not(target_arch = "wasm32"))]
             nostr_width: 0,
-            #[cfg(not(target_arch = "wasm32"))]
             nostr_wide_until: None,
             announced: false,
             meshed: false,

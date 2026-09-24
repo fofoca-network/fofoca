@@ -110,3 +110,41 @@ fn a_message_can_be_authored() {
     );
     assert!(!message.id.to_string().is_empty(), "frame carries no id");
 }
+
+/// A browser endpoint on a Nostr-only mesh: no relay, no IP, only the `WebRTC`
+/// hub. It must bind. Its address is empty by design; the signed lane flag,
+/// not the address, tells peers to reach it over a data channel.
+#[wasm_bindgen_test]
+async fn a_relayless_webrtc_endpoint_binds() {
+    use fofoca::iroh::SecretKey;
+    use fofoca::net::{TransportHandles, TransportOpts, build_endpoint};
+    use fofoca::protocol::LookupOpts;
+    use fofoca::protocol::mesh::NostrChoice;
+    use fofoca_iroh_webrtc_transport::WebRtcHandle;
+
+    let key = SecretKey::generate();
+    let hub = WebRtcHandle::hub(key.public());
+    let lookups = LookupOpts {
+        nostr: NostrChoice::Pinned,
+        ..LookupOpts::loopback()
+    };
+    let transports = TransportHandles {
+        webrtc: Some(hub),
+        opts: TransportOpts {
+            ip: false,
+            relay: false,
+            webrtc: true,
+            multihop: false,
+        },
+    };
+    let endpoint = build_endpoint(&lookups, Some(key), None, Vec::new(), transports)
+        .await
+        .expect("a relay-less WebRTC endpoint binds");
+    // Empty on purpose: this is why peers learn the lane from a signed flag.
+    // An address here would mean a path the browser does not have.
+    assert!(
+        endpoint.addr().addrs.is_empty(),
+        "a browser with no relay advertises no address"
+    );
+    endpoint.close().await;
+}

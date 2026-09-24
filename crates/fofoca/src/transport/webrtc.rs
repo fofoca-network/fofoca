@@ -36,7 +36,6 @@ use iroh::{Endpoint, EndpointAddr, EndpointId};
 use super::LOG_TARGET;
 use super::admission::{Refusal, SignalAdmission};
 
-#[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod nostr;
 
 /// ALPN for the JSEP exchange. Wire-load-bearing in the same way
@@ -670,7 +669,6 @@ pub(crate) fn negotiate_session(
 
     // With no rendezvous, or a peer heard over Nostr, the ALPN may have no
     // path to ride; the offer goes over Nostr instead.
-    #[cfg(not(target_arch = "wasm32"))]
     if nostr::discovery::prefer_nostr(state, peer) {
         nostr::discovery::spawn_offer(state, peer, guard);
         return;

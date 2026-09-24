@@ -140,10 +140,10 @@ pub(crate) const STEPS: &[Step] = &[
         scope: Scope::Crate("fofoca-iroh-webrtc-transport"),
         args: &["--features", "native", "--all-targets"],
     },
-    // Five crates are reachable on wasm32 and between them that is a
+    // These crates are reachable on wasm32 and between them that is a
     // substantial amount of code nothing else compiles: `fofoca-chunks`'s
     // IndexedDB backend, the whole `web` backend of the WebRTC transport, the
-    // portable half of the engine, `fofoca-netplay`'s simulation, and
+    // browser socket of the Nostr client, the portable half of the engine, `fofoca-netplay`'s simulation, and
     // `fofoca-pipe`'s wire contract.
     // Without these rows that code rots silently, and the `#[expect(...)]`
     // attributes inside it are never lint-checked either.
@@ -158,6 +158,11 @@ pub(crate) const STEPS: &[Step] = &[
         kind: Kind::WasmCheck,
         scope: Scope::Crate("fofoca-iroh-webrtc-transport"),
         args: &["--features", "web"],
+    },
+    Step {
+        kind: Kind::WasmCheck,
+        scope: Scope::Crate("fofoca-nostr"),
+        args: &[],
     },
     // The engine itself must reach the browser, not merely be avoidable from
     // it. `--no-default-features` is the portable half: no `host`, so no IPC
@@ -214,6 +219,11 @@ pub(crate) const STEPS: &[Step] = &[
         kind: Kind::WasmClippy,
         scope: Scope::Crate("fofoca-iroh-webrtc-transport"),
         args: &["--features", "web"],
+    },
+    Step {
+        kind: Kind::WasmClippy,
+        scope: Scope::Crate("fofoca-nostr"),
+        args: &[],
     },
     Step {
         kind: Kind::WasmClippy,
