@@ -19,7 +19,7 @@ Build the wasm once, serve the page, start a terminal peer, meet on a topic:
 
 ```sh
 cargo task build-wasm                              # once, and after engine changes
-cd examples/chat/web && bun run serve              # http://127.0.0.1:3010/
+cd examples/chat/web && bun run serve              # prints its URL, 3010 or the next free port
 cargo run -p fofoca-pipe --example chat -- --topic room --nick terminal
 ```
 
@@ -30,7 +30,7 @@ cargo build --release -p fofoca-ffi                # once
 cd examples/chat/bun-ffi && bun run start --topic room --nick bun
 ```
 
-Open `http://127.0.0.1:3010/?topic=room&nick=browser` and chat. Type to
+Open the printed URL with `?topic=room&nick=browser` and chat. Type to
 broadcast; `/msg <nick> <text>` sends a direct message (`relay-only` peers
 refuse it by design — payload never rides the relay unless the mesh says
 so); `/peers` prints the roster; `/quit` leaves.

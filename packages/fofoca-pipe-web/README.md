@@ -9,10 +9,10 @@ person at the composer, a browser agent through WebMCP, or a script through
 
 ```sh
 cargo task build-wasm                        # the wasm glue, once
-bun run --cwd packages/fofoca-pipe-web serve # http://127.0.0.1:3020/
+bun run --cwd packages/fofoca-pipe-web serve # 3020, or the next free port; prints the URL
 ```
 
-Then, in a terminal:
+Then, in a terminal, with the URL the server printed:
 
 ```sh
 cat lorem.txt | fofoca-pipe --web-url http://127.0.0.1:3020/

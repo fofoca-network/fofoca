@@ -11,8 +11,8 @@ they all meet in the same mesh, so a tab and a terminal chat to each other.
 cargo task build-wasm    # once, builds the browser peer
 bun install              # once, at the repo root
 
-bun run serve            # then open the printed URL
-bun run serve 4000       # or on another port
+bun run serve            # 3010, or the next free port up to 3019; open the printed URL
+bun run serve 4000       # exactly 4000, or fail
 ```
 
 `serve.ts` bundles `src/chat.ts` on each request and serves the wasm glue from
