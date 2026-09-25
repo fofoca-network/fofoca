@@ -41,12 +41,15 @@ fn rotate(path: &Path, reopen: impl FnOnce(&Path) -> io::Result<fs::File>) -> io
     let mut backup = path.as_os_str().to_owned();
     backup.push(".1");
     let backup = PathBuf::from(backup);
-    let _ = fs::rename(path, &backup);
+    let renamed = fs::rename(path, &backup).is_ok();
     reopen(path).inspect_err(|_| {
         // The caller keeps writing through its old handle, which now points
-        // at the backup. Move it back so that handle stays on `path` and the
-        // next write retries the rotation.
-        let _ = fs::rename(&backup, path);
+        // at the backup. Move it back so that handle stays on `path`. Only
+        // when it moved: otherwise `backup` is a stale file from an earlier
+        // rotation.
+        if renamed {
+            let _ = fs::rename(&backup, path);
+        }
     })
 }
 
@@ -65,7 +68,7 @@ fn open_truncated(path: &Path) -> io::Result<fs::File> {
 
 /// Rotate the attached file once `written` reaches `max` (`max == 0`
 /// disables rotation). Best-effort: on rotate failure keep the current file
-/// (temporarily over cap) and retry next write — never drop the sink.
+/// (temporarily over cap) and retry a little later — never drop the sink.
 fn maybe_rotate(file: &mut fs::File, path: &Path, written: &mut u64, max: u64) {
     maybe_rotate_with(file, path, written, max, open_truncated);
 }
@@ -80,9 +83,14 @@ fn maybe_rotate_with(
     if max == 0 || *written < max {
         return;
     }
-    if let Ok(rotated) = rotate(path, reopen) {
-        *file = rotated;
-        *written = 0;
+    match rotate(path, reopen) {
+        Ok(rotated) => {
+            *file = rotated;
+            *written = 0;
+        }
+        // Retry after another max / 8 bytes, not on every line: a full disk
+        // fails each attempt, and each costs two renames and an open.
+        Err(_) => *written = max - max / 8,
     }
 }
 
@@ -244,6 +252,16 @@ mod tests {
 
     use super::{LogSink, State};
 
+    fn failing_reopen(_: &std::path::Path) -> std::io::Result<fs::File> {
+        Err(std::io::Error::other("no space left on device"))
+    }
+
+    fn backup_of(path: &std::path::Path) -> PathBuf {
+        let mut backup = path.as_os_str().to_owned();
+        backup.push(".1");
+        PathBuf::from(backup)
+    }
+
     #[test]
     fn failed_reopen_keeps_the_handle_on_the_active_path() {
         let dir =
@@ -252,15 +270,49 @@ mod tests {
         let path = dir.join("rot.log");
         let mut file = fs::File::create(&path).expect("open test log");
         let mut written = 100u64;
-        super::maybe_rotate_with(&mut file, &path, &mut written, 100, |_| {
-            Err(std::io::Error::other("no space left on device"))
-        });
+        super::maybe_rotate_with(&mut file, &path, &mut written, 100, failing_reopen);
+        file.write_all(b"after the failed rotation")
+            .expect("write through the kept handle");
+        let active = fs::read(&path);
+        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(
+            active.expect("read the active path"),
+            b"after the failed rotation"
+        );
+    }
+
+    #[test]
+    fn failed_reopen_leaves_a_stale_backup_when_the_first_rename_failed() {
+        let dir = std::env::temp_dir().join(format!("fofoca-logsink-stale-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        // No file at `path`, so the first rename fails; `.1` is from an
+        // earlier rotation.
+        let path = dir.join("rot.log");
+        fs::write(backup_of(&path), b"old backup").expect("write stale backup");
+        let _ = super::rotate(&path, failing_reopen);
         let active_exists = path.exists();
+        let backup = fs::read(backup_of(&path));
         let _ = fs::remove_dir_all(&dir);
         assert!(
-            active_exists,
-            "after a failed reopen the kept handle must still write to {}",
-            path.display()
+            !active_exists,
+            "the stale backup must not move onto the active path"
+        );
+        assert_eq!(backup.expect("stale backup kept"), b"old backup");
+    }
+
+    #[test]
+    fn failed_reopen_defers_the_next_rotation() {
+        let dir = std::env::temp_dir().join(format!("fofoca-logsink-defer-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("rot.log");
+        let mut file = fs::File::create(&path).expect("open test log");
+        let max = 800u64;
+        let mut written = max;
+        super::maybe_rotate_with(&mut file, &path, &mut written, max, failing_reopen);
+        let _ = fs::remove_dir_all(&dir);
+        assert!(
+            written < max,
+            "a failed rotation must not retry on the next line, written = {written}"
         );
     }
 
