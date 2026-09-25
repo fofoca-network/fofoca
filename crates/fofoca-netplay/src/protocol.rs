@@ -268,19 +268,13 @@ impl<T: Config> PeerProtocol<T> {
         }
     }
 
-    /// Handle a packet from this peer.
-    ///
-    /// Returns any inputs to feed the rollback engine, as
-    /// `(frame, input)` pairs, plus events for the application. Stale
-    /// packets — wrong nonce — are dropped silently.
-    pub(crate) fn on_message(
-        &mut self,
-        message: &Message<T::Input>,
-        replies: &mut Vec<Message<T::Input>>,
-    ) -> (Vec<(Frame, T::Input)>, Vec<PeerEvent>) {
-        let mut inputs = Vec::new();
-        let mut events = Vec::new();
-
+    /// Whether `message` belongs to the peer's current session. The peer's
+    /// nonce is latched only on a reply to this session's own request: the
+    /// first packet to arrive can be a leftover from the peer's previous
+    /// match, and latching that would drop every packet of its current
+    /// session as foreign. Until then, requests are still answered, so the
+    /// peer's handshake is not held up by ours.
+    fn admit(&mut self, message: &Message<T::Input>, replies: &mut Vec<Message<T::Input>>) -> bool {
         match self.remote_magic {
             Some(known) if known != message.magic => {
                 self.foreign_magic_drops = self.foreign_magic_drops.saturating_add(1);
@@ -295,17 +289,51 @@ impl<T: Config> PeerProtocol<T> {
                         "dropped a packet from a foreign session"
                     );
                 }
-                return (inputs, events);
+                false
             }
-            Some(_) => {}
-            None => {
-                tracing::debug!(
-                    handle = self.handle,
-                    remote_magic = message.magic,
-                    "latched the peer's session nonce"
-                );
-                self.remote_magic = Some(message.magic);
-            }
+            Some(_) => true,
+            None => match &message.body {
+                Body::SyncReply { token }
+                    if self.state == PeerState::Syncing && *token == self.sync_token =>
+                {
+                    tracing::debug!(
+                        handle = self.handle,
+                        remote_magic = message.magic,
+                        "latched the peer's session nonce"
+                    );
+                    self.remote_magic = Some(message.magic);
+                    true
+                }
+                Body::SyncRequest { token } => {
+                    replies.push(self.wrap(Body::SyncReply { token: *token }));
+                    false
+                }
+                Body::SyncReply { .. }
+                | Body::Input(_)
+                | Body::InputAck { .. }
+                | Body::QualityReport { .. }
+                | Body::QualityReply { .. }
+                | Body::KeepAlive
+                | Body::Checksum { .. } => false,
+            },
+        }
+    }
+
+    /// Handle a packet from this peer.
+    ///
+    /// Returns any inputs to feed the rollback engine, as
+    /// `(frame, input)` pairs, plus events for the application. Stale
+    /// packets — wrong nonce — are dropped silently.
+    pub(crate) fn on_message(
+        &mut self,
+        message: &Message<T::Input>,
+        replies: &mut Vec<Message<T::Input>>,
+    ) -> (Vec<(Frame, T::Input)>, Vec<PeerEvent>) {
+        let mut inputs = Vec::new();
+        let mut events = Vec::new();
+
+        if !self.admit(message, replies) {
+            return (inputs, events);
         }
         self.silent_ticks = 0;
 
@@ -481,5 +509,50 @@ mod tests {
             "the next round trip must not wait out the resend cadence"
         );
         assert_eq!(peer.state(), PeerState::Syncing, "one trip of several");
+    }
+
+    /// A rematch builds a fresh session while the peer may still be sending
+    /// for the previous match. A leftover packet that happens to arrive
+    /// first must not become the session this one pairs with: it would drop
+    /// every packet of the peer's new session as foreign, forever.
+    #[test]
+    fn a_leftover_packet_from_the_previous_match_does_not_block_the_handshake() {
+        let mut peer = syncing_peer();
+        let previous_match = peer.magic.wrapping_add(1);
+        let mut replies = Vec::new();
+        peer.on_message(
+            &Message {
+                magic: previous_match,
+                body: Body::Input(crate::transport::InputPacket {
+                    start_frame: 40,
+                    ack_frame: 39,
+                    inputs: vec![crate::testutil::TestInput(7)],
+                }),
+            },
+            &mut replies,
+        );
+
+        for _ in 0..super::SYNC_ROUNDTRIPS {
+            let (out, _) = peer.tick(NULL_FRAME);
+            // An answered trip releases the next request at once, so a
+            // missing one means the last reply was dropped.
+            let Some(Body::SyncRequest { token }) = out.first().map(|message| message.body.clone())
+            else {
+                break;
+            };
+            peer.on_message(
+                &Message {
+                    magic: peer.magic,
+                    body: Body::SyncReply { token },
+                },
+                &mut replies,
+            );
+        }
+
+        assert_eq!(
+            peer.state(),
+            PeerState::Running,
+            "the handshake with the peer's current session never completed"
+        );
     }
 }
