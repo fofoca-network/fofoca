@@ -391,14 +391,14 @@ mod tests {
         state
     }
 
-    /// **A background send to a cold peer returns at once.**
-    ///
-    /// An app hook on the tick runs inside the event loop's `select!`, so a
-    /// send that dials inline stops the whole node for up to the dial budget
-    /// plus the path-select budget. Bob is a linked neighbour whose address is
-    /// a UDP socket that never answers: the worst case, where a dial happens.
-    #[tokio::test]
-    async fn a_background_send_to_a_cold_linked_peer_returns_at_once() {
+    /// A pool on a real endpoint that knows `bob` at a UDP socket that never
+    /// answers, so a dial to him stays in flight for the full dial budget.
+    async fn state_with_silent_bob() -> (
+        EventLoopState,
+        iroh::Endpoint,
+        crate::transport::MeshSender,
+        std::net::UdpSocket,
+    ) {
         let (endpoint, sender) = loopback_node().await;
         let silent = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind a silent socket");
         let bob = iroh::SecretKey::generate().public();
@@ -408,8 +408,20 @@ mod tests {
                 silent.local_addr().expect("silent addr"),
             )],
         );
-        let mut state = state_with_pool(&endpoint, bob_addr);
-        state.linked_endpoints.insert(bob);
+        let state = state_with_pool(&endpoint, bob_addr);
+        (state, endpoint, sender, silent)
+    }
+
+    /// **A background send to a cold peer returns at once.**
+    ///
+    /// An app hook on the tick runs inside the event loop's `select!`, so a
+    /// send that dials inline stops the whole node for up to the dial budget
+    /// plus the path-select budget. Bob's address never answers: the worst
+    /// case, where a dial happens. He is not a linked neighbour, because a
+    /// directed-message peer is often outside the active view.
+    #[tokio::test]
+    async fn a_background_send_to_a_cold_peer_returns_at_once() {
+        let (state, _endpoint, sender, _silent) = state_with_silent_bob().await;
         let msg = directed_msg();
         let bytes = Bytes::from(msg.serialize().expect("serialize"));
 
@@ -421,26 +433,6 @@ mod tests {
             elapsed < std::time::Duration::from_millis(500),
             "the send held its caller for {elapsed:?}; on the event loop that is the whole node"
         );
-        assert!(sent, "a linked neighbour gets a background dial");
-        tokio::task::yield_now().await;
-        assert_eq!(
-            state.unicast_pool.dial_attempts(),
-            1,
-            "the dial runs in the background"
-        );
-    }
-
-    /// A cold peer that is not a linked neighbour is dialed too, in the
-    /// background: a directed-message peer is often outside the active view.
-    #[tokio::test]
-    async fn a_background_send_to_a_cold_unlinked_peer_dials_off_the_loop() {
-        let (state, _bob) = state_knowing_bob();
-        let (_endpoint, sender) = loopback_node().await;
-        let msg = directed_msg();
-        let bytes = Bytes::from(msg.serialize().expect("serialize"));
-
-        let sent = super::deliver_in_background(&msg, bytes, &state, &sender).await;
-
         assert!(sent, "a known peer gets a background dial");
         assert_eq!(
             state.unicast_pool.dial_attempts(),
@@ -476,15 +468,16 @@ mod tests {
     }
 
     /// Two cold sends to one peer share one dial: each dial is a handshake
-    /// and a connection, and the pool keeps only the last one.
+    /// and a connection, and the pool keeps only the last one. The second
+    /// send comes after a yield, while the first dial is really in flight.
     #[tokio::test]
     async fn two_background_sends_to_one_cold_peer_share_one_dial() {
-        let (state, _bob) = state_knowing_bob();
-        let (_endpoint, sender) = loopback_node().await;
+        let (state, _endpoint, sender, _silent) = state_with_silent_bob().await;
         let msg = directed_msg();
         let bytes = Bytes::from(msg.serialize().expect("serialize"));
 
         let first = super::deliver_in_background(&msg, bytes.clone(), &state, &sender).await;
+        tokio::task::yield_now().await;
         let second = super::deliver_in_background(&msg, bytes, &state, &sender).await;
         tokio::task::yield_now().await;
 
