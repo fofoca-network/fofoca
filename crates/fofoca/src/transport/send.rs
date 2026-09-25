@@ -62,16 +62,28 @@ pub async fn deliver(
 /// [`deliver`]. A cold peer with a known endpoint is dialed in the background.
 /// A broadcast rides gossip, which never dials.
 ///
-/// Returns whether the send was started. `false` when the addressee has no
-/// known endpoint, when its only path is a relay that carries no payload, when
-/// it is cold and on the per-peer dial-failure cooldown, when it is cold and a
-/// background dial to it is already in flight, or when the gossip broadcast
-/// failed. A `false` send is not queued: the caller tries again later.
+/// Returns whether the send was started. `false` when:
+/// - the addressee has no known endpoint yet, or advertises the rendezvous
+///   pseudo-node. The first can change once its `PeerInfo` arrives. The
+///   second never does, so a retry budget must not rely on it.
+/// - its only path is a relay that carries no payload. A connection dialed
+///   moments ago reads the same way until its path is selected, for up to
+///   the path-select budget.
+/// - it is cold and on the per-peer dial-failure cooldown.
+/// - it is cold and a background dial to it is already in flight.
+/// - the gossip broadcast failed.
+///
+/// A `false` send is not queued: the caller tries again later.
 ///
 /// `true` does not prove delivery: a background dial or write can still fail,
 /// and is only logged. It is also optimistic in one case: an inline dial to
 /// the same peer can fail between the cooldown check and the background dial,
 /// and the background dial then stops on the new cooldown.
+///
+/// A background dial can outlive its peer's `Left`. If the peer rejoins at a
+/// new address while a stale dial is still running, that dial's failure puts
+/// the peer on the cooldown, and directed sends to it return `false` for up
+/// to the dial budget plus the cooldown.
 pub async fn deliver_in_background(
     msg: &Message,
     bytes: Bytes,
