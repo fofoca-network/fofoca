@@ -23,7 +23,7 @@ mod admission;
 mod direct_gossip;
 #[cfg(feature = "host")]
 pub(crate) mod ipc;
-mod path;
+pub(crate) mod path;
 mod pool;
 pub(crate) mod probe;
 // The JSEP exchange that fills `lookup::TransportHandles::webrtc`. Portable:
@@ -45,7 +45,7 @@ mod send;
 pub(crate) mod sender;
 
 pub(crate) use accept::UnicastAcceptor;
-pub(crate) use admission::SignalAdmission;
+pub use admission::SignalAdmission;
 pub(crate) use direct_gossip::DirectOnlyGossip;
 #[cfg(feature = "blob")]
 pub(crate) use path::{PROBE_DEADLINE, refuse_relayed};

@@ -39,7 +39,7 @@ use super::admission::{Refusal, SignalAdmission};
 /// ALPN for the JSEP exchange. Wire-load-bearing in the same way
 /// [`super::UNICAST_ALPN`] is: both ends must agree, so it moves only with a
 /// deliberate protocol break.
-pub(crate) const MESH_WEBRTC_SIGNAL_ALPN: &[u8] = b"habilis-mesh/webrtc-signal/1";
+pub const MESH_WEBRTC_SIGNAL_ALPN: &[u8] = b"habilis-mesh/webrtc-signal/1";
 
 /// How long to let one negotiation run before giving up.
 ///
@@ -154,16 +154,9 @@ impl SignalDeadlines {
 /// the browser backend ignores it, because a tab is never a loopback peer — it
 /// has no loopback peers to reach.
 #[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct IceProfile {
+pub struct IceProfile {
     /// Gather host candidates only: no STUN, no TURN, no packets off the box.
-    #[cfg_attr(
-        target_arch = "wasm32",
-        expect(
-            dead_code,
-            reason = "the browser backend ignores it; kept on both targets per the note above"
-        )
-    )]
-    pub(crate) host_only: bool,
+    pub host_only: bool,
 }
 
 /// The peer refused us at its direct-peer ceiling.
@@ -234,7 +227,7 @@ fn refused_at_cap(conn: &Connection) -> bool {
 /// routing it through the loop would put a multi-second negotiation on the one
 /// task that must never block.
 #[derive(Debug, Clone)]
-pub(crate) struct WebRtcSignalAcceptor {
+pub struct WebRtcSignalAcceptor {
     handle: WebRtcHandle,
     /// For registering the peer's transport address on attach; see
     /// [`register_session_addr`].
@@ -249,7 +242,8 @@ pub(crate) struct WebRtcSignalAcceptor {
 }
 
 impl WebRtcSignalAcceptor {
-    pub(crate) fn new(
+    #[must_use]
+    pub fn new(
         handle: WebRtcHandle,
         endpoint: Endpoint,
         local: EndpointId,
@@ -431,7 +425,7 @@ async fn answer_one(
 /// # Errors
 /// The signalling dial fails, the peer refuses, or the negotiation does not
 /// complete before the deadline.
-pub(crate) async fn dial_signal(
+pub async fn dial_signal(
     endpoint: &Endpoint,
     peer: EndpointAddr,
     handle: &WebRtcHandle,
@@ -606,7 +600,8 @@ pub(crate) fn local_needs_webrtc_lane(has_ip_transport: bool) -> bool {
 /// Whether a pair needs the lane: **either** end lacking IP is enough. The
 /// remote is judged by its advertised address, this node by what it knows
 /// about itself.
-pub(crate) fn pair_needs_lane(remote: &EndpointAddr, local_has_ip_transport: bool) -> bool {
+#[must_use]
+pub fn pair_needs_lane(remote: &EndpointAddr, local_has_ip_transport: bool) -> bool {
     needs_webrtc_lane(remote) || local_needs_webrtc_lane(local_has_ip_transport)
 }
 

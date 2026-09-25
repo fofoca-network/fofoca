@@ -23,6 +23,9 @@ pub mod ops;
 // whatsoever to run a node, which made the wasm CI leg a compile check of code
 // nobody could call.
 pub mod runtime;
+// One embedded membership of a mesh, over `runtime`: what the C ABI, the
+// browser peer and the chat example share, so they resolve a mesh one way.
+pub mod membership;
 
 pub(crate) mod beacon;
 // The blob-offload side-channel, re-exported through [`ops::blob`]. Its own
