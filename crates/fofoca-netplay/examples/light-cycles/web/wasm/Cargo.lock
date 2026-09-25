@@ -1139,7 +1139,7 @@ checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
 
 [[package]]
 name = "fofoca"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -1170,7 +1170,7 @@ dependencies = [
 
 [[package]]
 name = "fofoca-doc"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "automerge",
@@ -1186,14 +1186,14 @@ dependencies = [
 
 [[package]]
 name = "fofoca-iroh-transport-util"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "iroh",
 ]
 
 [[package]]
 name = "fofoca-iroh-webrtc-transport"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1218,7 +1218,7 @@ dependencies = [
 
 [[package]]
 name = "fofoca-logging"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "fofoca-protocol",
@@ -1229,18 +1229,19 @@ dependencies = [
 
 [[package]]
 name = "fofoca-netplay"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "fofoca",
  "serde",
  "serde_json",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
 name = "fofoca-protocol"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -1264,7 +1265,7 @@ dependencies = [
 
 [[package]]
 name = "fofoca-util"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "tokio",
  "tracing",
@@ -1964,7 +1965,7 @@ dependencies = [
 [[package]]
 name = "iroh"
 version = "1.0.3"
-source = "git+https://github.com/fofoca-network/iroh?rev=b7e07872a6d28a9b7971ecfaca8db69c4bddd2de#b7e07872a6d28a9b7971ecfaca8db69c4bddd2de"
+source = "git+https://github.com/fofoca-network/iroh?rev=aef12f2ad0c07dac57c5fa7f196d53921d61d485#aef12f2ad0c07dac57c5fa7f196d53921d61d485"
 dependencies = [
  "backon",
  "blake3",
@@ -2014,7 +2015,7 @@ dependencies = [
 [[package]]
 name = "iroh-base"
 version = "1.0.3"
-source = "git+https://github.com/fofoca-network/iroh?rev=b7e07872a6d28a9b7971ecfaca8db69c4bddd2de#b7e07872a6d28a9b7971ecfaca8db69c4bddd2de"
+source = "git+https://github.com/fofoca-network/iroh?rev=aef12f2ad0c07dac57c5fa7f196d53921d61d485#aef12f2ad0c07dac57c5fa7f196d53921d61d485"
 dependencies = [
  "curve25519-dalek 5.0.0",
  "data-encoding",
@@ -2032,7 +2033,7 @@ dependencies = [
 [[package]]
 name = "iroh-dns"
 version = "1.0.3"
-source = "git+https://github.com/fofoca-network/iroh?rev=b7e07872a6d28a9b7971ecfaca8db69c4bddd2de#b7e07872a6d28a9b7971ecfaca8db69c4bddd2de"
+source = "git+https://github.com/fofoca-network/iroh?rev=aef12f2ad0c07dac57c5fa7f196d53921d61d485#aef12f2ad0c07dac57c5fa7f196d53921d61d485"
 dependencies = [
  "arc-swap",
  "cfg_aliases",
@@ -2055,7 +2056,7 @@ dependencies = [
 [[package]]
 name = "iroh-gossip"
 version = "0.101.0"
-source = "git+https://github.com/fofoca-network/iroh-gossip?rev=50f6a933d8f4e11aeac38fd7581db3658f9fe684#50f6a933d8f4e11aeac38fd7581db3658f9fe684"
+source = "git+https://github.com/fofoca-network/iroh-gossip?rev=640ec2981960ecef51238e7d25a3dd7e9accf634#640ec2981960ecef51238e7d25a3dd7e9accf634"
 dependencies = [
  "blake3",
  "bytes",
@@ -2108,7 +2109,7 @@ dependencies = [
 [[package]]
 name = "iroh-relay"
 version = "1.0.3"
-source = "git+https://github.com/fofoca-network/iroh?rev=b7e07872a6d28a9b7971ecfaca8db69c4bddd2de#b7e07872a6d28a9b7971ecfaca8db69c4bddd2de"
+source = "git+https://github.com/fofoca-network/iroh?rev=aef12f2ad0c07dac57c5fa7f196d53921d61d485#aef12f2ad0c07dac57c5fa7f196d53921d61d485"
 dependencies = [
  "blake3",
  "bytes",
@@ -3812,9 +3813,9 @@ checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
 
 [[package]]
 name = "simple-dns"
-version = "0.11.3"
+version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7a75cbde1bf934313596a004973e462f9a82caa814dcf1a5f507bdf51597eeb4"
+checksum = "2b6f884fa9a8d48101774bfbd3aeb81e968dd22cffd19a372da69f183db22c1a"
 dependencies = [
  "bitflags",
 ]
@@ -4056,7 +4057,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
