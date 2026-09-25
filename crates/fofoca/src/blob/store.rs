@@ -197,15 +197,26 @@ impl Drop for BlobStore {
 
 /// Hardlink `src` into the spool at `dest`, falling back to a copy when the two
 /// are on different filesystems (hardlinks can't cross a mount). Idempotent — a
-/// pre-existing `dest` (same content, since it's hash-named) is left as is.
+/// pre-existing `dest` of the source's size (same content, since it's
+/// hash-named) is left as is. A `dest` of another size is what a copy cut short
+/// leaves, and is replaced.
 fn snapshot_file(src: &Path, dest: &Path) -> Result<()> {
-    if dest.exists() {
-        return Ok(());
+    if let Ok(existing) = fs::metadata(dest) {
+        let src_len = fs::metadata(src)
+            .with_context(|| format!("reading {} failed", src.display()))?
+            .len();
+        if existing.len() == src_len {
+            return Ok(());
+        }
+        let _ = fs::remove_file(dest);
     }
     if fs::hard_link(src, dest).is_ok() {
         return Ok(());
     }
     fs::copy(src, dest)
+        .inspect_err(|_| {
+            let _ = fs::remove_file(dest);
+        })
         .with_context(|| format!("snapshotting {} into the blob spool failed", src.display()))?;
     Ok(())
 }
@@ -310,6 +321,20 @@ mod tests {
         );
 
         fs::remove_dir_all(&src_dir).ok();
+    }
+
+    #[test]
+    fn snapshot_replaces_a_partial_dest() {
+        let dir = temp_dir("partial");
+        let src = dir.join("src");
+        let dest = dir.join("dest");
+        fs::write(&src, b"whole content").unwrap();
+        // What a copy cut short by a full disk leaves behind.
+        fs::write(&dest, b"whole").unwrap();
+        super::snapshot_file(&src, &dest).expect("snapshot");
+        let got = fs::read(&dest).unwrap();
+        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(got, b"whole content");
     }
 
     #[test]
