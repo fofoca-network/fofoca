@@ -2,7 +2,8 @@
 //!
 //! - [`deliver`] — the single cross-plane send decision: a broadcast rides
 //!   gossip, a directed message goes over the **unicast** point-to-point QUIC
-//!   channel only (`send`).
+//!   channel only (`send`). [`deliver_in_background`] takes the same decision but
+//!   never waits on a dial, for callers on the event loop.
 //! - The unicast plane machinery: the per-peer connection pool (`pool`) and
 //!   the inbound acceptor (`accept`). Distinct from `link` (a gossip
 //!   active-view neighbor) and from `Reach::Direct` (a gossip-overlay
@@ -53,9 +54,9 @@ pub(crate) use path::{RELAY_REFUSED, payload_allowed_on};
 pub(crate) use pool::UnicastPool;
 pub(crate) use send::HeldForDirect;
 pub use send::Lane;
-pub use send::deliver;
 pub(crate) use send::lane_for;
 pub(crate) use send::send_best_effort;
+pub use send::{deliver, deliver_in_background};
 pub use sender::MeshSender;
 pub use webrtc::MAX_DIRECT_PEERS;
 pub(crate) use webrtc::{IceProfile, MESH_WEBRTC_SIGNAL_ALPN, WebRtcSignalAcceptor};

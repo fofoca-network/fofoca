@@ -82,7 +82,8 @@ pub(crate) struct PeerProtocol<T: Config> {
     state: PeerState,
     /// Our session nonce, stamped on everything we send.
     magic: u32,
-    /// Theirs, learned from the first packet; anything else is stale.
+    /// Theirs, learned from the first reply to one of our own sync requests;
+    /// anything else is stale.
     remote_magic: Option<u32>,
     /// Handshake round-trips still owed.
     roundtrips_left: u32,
@@ -107,13 +108,15 @@ pub(crate) struct PeerProtocol<T: Config> {
     time_sync: TimeSync,
     /// Checksums we have advertised, so a mismatch can be attributed.
     local_checksums: Vec<(Frame, u128)>,
-    /// Packets discarded for carrying a foreign session nonce, and sync
-    /// replies discarded for echoing a spent token. Both are silent drops
-    /// that leave a session stuck in `Synchronizing` with traffic flowing
-    /// both ways, which is indistinguishable from a dead peer without a
-    /// count. Diagnostic only — nothing reads them but the log.
+    /// Packets discarded for carrying a foreign session nonce, sync replies
+    /// discarded for echoing a spent token, and other packets discarded
+    /// before the peer's nonce is latched. All are silent drops that leave a
+    /// session stuck in `Synchronizing` with traffic flowing both ways, which
+    /// is indistinguishable from a dead peer without a count. Diagnostic
+    /// only — nothing reads them but the log.
     foreign_magic_drops: u32,
     stale_token_drops: u32,
+    unlatched_drops: u32,
 }
 
 impl<T: Config> std::fmt::Debug for PeerProtocol<T> {
@@ -152,6 +155,7 @@ impl<T: Config> PeerProtocol<T> {
             local_checksums: Vec::new(),
             foreign_magic_drops: 0,
             stale_token_drops: 0,
+            unlatched_drops: 0,
         }
     }
 
@@ -268,19 +272,36 @@ impl<T: Config> PeerProtocol<T> {
         }
     }
 
-    /// Handle a packet from this peer.
-    ///
-    /// Returns any inputs to feed the rollback engine, as
-    /// `(frame, input)` pairs, plus events for the application. Stale
-    /// packets — wrong nonce — are dropped silently.
-    pub(crate) fn on_message(
-        &mut self,
-        message: &Message<T::Input>,
-        replies: &mut Vec<Message<T::Input>>,
-    ) -> (Vec<(Frame, T::Input)>, Vec<PeerEvent>) {
-        let mut inputs = Vec::new();
-        let mut events = Vec::new();
+    /// Count a sync reply that echoes a spent token. Every request is resent
+    /// until it is answered, so a few are normal. A count that keeps
+    /// climbing while `roundtrips_left` does not is the handshake failing to
+    /// converge.
+    fn note_stale_reply(&mut self, token: u32) {
+        self.stale_token_drops = self.stale_token_drops.saturating_add(1);
+        if self.stale_token_drops.is_power_of_two() {
+            tracing::debug!(
+                handle = self.handle,
+                expected = self.sync_token,
+                received = token,
+                roundtrips_left = self.roundtrips_left,
+                drops = self.stale_token_drops,
+                "dropped a sync reply echoing a spent token"
+            );
+        }
+    }
 
+    /// Whether `message` belongs to the peer's current session. The peer's
+    /// nonce is latched only on a reply to this session's own request: the
+    /// first packet to arrive can be a leftover from the peer's previous
+    /// match, and latching that would drop every packet of its current
+    /// session as foreign. Until then, requests are still answered while this
+    /// session is syncing, so the peer's handshake is not held up by ours.
+    ///
+    /// Nothing before the latch resets the silence timer, not even an
+    /// answered request. A peer whose replies never reach us is therefore
+    /// declared disconnected after [`DISCONNECT_TIMEOUT_TICKS`], instead of
+    /// staying alive in a handshake that cannot finish.
+    fn admit(&mut self, message: &Message<T::Input>, replies: &mut Vec<Message<T::Input>>) -> bool {
         match self.remote_magic {
             Some(known) if known != message.magic => {
                 self.foreign_magic_drops = self.foreign_magic_drops.saturating_add(1);
@@ -295,17 +316,69 @@ impl<T: Config> PeerProtocol<T> {
                         "dropped a packet from a foreign session"
                     );
                 }
-                return (inputs, events);
+                false
             }
-            Some(_) => {}
-            None => {
-                tracing::debug!(
-                    handle = self.handle,
-                    remote_magic = message.magic,
-                    "latched the peer's session nonce"
-                );
-                self.remote_magic = Some(message.magic);
-            }
+            Some(_) => true,
+            None => match &message.body {
+                Body::SyncReply { token }
+                    if self.state == PeerState::Syncing && *token == self.sync_token =>
+                {
+                    tracing::debug!(
+                        handle = self.handle,
+                        remote_magic = message.magic,
+                        "latched the peer's session nonce"
+                    );
+                    self.remote_magic = Some(message.magic);
+                    true
+                }
+                Body::SyncRequest { token } => {
+                    // A disconnected session can never latch, so an answer
+                    // would only start a handshake it cannot finish.
+                    if self.state == PeerState::Syncing {
+                        replies.push(self.wrap(Body::SyncReply { token: *token }));
+                    }
+                    false
+                }
+                Body::SyncReply { token } => {
+                    self.note_stale_reply(*token);
+                    false
+                }
+                Body::Input(_)
+                | Body::InputAck { .. }
+                | Body::QualityReport { .. }
+                | Body::QualityReply { .. }
+                | Body::KeepAlive
+                | Body::Checksum { .. } => {
+                    self.unlatched_drops = self.unlatched_drops.saturating_add(1);
+                    if self.unlatched_drops.is_power_of_two() {
+                        tracing::debug!(
+                            handle = self.handle,
+                            received = message.magic,
+                            drops = self.unlatched_drops,
+                            "dropped a packet before the peer answered this session's handshake"
+                        );
+                    }
+                    false
+                }
+            },
+        }
+    }
+
+    /// Handle a packet from this peer.
+    ///
+    /// Returns any inputs to feed the rollback engine, as
+    /// `(frame, input)` pairs, plus events for the application. Stale
+    /// packets — wrong nonce — are dropped silently.
+    pub(crate) fn on_message(
+        &mut self,
+        message: &Message<T::Input>,
+        replies: &mut Vec<Message<T::Input>>,
+    ) -> (Vec<(Frame, T::Input)>, Vec<PeerEvent>) {
+        let mut inputs = Vec::new();
+        let mut events = Vec::new();
+
+        if !self.admit(message, replies) {
+            return (inputs, events);
         }
         self.silent_ticks = 0;
 
@@ -332,21 +405,7 @@ impl<T: Config> PeerProtocol<T> {
                         events.push(PeerEvent::Synchronized);
                     }
                 } else if self.state == PeerState::Syncing {
-                    // Every request is resent until it is answered, so a few
-                    // spent echoes are normal. A count that keeps climbing
-                    // while `roundtrips_left` does not is the handshake
-                    // failing to converge.
-                    self.stale_token_drops = self.stale_token_drops.saturating_add(1);
-                    if self.stale_token_drops.is_power_of_two() {
-                        tracing::debug!(
-                            handle = self.handle,
-                            expected = self.sync_token,
-                            received = *token,
-                            roundtrips_left = self.roundtrips_left,
-                            drops = self.stale_token_drops,
-                            "dropped a sync reply echoing a spent token"
-                        );
-                    }
+                    self.note_stale_reply(*token);
                 }
             }
             Body::Input(packet) => {
@@ -481,5 +540,93 @@ mod tests {
             "the next round trip must not wait out the resend cadence"
         );
         assert_eq!(peer.state(), PeerState::Syncing, "one trip of several");
+    }
+
+    /// A rematch builds a fresh session while the peer may still be sending
+    /// for the previous match. A leftover packet that happens to arrive
+    /// first must not become the session this one pairs with: it would drop
+    /// every packet of the peer's new session as foreign, forever.
+    #[test]
+    fn a_leftover_packet_from_the_previous_match_does_not_block_the_handshake() {
+        let mut peer = syncing_peer();
+        let previous_match = peer.magic.wrapping_add(1);
+        let mut replies = Vec::new();
+        peer.on_message(
+            &Message {
+                magic: previous_match,
+                body: Body::Input(crate::transport::InputPacket {
+                    start_frame: 40,
+                    ack_frame: 39,
+                    inputs: vec![crate::testutil::TestInput(7)],
+                }),
+            },
+            &mut replies,
+        );
+
+        for _ in 0..super::SYNC_ROUNDTRIPS {
+            let (out, _) = peer.tick(NULL_FRAME);
+            // An answered trip releases the next request at once, so a
+            // missing one means the last reply was dropped.
+            let Some(Body::SyncRequest { token }) = out.first().map(|message| message.body.clone())
+            else {
+                break;
+            };
+            peer.on_message(
+                &Message {
+                    // The library lets each peer pick its own nonce.
+                    magic: peer.magic ^ 0xffff,
+                    body: Body::SyncReply { token },
+                },
+                &mut replies,
+            );
+        }
+
+        assert_eq!(
+            peer.state(),
+            PeerState::Running,
+            "the handshake with the peer's current session never completed"
+        );
+    }
+
+    /// A session that gave up on its peer must not keep answering sync
+    /// requests: it can never latch any more, so an answer only invites a
+    /// handshake it cannot finish.
+    #[test]
+    fn a_disconnected_peer_that_never_latched_stops_answering_requests() {
+        let mut peer = syncing_peer();
+        for _ in 0..=super::DISCONNECT_TIMEOUT_TICKS {
+            peer.tick(NULL_FRAME);
+        }
+        assert_eq!(peer.state(), PeerState::Disconnected);
+
+        let mut replies = Vec::new();
+        peer.on_message(
+            &Message {
+                magic: peer.magic,
+                body: Body::SyncRequest { token: 1 },
+            },
+            &mut replies,
+        );
+
+        assert!(replies.is_empty(), "answered a request after giving up");
+    }
+
+    /// Before the latch, a reply that echoes a spent token is the same sign
+    /// of a wedged handshake as after it, and is counted the same way.
+    #[test]
+    fn a_stale_reply_before_the_latch_is_counted() {
+        let mut peer = syncing_peer();
+        let mut replies = Vec::new();
+        peer.on_message(
+            &Message {
+                magic: peer.magic,
+                body: Body::SyncReply {
+                    token: peer.sync_token.wrapping_add(1),
+                },
+            },
+            &mut replies,
+        );
+
+        assert_eq!(peer.stale_token_drops, 1);
     }
 }
