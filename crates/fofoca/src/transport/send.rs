@@ -54,6 +54,33 @@ pub async fn deliver(
     }
 }
 
+/// Route like [`deliver`], but never wait on a dial or a stream write: for a
+/// caller on the event loop (an app hook on the tick), where an inline dial
+/// stops the whole node for the dial and path-select budgets.
+///
+/// A directed message to a warm peer is handed to the connection, the same as
+/// [`deliver`]. A linked neighbour without a warm connection is dialed in the
+/// background, under the usual per-peer dial cooldown. A broadcast rides
+/// gossip, which never dials.
+///
+/// Returns whether the send was started. `false` when the addressee has no
+/// known endpoint, when its only path is a relay that carries no payload, when
+/// it is neither warm nor a linked neighbour, or when the gossip broadcast
+/// failed. `true` does not prove delivery: a background dial or write can
+/// still fail, and is only logged.
+pub async fn deliver_if_warm(
+    msg: &Message,
+    bytes: Bytes,
+    state: &EventLoopState,
+    sender: &MeshSender,
+) -> bool {
+    match route(msg, state) {
+        Route::Broadcast => broadcast(sender, bytes).await.is_ok(),
+        Route::Unicast(eid) => send_best_effort(eid, bytes, state).await,
+        Route::Held(_) | Route::Undeliverable => false,
+    }
+}
+
 /// The chosen transport for a message — a **pure** decision so both planes are
 /// unit-testable without touching the network.
 #[derive(Debug, PartialEq, Eq)]
@@ -202,7 +229,7 @@ pub(crate) async fn send_best_effort(
             let pool = state.unicast_pool.clone();
             n0_future::task::spawn(async move {
                 if let Err(error) = pool.dial_and_send(eid, bytes).await {
-                    tracing::debug!(target: super::LOG_TARGET, %eid, %error, "courtesy reply to a linked neighbor not delivered");
+                    tracing::debug!(target: super::LOG_TARGET, %eid, %error, "background send to a linked neighbor not delivered");
                 }
             });
             true
@@ -320,6 +347,145 @@ mod tests {
             1,
             "the dial runs in the background"
         );
+    }
+
+    /// A loopback endpoint with no relay, and a gossip sender on a peerless
+    /// topic: the real pieces a directed send needs, and nothing reachable.
+    async fn loopback_node() -> (iroh::Endpoint, crate::transport::MeshSender) {
+        let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .relay_mode(iroh::RelayMode::Disabled)
+            .alpns(vec![crate::transport::UNICAST_ALPN.to_vec()])
+            .bind()
+            .await
+            .expect("bind a loopback endpoint");
+        let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
+        let topic = gossip
+            .subscribe(iroh_gossip::proto::TopicId::from_bytes([7u8; 32]), vec![])
+            .await
+            .expect("subscribe to a peerless topic");
+        let (gossip_sender, _receiver) = topic.split();
+        (endpoint, crate::transport::MeshSender::new(gossip_sender))
+    }
+
+    /// A state that knows `bob` at `bob_addr`, with a proven direct path and a
+    /// pool wired to `endpoint`.
+    fn state_with_pool(endpoint: &iroh::Endpoint, bob_addr: iroh::EndpointAddr) -> EventLoopState {
+        let mut state = fresh_state();
+        state.meshed = true;
+        state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), false);
+        state
+            .direct
+            .insert(bob_addr.id, crate::daemon::state::DirectState::Direct);
+        crate::lookup::add_peer_addr(endpoint, bob_addr.clone()).expect("register bob");
+        state.peer_endpoints.insert(nick("bob"), bob_addr);
+        state
+    }
+
+    /// **A warm-only send to a cold peer returns at once.**
+    ///
+    /// An app hook on the tick runs inside the event loop's `select!`, so a
+    /// send that dials inline stops the whole node for up to the dial budget
+    /// plus the path-select budget. Bob is a linked neighbour whose address is
+    /// a UDP socket that never answers: the worst case, where a dial happens.
+    #[tokio::test]
+    async fn a_warm_only_send_to_a_cold_linked_peer_returns_at_once() {
+        let (endpoint, sender) = loopback_node().await;
+        let silent = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind a silent socket");
+        let bob = iroh::SecretKey::generate().public();
+        let bob_addr = iroh::EndpointAddr::from_parts(
+            bob,
+            [iroh::TransportAddr::Ip(
+                silent.local_addr().expect("silent addr"),
+            )],
+        );
+        let mut state = state_with_pool(&endpoint, bob_addr);
+        state.linked_endpoints.insert(bob);
+        let msg = directed_msg();
+        let bytes = Bytes::from(msg.serialize().expect("serialize"));
+
+        let started = std::time::Instant::now();
+        let sent = super::deliver_if_warm(&msg, bytes, &state, &sender).await;
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "the send held its caller for {elapsed:?}; on the event loop that is the whole node"
+        );
+        assert!(sent, "a linked neighbour gets a background dial");
+        tokio::task::yield_now().await;
+        assert_eq!(
+            state.unicast_pool.dial_attempts(),
+            1,
+            "the dial runs in the background"
+        );
+    }
+
+    /// A cold peer that is not a linked neighbour gets no dial at all, and
+    /// the caller learns that nothing went out.
+    #[tokio::test]
+    async fn a_warm_only_send_to_a_cold_unlinked_peer_is_not_sent() {
+        let (state, _bob) = state_knowing_bob();
+        let (_endpoint, sender) = loopback_node().await;
+        let msg = directed_msg();
+        let bytes = Bytes::from(msg.serialize().expect("serialize"));
+
+        let sent = super::deliver_if_warm(&msg, bytes, &state, &sender).await;
+
+        assert!(!sent, "there is no warm path and no link to this peer");
+        assert_eq!(state.unicast_pool.dial_attempts(), 0);
+    }
+
+    /// A warm peer gets the frame, whole.
+    #[tokio::test]
+    async fn a_warm_only_send_to_a_warm_peer_delivers() {
+        let (bob_endpoint, _bob_sender) = loopback_node().await;
+        let (endpoint, sender) = loopback_node().await;
+        let state = state_with_pool(&endpoint, bob_endpoint.addr());
+        let received = tokio::spawn(async move {
+            let conn = bob_endpoint
+                .accept()
+                .await
+                .expect("an incoming connection")
+                .await
+                .expect("accept the connection");
+            let mut stream = conn.accept_uni().await.expect("a uni stream");
+            let bytes = stream.read_to_end(64 * 1024).await.expect("read the frame");
+            (bytes, bob_endpoint, conn)
+        });
+        let conn = state
+            .unicast_pool
+            .warm_or_dial(endpoint_of_bob(&state))
+            .await
+            .expect("warm the pool");
+        assert!(
+            crate::transport::path::wait_direct(&conn, std::time::Duration::from_secs(5)).await,
+            "loopback selects a direct path"
+        );
+        let msg = directed_msg();
+        let bytes = Bytes::from(msg.serialize().expect("serialize"));
+
+        let sent = super::deliver_if_warm(&msg, bytes.clone(), &state, &sender).await;
+
+        assert!(sent, "a warm peer is sent to");
+        let (got, _bob_endpoint, _conn) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), received)
+                .await
+                .expect("bob reads the frame in time")
+                .expect("reader task");
+        assert_eq!(got, bytes.to_vec());
+        assert_eq!(
+            state.unicast_pool.dial_attempts(),
+            0,
+            "the warm send entered the dial path"
+        );
+    }
+
+    fn endpoint_of_bob(state: &EventLoopState) -> EndpointId {
+        state
+            .peer_endpoints
+            .get(&nick("bob"))
+            .expect("bob is known")
+            .id
     }
 
     #[test]
