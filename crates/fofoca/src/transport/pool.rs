@@ -176,9 +176,6 @@ impl UnicastPool {
     /// whether one was started. `false` when `eid` is on the dial-failure
     /// cooldown, or when a background dial to it is already in flight; this
     /// frame is then not sent, and the caller can try again later.
-    ///
-    /// # Panics
-    /// If the in-flight set's mutex is poisoned.
     pub(crate) async fn dial_and_send_in_background(&self, eid: EndpointId, bytes: Bytes) -> bool {
         if self
             .inner
@@ -193,7 +190,7 @@ impl UnicastPool {
             .inner
             .dialing
             .lock()
-            .expect("in-flight dial set not poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(eid)
         {
             return false;
