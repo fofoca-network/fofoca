@@ -18,7 +18,7 @@ use fofoca::runtime::{Node, SetupKind, SetupParams, derive_topic_mesh_with, setu
 use fofoca_netplay::RollbackDriver;
 
 use light_cycles_native::app::{Game, LightCycles};
-use light_cycles_native::grid::Dir;
+use light_cycles_native::grid::{Dir, TICK_MS};
 use light_cycles_native::sim::Outcome;
 
 struct Bot {
@@ -91,7 +91,7 @@ async fn drive(
         if tokio::time::Instant::now() >= deadline {
             return false;
         }
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        tokio::time::sleep(Duration::from_millis(u64::from(TICK_MS))).await;
     }
 }
 
