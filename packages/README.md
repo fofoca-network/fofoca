@@ -11,8 +11,8 @@ roster and merge the shared document without writing any Rust.
 
 Two backends because the two hosts reach the engine differently: a tab has no
 UDP socket, a terminal has real ones. They meet on the mesh because both speak
-[`crates/fofoca-pipe`](../crates/fofoca-pipe)'s wire contract, which exists as
-one crate for exactly that reason.
+`fofoca::membership` (in [`crates/fofoca`](../crates/fofoca)), which exists as
+one module for exactly that reason.
 
 ```ts
 import { join } from 'fofoca-ffi' // or 'fofoca-wasm'
@@ -59,9 +59,9 @@ and nothing about its role.
 http://127.0.0.1:3000/?topic=room&transport=p2p&log=fofoca=info
 ```
 
-The page joins the mesh the query names and mirrors the roster, every frame,
+The page joins the mesh the query names and mirrors the roster, every message,
 every event and the shared state into the DOM; `window.harness` exposes
-`send`/`sendEof`/`stateMerge`/`close`. `cargo task e2e --suite mesh` drives
+`send`/`stateMerge`/`close`. `cargo task e2e --suite mesh` drives
 this page against a real native peer and a local relay — the native↔web
 matrix.
 

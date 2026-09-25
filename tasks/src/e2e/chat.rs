@@ -128,9 +128,9 @@ impl Robot {
         self.seen.iter().any(pred)
     }
 
-    fn saw_frame(&mut self, text: &str, directed: bool) -> bool {
+    fn saw_msg(&mut self, text: &str, directed: bool) -> bool {
         self.saw(|value| {
-            value.get("kind").and_then(serde_json::Value::as_str) == Some("frame")
+            value.get("kind").and_then(serde_json::Value::as_str) == Some("msg")
                 && value.get("text").and_then(serde_json::Value::as_str) == Some(text)
                 && value.get("directed").and_then(serde_json::Value::as_bool) == Some(directed)
         })
@@ -269,14 +269,14 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
     // Broadcast both ways: send once per side, then wait on receipt alone.
     // Re-sending inside the receipt poll looked like a retry but was not —
     // the page call itself blocks up to the payload budget, so one iteration
-    // consumed the window while duplicate frames piled into the mesh.
+    // consumed the window while duplicate messages piled into the mesh.
     robot.send_line("hello-from-terminal")?;
     if let Err(error) = call_page(&page, "chat", "send('hello-from-web')") {
         return fail(&mut robot, Some(&page), &error);
     }
     let broadcast = wait_for(PAYLOAD_TIMEOUT, Duration::from_millis(500), || {
         (page_text(&page, "messages").contains("hello-from-terminal")
-            && robot.saw_frame("hello-from-web", false))
+            && robot.saw_msg("hello-from-web", false))
         .then_some(())
     });
     if broadcast.is_none() {
@@ -294,7 +294,7 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
     }
     let directed = wait_for(PAYLOAD_TIMEOUT, Duration::from_millis(500), || {
         (page_text(&page, "messages").contains("direct-from-terminal")
-            && robot.saw_frame("direct-from-web", true))
+            && robot.saw_msg("direct-from-web", true))
         .then_some(())
     });
     if directed.is_none() {

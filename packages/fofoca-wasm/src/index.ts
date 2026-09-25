@@ -65,8 +65,8 @@ export async function create(opts: CreateOpts & WasmOpts): Promise<Mesh> {
   )
 }
 
-async function open(pipeOpts: Record<string, unknown>, extras: WasmOpts): Promise<Mesh> {
+async function open(meshOpts: Record<string, unknown>, extras: WasmOpts): Promise<Mesh> {
   const module = await loadWasm(extras.glueUrl)
   module.initTracing(extras.log ?? 'info')
-  return openMesh(openWasm(module, JSON.stringify(pipeOpts)))
+  return openMesh(openWasm(module, JSON.stringify(meshOpts)))
 }

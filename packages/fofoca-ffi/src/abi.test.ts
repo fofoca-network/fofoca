@@ -32,15 +32,15 @@ describe('the signature table and the header', () => {
   })
 
   test('the scrape ignores a mention that is not a call', () => {
-    expect(declared('see fofoca_open for details')).toEqual(new Set())
-    expect(declared('my_fofoca_open(x)')).toEqual(new Set())
-    expect(declared('fofoca_open(const fofoca_opts *o)')).toEqual(new Set(['fofoca_open']))
+    expect(declared('see fofoca_mesh_open for details')).toEqual(new Set())
+    expect(declared('my_fofoca_mesh_open(x)')).toEqual(new Set())
+    expect(declared('fofoca_mesh_open(const fofoca_opts *o)')).toEqual(new Set(['fofoca_mesh_open']))
   })
 })
 
 describe('the shape of each signature', () => {
   test('every handle-taking call takes the handle first', () => {
-    const standalone = new Set(['fofoca_last_error', 'fofoca_version', 'fofoca_max_chunk'])
+    const standalone = new Set(['fofoca_last_error', 'fofoca_version', 'fofoca_max_msg'])
     for (const [name, signature] of Object.entries(ABI)) {
       if (standalone.has(name)) {
         expect(signature.args).toEqual([])
@@ -51,12 +51,12 @@ describe('the shape of each signature', () => {
   })
 
   test('the three length-query calls agree on their shape', () => {
-    for (const name of ['fofoca_state_json', 'fofoca_peers_json'] as const) {
+    for (const name of ['fofoca_mesh_state_json', 'fofoca_mesh_peers_json'] as const) {
       expect(ABI[name]).toEqual({ args: ['ptr', 'buf', 'usize'], returns: 'isize' })
     }
   })
 
-  test('recv returns a long, because 0 and -1 are both meaningful', () => {
-    expect(ABI.fofoca_recv.returns).toBe('isize')
+  test('recv returns a long, because 0, -1 and -2 are all meaningful', () => {
+    expect(ABI.fofoca_msg_recv.returns).toBe('isize')
   })
 })

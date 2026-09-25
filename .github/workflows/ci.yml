@@ -197,7 +197,7 @@ jobs:
       # Includes the `fofoca_opts` layout test, the other side of the
       # `size_of::<FofocaOpts>()` assert in crates/fofoca-ffi/src/ffi.rs.
       - name: Test
-        run: bun test packages
+        run: bun run test
 
   # The C ABI is the whole point of fofoca-ffi and its only non-Rust consumer
   # links the staticlib. Build it the way that consumer does.

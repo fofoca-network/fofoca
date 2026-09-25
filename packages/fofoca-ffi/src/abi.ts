@@ -28,32 +28,34 @@ export interface Signature {
 }
 
 export const ABI = {
-  fofoca_open: { args: ['ptr'], returns: 'ptr' },
+  fofoca_mesh_open: { args: ['ptr'], returns: 'ptr' },
 
-  fofoca_id: { args: ['ptr'], returns: 'ptr' },
-  fofoca_name: { args: ['ptr'], returns: 'ptr' },
-  fofoca_nickname: { args: ['ptr'], returns: 'ptr' },
+  fofoca_mesh_id: { args: ['ptr'], returns: 'ptr' },
+  fofoca_mesh_name: { args: ['ptr'], returns: 'ptr' },
+  fofoca_mesh_nickname: { args: ['ptr'], returns: 'ptr' },
 
-  fofoca_send: { args: ['ptr', 'cstr', 'buf', 'usize'], returns: 'i32' },
-  fofoca_send_eof: { args: ['ptr', 'cstr'], returns: 'i32' },
-  /** 1 = a frame is in `out`, 0 = timeout, -1 = failure. EOF is a field, not a code. */
-  fofoca_recv: { args: ['ptr', 'buf', 'usize', 'i32', 'buf'], returns: 'isize' },
+  fofoca_msg_send: { args: ['ptr', 'cstr', 'cstr'], returns: 'i32' },
+  /**
+   * 1 = a message is in `buf` and `out`, 0 = timeout, -1 = failure, -2 = `buf`
+   * too small: the message stays queued and `out.len` says how big to retry.
+   */
+  fofoca_msg_recv: { args: ['ptr', 'buf', 'usize', 'i32', 'buf'], returns: 'isize' },
 
-  fofoca_state_merge: { args: ['ptr', 'cstr'], returns: 'i32' },
-  fofoca_state_json: { args: ['ptr', 'buf', 'usize'], returns: 'isize' },
-  fofoca_peers_json: { args: ['ptr', 'buf', 'usize'], returns: 'isize' },
+  fofoca_mesh_state_merge: { args: ['ptr', 'cstr'], returns: 'i32' },
+  fofoca_mesh_state_json: { args: ['ptr', 'buf', 'usize'], returns: 'isize' },
+  fofoca_mesh_peers_json: { args: ['ptr', 'buf', 'usize'], returns: 'isize' },
   /**
    * Bound because the header declares it, and never called: `mesh.peers` needs
    * the whole roster anyway, and this one excludes self where the roster
    * document's own `count` includes it. Calling both would be two sources of
    * truth that disagree by one.
    */
-  fofoca_peer_count: { args: ['ptr'], returns: 'isize' },
+  fofoca_mesh_peer_count: { args: ['ptr'], returns: 'isize' },
 
-  fofoca_close: { args: ['ptr'], returns: 'i32' },
+  fofoca_mesh_close: { args: ['ptr'], returns: 'i32' },
   fofoca_last_error: { args: [], returns: 'ptr' },
   fofoca_version: { args: [], returns: 'ptr' },
-  fofoca_max_chunk: { args: [], returns: 'usize' },
+  fofoca_max_msg: { args: [], returns: 'usize' },
 } as const satisfies Record<string, Signature>
 
 export type SymbolName = keyof typeof ABI

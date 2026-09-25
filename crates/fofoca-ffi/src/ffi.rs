@@ -1,4 +1,4 @@
-//! The C ABI. `include/mesh.h` is the hand-written declaration of everything
+//! The C ABI. `include/fofoca.h` is the hand-written declaration of everything
 //! here — change one, change the other; `tests/ffi_smoke.rs` is what catches a
 //! mismatch from this side. The out-of-tree consumer is `mallorca`, which links
 //! the `staticlib`, so no check in this workspace sees a break there.
@@ -18,10 +18,10 @@ use std::panic::AssertUnwindSafe;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use crate::pipe::{Inbound, Opts, Pipe};
+use crate::mesh::{Inbound, MAX_MSG, Mesh, Opts};
 
-/// Capacity of [`FofocaFrame::nick`], including the NUL. A nickname is two short
-/// words; 64 bytes is comfortably more than the engine can mint.
+/// Capacity of [`FofocaMsg::nick`], including the NUL. A minted nickname is two
+/// short words; a longer chosen one is truncated to 63 bytes.
 const NICK_CAP: usize = 64;
 
 thread_local! {
@@ -82,29 +82,39 @@ const _: () = {
     assert!(offset_of!(FofocaOpts, max_peers) == 64);
 };
 
-/// One received frame's metadata, mirroring `fofoca_frame` in the header. The
-/// payload itself lands in the caller's own buffer; `len` says how much.
+/// One received message's metadata, mirroring `fofoca_msg` in the header. The
+/// text itself lands in the caller's own buffer, NUL-terminated; `len` says how
+/// many bytes it has, excluding the NUL.
 #[repr(C)]
 #[derive(Debug)]
-pub struct FofocaFrame {
+pub struct FofocaMsg {
     pub nick: [c_char; NICK_CAP],
     pub directed: c_int,
-    pub eof: c_int,
     pub len: usize,
-    /// The frame's position in its (author, directed) stream; the stream's
-    /// frame count on an `eof`.
-    pub seq: u64,
 }
 
-/// The opaque handle behind `fofoca_pipe *`. Holds the [`Pipe`] plus NUL-terminated
-/// copies of the identity strings, so [`fofoca_id`] / [`fofoca_nickname`] can hand
-/// out pointers that stay valid for the handle's lifetime.
+/// The layout `packages/fofoca-ffi/src/msg.ts` hand-decodes, pinned like
+/// `FofocaOpts` above.
+const _: () = {
+    use std::mem::{align_of, offset_of, size_of};
+
+    assert!(size_of::<FofocaMsg>() == 80, "msg.ts MSG_BYTES");
+    assert!(align_of::<FofocaMsg>() == 8);
+    assert!(offset_of!(FofocaMsg, nick) == 0);
+    assert!(offset_of!(FofocaMsg, directed) == 64);
+    assert!(offset_of!(FofocaMsg, len) == 72);
+};
+
+/// The opaque handle behind `fofoca_mesh *`. Holds the [`Mesh`] plus
+/// NUL-terminated copies of the identity strings, so [`fofoca_mesh_id`] /
+/// [`fofoca_mesh_nickname`] can hand out pointers that stay valid for the
+/// handle's lifetime.
 #[expect(
     missing_debug_implementations,
-    reason = "wraps Pipe, which owns a tokio Runtime and so has no Debug impl"
+    reason = "wraps Mesh, which owns a tokio Runtime and so has no Debug impl"
 )]
-pub struct FofocaPipe {
-    pipe: Pipe,
+pub struct FofocaMesh {
+    mesh: Mesh,
     id: CString,
     nick: CString,
     name: CString,
@@ -140,10 +150,10 @@ fn guard<T>(fallback: T, body: impl FnOnce() -> T) -> T {
 /// panic guard and the null check live here once.
 ///
 /// # Safety
-/// `handle` must be a live handle from [`fofoca_open`], or NULL.
+/// `handle` must be a live handle from [`fofoca_mesh_open`], or NULL.
 unsafe fn borrowed_field(
-    handle: *const FofocaPipe,
-    field: impl FnOnce(&FofocaPipe) -> *const c_char,
+    handle: *const FofocaMesh,
+    field: impl FnOnce(&FofocaMesh) -> *const c_char,
 ) -> *const c_char {
     guard(std::ptr::null(), || {
         // SAFETY: live handle or NULL, forwarded from this function's contract.
@@ -154,21 +164,21 @@ unsafe fn borrowed_field(
     })
 }
 
-/// Render a JSON document from the pipe into the caller's buffer, following the
+/// Render a JSON document from the mesh into the caller's buffer, following the
 /// length-then-fill convention [`copy_out`] implements.
 ///
 /// `name` is the entry point's own name, so a NULL handle still reports which
 /// call failed.
 ///
 /// # Safety
-/// `handle` must be a live handle from [`fofoca_open`], or NULL; `buf` NULL or
-/// writable for `cap` bytes.
+/// `handle` must be a live handle from [`fofoca_mesh_open`], or NULL; `buf` NULL
+/// or writable for `cap` bytes.
 unsafe fn json_out(
     name: &str,
-    handle: *mut FofocaPipe,
+    handle: *mut FofocaMesh,
     buf: *mut c_char,
     cap: usize,
-    render: impl FnOnce(&Pipe) -> anyhow::Result<String>,
+    render: impl FnOnce(&Mesh) -> anyhow::Result<String>,
 ) -> c_long {
     guard(-1, || {
         clear_error();
@@ -177,7 +187,7 @@ unsafe fn json_out(
             set_error(&format!("{name}: handle is NULL"));
             return -1;
         };
-        match render(&handle.pipe) {
+        match render(&handle.mesh) {
             // SAFETY: `buf`/`cap` are the caller's buffer, forwarded likewise.
             Ok(json) => unsafe { copy_out(&json, buf, cap) },
             Err(error) => {
@@ -250,7 +260,7 @@ unsafe fn copy_out(text: &str, buf: *mut c_char, cap: usize) -> c_long {
     c_long::try_from(needed).unwrap_or(c_long::MAX)
 }
 
-/// Fill `FofocaFrame::nick`, truncating a pathologically long nickname rather than
+/// Fill `FofocaMsg::nick`, truncating a pathologically long nickname rather than
 /// overflowing the caller's fixed array.
 fn write_nick(field: &mut [c_char; NICK_CAP], nick: &str) {
     let bytes = nick.as_bytes();
@@ -267,13 +277,14 @@ fn write_nick(field: &mut [c_char; NICK_CAP], nick: &str) {
 ///
 /// # Safety
 /// `opts` must point to a readable [`FofocaOpts`] whose string fields are NULL or
-/// NUL-terminated. The returned handle must be released with [`fofoca_close`].
+/// NUL-terminated. The returned handle must be released with
+/// [`fofoca_mesh_close`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fofoca_open(opts: *const FofocaOpts) -> *mut FofocaPipe {
+pub unsafe extern "C" fn fofoca_mesh_open(opts: *const FofocaOpts) -> *mut FofocaMesh {
     guard(std::ptr::null_mut(), || {
         clear_error();
         if opts.is_null() {
-            set_error("fofoca_open: opts is NULL");
+            set_error("fofoca_mesh_open: opts is NULL");
             return std::ptr::null_mut();
         }
         // SAFETY: non-NULL and readable per the contract above.
@@ -316,21 +327,21 @@ pub unsafe extern "C" fn fofoca_open(opts: *const FofocaOpts) -> *mut FofocaPipe
             lookup,
             transport,
             relay_urls,
-            paths: fofoca_pipe::PathFlags {
+            paths: fofoca::net::PathFlags {
                 ip: opts.disable_ip == 0,
                 webrtc: opts.disable_webrtc == 0,
             },
             max_peers: opts.max_peers,
         };
-        match Pipe::open(&parsed) {
-            Ok(pipe) => {
+        match Mesh::open(&parsed) {
+            Ok(opened) => {
                 // The nickname the engine settled on — not `nick` above, which is
                 // only what the caller asked for (and may have been NULL).
-                let assigned = CString::new(pipe.nickname()).unwrap_or_default();
-                let id = CString::new(pipe.fofoca_id()).unwrap_or_default();
-                let fofoca_name = CString::new(pipe.name()).unwrap_or_default();
-                Box::into_raw(Box::new(FofocaPipe {
-                    pipe,
+                let assigned = CString::new(opened.nickname()).unwrap_or_default();
+                let id = CString::new(opened.fofoca_id()).unwrap_or_default();
+                let fofoca_name = CString::new(opened.name()).unwrap_or_default();
+                Box::into_raw(Box::new(FofocaMesh {
+                    mesh: opened,
                     id,
                     nick: assigned,
                     name: fofoca_name,
@@ -347,9 +358,9 @@ pub unsafe extern "C" fn fofoca_open(opts: *const FofocaOpts) -> *mut FofocaPipe
 /// The `mesh id` id of this mesh, borrowed for the handle's lifetime.
 ///
 /// # Safety
-/// `handle` must be a live handle from [`fofoca_open`], or NULL.
+/// `handle` must be a live handle from [`fofoca_mesh_open`], or NULL.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fofoca_id(handle: *const FofocaPipe) -> *const c_char {
+pub unsafe extern "C" fn fofoca_mesh_id(handle: *const FofocaMesh) -> *const c_char {
     // SAFETY: live handle or NULL, per the contract above.
     unsafe { borrowed_field(handle, |handle| handle.id.as_ptr()) }
 }
@@ -357,9 +368,9 @@ pub unsafe extern "C" fn fofoca_id(handle: *const FofocaPipe) -> *const c_char {
 /// This mesh's name, borrowed for the handle's lifetime.
 ///
 /// # Safety
-/// `handle` must be a live handle from [`fofoca_open`], or NULL.
+/// `handle` must be a live handle from [`fofoca_mesh_open`], or NULL.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fofoca_name(handle: *const FofocaPipe) -> *const c_char {
+pub unsafe extern "C" fn fofoca_mesh_name(handle: *const FofocaMesh) -> *const c_char {
     // SAFETY: live handle or NULL, per the contract above.
     unsafe { borrowed_field(handle, |handle| handle.name.as_ptr()) }
 }
@@ -367,141 +378,103 @@ pub unsafe extern "C" fn fofoca_name(handle: *const FofocaPipe) -> *const c_char
 /// Our nickname in this mesh, borrowed for the handle's lifetime.
 ///
 /// # Safety
-/// `handle` must be a live handle from [`fofoca_open`], or NULL.
+/// `handle` must be a live handle from [`fofoca_mesh_open`], or NULL.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fofoca_nickname(handle: *const FofocaPipe) -> *const c_char {
+pub unsafe extern "C" fn fofoca_mesh_nickname(handle: *const FofocaMesh) -> *const c_char {
     // SAFETY: live handle or NULL, per the contract above.
     unsafe { borrowed_field(handle, |handle| handle.nick.as_ptr()) }
 }
 
-/// Send `len` bytes as `pipe_data` frames — broadcast when `to` is NULL,
-/// directed at that peer's nickname otherwise. Returns 0, or -1 on failure.
+/// Send one message — broadcast when `to` is NULL, directed at that peer's
+/// nickname otherwise. Returns 0, or -1 on failure: a message that does not fit
+/// one frame is refused, never split.
 ///
 /// # Safety
-/// `handle` must be live; `to` NULL or NUL-terminated; `buf` readable for `len`
-/// bytes (it may be NULL when `len` is 0).
+/// `handle` must be live; `to` NULL or NUL-terminated; `text` NUL-terminated.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fofoca_send(
-    handle: *mut FofocaPipe,
+pub unsafe extern "C" fn fofoca_msg_send(
+    handle: *mut FofocaMesh,
     to: *const c_char,
-    buf: *const u8,
-    len: usize,
+    text: *const c_char,
 ) -> c_int {
     guard(-1, || {
         clear_error();
         // SAFETY: live handle or NULL, per the contract above.
         let Some(handle) = (unsafe { handle.as_ref() }) else {
-            set_error("fofoca_send: handle is NULL");
+            set_error("fofoca_msg_send: handle is NULL");
             return -1;
         };
-        // SAFETY: same contract, applied to the addressee string.
-        let Ok(to) = (unsafe { optional_str(to) }) else {
+        // SAFETY: same contract, applied to the two strings.
+        let (Ok(to), Ok(text)) = (unsafe { (optional_str(to), optional_str(text)) }) else {
             return -1;
         };
-        if len > 0 && buf.is_null() {
-            set_error("fofoca_send: buf is NULL with a non-zero len");
+        let Some(text) = text else {
+            set_error("fofoca_msg_send: text is NULL");
             return -1;
-        }
-        let bytes = if len == 0 {
-            &[][..]
-        } else {
-            // SAFETY: readable for `len` bytes per the contract above; borrowed
-            // only for the duration of this call.
-            unsafe { std::slice::from_raw_parts(buf, len) }
         };
-        report(handle.pipe.send(to, bytes))
+        report(handle.mesh.send(to, text))
     })
 }
 
-/// Send the end-of-stream marker (`pipe_eof`). Returns 0, or -1 on failure.
-///
-/// # Safety
-/// `handle` must be live; `to` NULL or NUL-terminated.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn fofoca_send_eof(handle: *mut FofocaPipe, to: *const c_char) -> c_int {
-    guard(-1, || {
-        clear_error();
-        // SAFETY: live handle or NULL, per the contract above.
-        let Some(handle) = (unsafe { handle.as_ref() }) else {
-            set_error("fofoca_send_eof: handle is NULL");
-            return -1;
-        };
-        // SAFETY: same contract, applied to the addressee string.
-        let Ok(to) = (unsafe { optional_str(to) }) else {
-            return -1;
-        };
-        report(handle.pipe.send_eof(to))
-    })
-}
-
-/// Take the next inbound frame, waiting up to `timeout_ms`. Returns 1 with `out`
-/// filled, 0 on timeout, or -1 on failure. A `pipe_eof` frame arrives as 1 with
-/// `out->eof` set — EOF is not signalled through the return value.
+/// Take the next inbound message, waiting up to `timeout_ms`. Returns 1 with
+/// the text NUL-terminated in `buf` and `out` filled, 0 on timeout, -1 on
+/// failure, or -2 when the text does not fit in `cap`: nothing is written, the
+/// message stays queued, and `out->len` holds its length — retry with a buffer
+/// of at least `out->len + 1` bytes.
 ///
 /// # Safety
 /// `handle` must be live and not used concurrently from another thread; `buf`
 /// writable for `cap` bytes; `out` writable.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fofoca_recv(
-    handle: *mut FofocaPipe,
-    buf: *mut u8,
+pub unsafe extern "C" fn fofoca_msg_recv(
+    handle: *mut FofocaMesh,
+    buf: *mut c_char,
     cap: usize,
     timeout_ms: c_int,
-    out: *mut FofocaFrame,
+    out: *mut FofocaMsg,
 ) -> c_long {
     guard(-1, || {
         clear_error();
         // SAFETY: live, exclusively-owned handle per the contract above.
         let Some(handle) = (unsafe { handle.as_mut() }) else {
-            set_error("fofoca_recv: handle is NULL");
+            set_error("fofoca_msg_recv: handle is NULL");
             return -1;
         };
-        if out.is_null() {
-            set_error("fofoca_recv: out is NULL");
+        if out.is_null() || buf.is_null() {
+            set_error("fofoca_msg_recv: buf or out is NULL");
             return -1;
         }
         let timeout = Duration::from_millis(u64::try_from(timeout_ms.max(0)).unwrap_or(0));
-        let frame = match handle.pipe.recv(timeout) {
-            Ok(Some(frame)) => frame,
+        let msg = match handle.mesh.recv(timeout) {
+            Ok(Some(msg)) => msg,
             Ok(None) => return 0,
             Err(error) => {
                 set_error(&format!("{error:#}"));
                 return -1;
             }
         };
-        let Inbound {
-            nick,
-            directed,
-            eof,
-            seq,
-            bytes,
-        } = frame;
-        if bytes.len() > cap {
-            set_error(&format!(
-                "fofoca_recv: buffer of {cap} bytes is too small for a {}-byte frame (see fofoca_max_chunk)",
-                bytes.len()
-            ));
-            return -1;
-        }
-        if !bytes.is_empty() {
-            if buf.is_null() {
-                set_error("fofoca_recv: buf is NULL");
-                return -1;
-            }
-            // SAFETY: writable for `cap >= bytes.len()` bytes per the contract
-            // above, from a distinct Rust-owned allocation.
-            unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf, bytes.len()) }
-        }
-        let mut meta = FofocaFrame {
+        let mut meta = FofocaMsg {
             nick: [0; NICK_CAP],
-            directed: c_int::from(directed),
-            eof: c_int::from(eof),
-            len: bytes.len(),
-            seq,
+            directed: c_int::from(msg.directed),
+            len: msg.text.len(),
         };
-        write_nick(&mut meta.nick, &nick);
-        // SAFETY: non-NULL (checked) and writable per the contract above.
-        unsafe { out.write(meta) }
+        write_nick(&mut meta.nick, &msg.nick);
+        if msg.text.len() >= cap {
+            // SAFETY: non-NULL (checked) and writable per the contract above.
+            unsafe { out.write(meta) }
+            // Not a failure: the message waits, and `out->len` says how big a
+            // buffer the retry needs, so the error slot stays clear.
+            handle.mesh.keep(msg);
+            return -2;
+        }
+        let Inbound { text, .. } = msg;
+        // SAFETY: `text.len() + 1 <= cap` bytes are writable per the contract
+        // above, and the source is a distinct Rust-owned allocation.
+        unsafe {
+            std::ptr::copy_nonoverlapping(text.as_ptr(), buf.cast::<u8>(), text.len());
+            buf.add(text.len()).write(0);
+            out.write(meta);
+        }
         1
     })
 }
@@ -512,12 +485,15 @@ pub unsafe extern "C" fn fofoca_recv(
 /// # Safety
 /// `handle` must be live; `json` must be a NUL-terminated string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fofoca_state_merge(handle: *mut FofocaPipe, json: *const c_char) -> c_int {
+pub unsafe extern "C" fn fofoca_mesh_state_merge(
+    handle: *mut FofocaMesh,
+    json: *const c_char,
+) -> c_int {
     guard(-1, || {
         clear_error();
         // SAFETY: live handle or NULL, per the contract above.
         let Some(handle) = (unsafe { handle.as_ref() }) else {
-            set_error("fofoca_state_merge: handle is NULL");
+            set_error("fofoca_mesh_state_merge: handle is NULL");
             return -1;
         };
         // SAFETY: same contract, applied to the merge document.
@@ -525,10 +501,10 @@ pub unsafe extern "C" fn fofoca_state_merge(handle: *mut FofocaPipe, json: *cons
             return -1;
         };
         let Some(json) = json else {
-            set_error("fofoca_state_merge: json is NULL");
+            set_error("fofoca_mesh_state_merge: json is NULL");
             return -1;
         };
-        report(handle.pipe.state_merge(json))
+        report(handle.mesh.state_merge(json))
     })
 }
 
@@ -540,55 +516,47 @@ pub unsafe extern "C" fn fofoca_state_merge(handle: *mut FofocaPipe, json: *cons
 /// # Safety
 /// `handle` must be live; `buf` NULL or writable for `cap` bytes.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fofoca_state_json(
-    handle: *mut FofocaPipe,
+pub unsafe extern "C" fn fofoca_mesh_state_json(
+    handle: *mut FofocaMesh,
     buf: *mut c_char,
     cap: usize,
 ) -> c_long {
     // SAFETY: live handle or NULL, and `buf`/`cap` the caller's buffer, per
     // the contract above.
-    unsafe {
-        json_out("fofoca_state_json", handle, buf, cap, |pipe| {
-            pipe.state_json()
-        })
-    }
+    unsafe { json_out("fofoca_mesh_state_json", handle, buf, cap, Mesh::state_json) }
 }
 
 /// Write the live peer roster as JSON into `buf`. Same length/`cap` convention
-/// as [`fofoca_state_json`].
+/// as [`fofoca_mesh_state_json`].
 ///
 /// # Safety
 /// `handle` must be live; `buf` NULL or writable for `cap` bytes.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fofoca_peers_json(
-    handle: *mut FofocaPipe,
+pub unsafe extern "C" fn fofoca_mesh_peers_json(
+    handle: *mut FofocaMesh,
     buf: *mut c_char,
     cap: usize,
 ) -> c_long {
     // SAFETY: live handle or NULL, and `buf`/`cap` the caller's buffer, per
     // the contract above.
-    unsafe {
-        json_out("fofoca_peers_json", handle, buf, cap, |pipe| {
-            pipe.peers_json()
-        })
-    }
+    unsafe { json_out("fofoca_mesh_peers_json", handle, buf, cap, Mesh::peers_json) }
 }
 
 /// The number of peers **other than you** in the mesh right now; `0` means you
 /// are alone. -1 on failure.
 ///
 /// # Safety
-/// `handle` must be a live handle from [`fofoca_open`], or NULL.
+/// `handle` must be a live handle from [`fofoca_mesh_open`], or NULL.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fofoca_peer_count(handle: *mut FofocaPipe) -> c_long {
+pub unsafe extern "C" fn fofoca_mesh_peer_count(handle: *mut FofocaMesh) -> c_long {
     guard(-1, || {
         clear_error();
         // SAFETY: live handle or NULL, per the contract above.
         let Some(handle) = (unsafe { handle.as_ref() }) else {
-            set_error("fofoca_peer_count: handle is NULL");
+            set_error("fofoca_mesh_peer_count: handle is NULL");
             return -1;
         };
-        match handle.pipe.peer_count() {
+        match handle.mesh.peer_count() {
             // A roster is bounded by the active-view cap; this cannot overflow.
             Ok(count) => c_long::try_from(count).unwrap_or(c_long::MAX),
             Err(error) => {
@@ -604,20 +572,20 @@ pub unsafe extern "C" fn fofoca_peer_count(handle: *mut FofocaPipe) -> c_long {
 /// not be used again.
 ///
 /// # Safety
-/// `handle` must be a live handle from [`fofoca_open`] (or NULL) and must not be
-/// used after this call.
+/// `handle` must be a live handle from [`fofoca_mesh_open`] (or NULL) and must
+/// not be used after this call.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fofoca_close(handle: *mut FofocaPipe) -> c_int {
+pub unsafe extern "C" fn fofoca_mesh_close(handle: *mut FofocaMesh) -> c_int {
     guard(-1, || {
         clear_error();
         if handle.is_null() {
             return 0;
         }
-        // SAFETY: the handle came from `Box::into_raw` in `fofoca_open` and the
+        // SAFETY: the handle came from `Box::into_raw` in `fofoca_mesh_open` and the
         // caller promises not to use it again, so reclaiming ownership here is
         // sound.
         let mut owned = unsafe { Box::from_raw(handle) };
-        report(owned.pipe.close())
+        report(owned.mesh.close())
     })
 }
 
@@ -644,11 +612,11 @@ pub extern "C" fn fofoca_version() -> *const c_char {
     })
 }
 
-/// The largest payload one frame carries, and so the smallest receive buffer
-/// [`fofoca_recv`] is guaranteed not to reject.
+/// The longest text in bytes [`fofoca_msg_send`] always accepts. Most text fits
+/// well past it; a longer message is refused, not split.
 #[unsafe(no_mangle)]
-pub extern "C" fn fofoca_max_chunk() -> usize {
-    guard(0, crate::pipe::default_chunk)
+pub extern "C" fn fofoca_max_msg() -> usize {
+    MAX_MSG
 }
 
 /// Collapse a fallible operation into the `0` / `-1` return code, recording the

@@ -11,17 +11,17 @@ export interface MeshPeerHandle {
   id(): string
   nick(): string
   name(): string
-  maxChunk(): number
-  /** Splits at `maxChunk()` on the Rust side; `to` absent = broadcast. */
-  send(to: string | undefined, bytes: Uint8Array): Promise<void>
-  sendEof(to: string | undefined): Promise<void>
+  /** The longest message in bytes that always fits one frame. */
+  maxMsg(): number
+  /** One whole message; refused, not split, when it does not fit. `to` absent = broadcast. */
+  send(to: string | undefined, text: string): Promise<void>
   /**
-   * The next inbound frame as JSON (`{nick, directed, eof, seq, bytes: number[]}`),
-   * or `undefined` once the mesh is gone. One in-flight call at a time is the
+   * The next inbound message as JSON (`{nick, directed, text}`), or
+   * `undefined` once the mesh is gone. One in-flight call at a time is the
    * intended shape; a concurrent second call waits.
    */
-  nextFrame(): Promise<string | undefined>
-  /** The next `PipeEvent` as JSON, or `undefined` once the mesh is gone. */
+  nextMsg(): Promise<string | undefined>
+  /** The next `MembershipEvent` as JSON, or `undefined` once the mesh is gone. */
   nextEvent(): Promise<string | undefined>
   peersJson(): Promise<string>
   peerCount(): Promise<number>

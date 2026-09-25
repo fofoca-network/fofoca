@@ -17,11 +17,11 @@
  * - `#ready` appears once the mesh is open, with `data-id`/`data-nick`/`data-name`.
  * - `#failed` appears instead if open threw; its text is the error.
  * - `#peers` holds the roster JSON, `data-count` the peer count (self excluded).
- * - `#frames` gets one `<li data-from data-directed data-eof>` per frame,
- *   text decoded as UTF-8.
+ * - `#messages` gets one `<li data-from data-directed>` per message, its
+ *   text as the item's text.
  * - `#events` gets one `<li data-kind>` per surfaced event.
  * - `#state` holds the shared state JSON.
- * - `window.harness = { send, sendEof, stateMerge, close }`, all
+ * - `window.harness = { send, stateMerge, close }`, all
  *   promise-returning.
  * - `window.harnessLog` holds every mirrored console line, timestamped in
  *   UTC. `#log` keeps only the tail, and a failure needs the start.
@@ -34,7 +34,6 @@ declare global {
   interface Window {
     harness?: {
       send(to: string | null, text: string): Promise<void>
-      sendEof(to: string | null): Promise<void>
       stateMerge(json: string): Promise<void>
       close(): Promise<void>
     }
@@ -154,7 +153,6 @@ async function main(): Promise<void> {
 
   window.harness = {
     send: (to, text) => mesh.send(text, to === null ? {} : { to }),
-    sendEof: (to) => mesh.sendEof(to === null ? {} : { to }),
     stateMerge: async (json) => {
       await mesh.state.merge(JSON.parse(json) as Record<string, unknown>)
     },
@@ -163,15 +161,7 @@ async function main(): Promise<void> {
 
   void (async () => {
     for await (const message of mesh.messages()) {
-      appendItem(
-        'frames',
-        {
-          from: message.from,
-          directed: String(message.directed),
-          eof: String(message.eof),
-        },
-        message.text ?? `[${message.bytes.length} bytes]`,
-      )
+      appendItem('messages', { from: message.from, directed: String(message.directed) }, message.text)
     }
   })()
 

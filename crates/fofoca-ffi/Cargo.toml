@@ -35,7 +35,7 @@ fofoca = { path = "../fofoca", default-features = false }
 # peer. Feature-less by design (see its manifest), so the `mdns` / `dht`
 # forwards above stay this crate's decision and cargo unifies them onto the one
 # `fofoca` build.
-fofoca-pipe = { path = "../fofoca-pipe" }
+
 tokio.workspace = true
 anyhow.workspace = true
 serde_json.workspace = true

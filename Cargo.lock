@@ -632,7 +632,7 @@ name = "chat"
 version = "0.6.0"
 dependencies = [
  "anyhow",
- "fofoca-pipe",
+ "fofoca",
  "serde_json",
  "tokio",
  "tracing-subscriber",
@@ -1547,7 +1547,6 @@ version = "0.6.0"
 dependencies = [
  "anyhow",
  "fofoca",
- "fofoca-pipe",
  "serde_json",
  "tokio",
 ]
@@ -1720,7 +1719,6 @@ dependencies = [
  "anyhow",
  "console_error_panic_hook",
  "fofoca",
- "fofoca-pipe",
  "serde_json",
  "tokio",
  "tracing",
@@ -4838,7 +4836,6 @@ dependencies = [
  "anstyle",
  "clap",
  "fofoca",
- "fofoca-pipe",
  "serde",
  "serde_json",
  "tokio",

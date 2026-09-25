@@ -6,7 +6,7 @@ program a person can run, and the same program the e2e suite drives.
 
 | | |
 |---|---|
-| [`rust/`](rust) | The native half: a terminal chat on `fofoca-pipe`, the `chat` package. |
+| [`rust/`](rust) | The native half: a terminal chat on `fofoca::membership`, the `chat` package. |
 | [`web/`](web) | The browser half: `fofoca-wasm` behind a chat page. |
 | [`bun-ffi/`](bun-ffi) | A terminal chat in TypeScript: Bun on `packages/fofoca-ffi`, which `dlopen`s the C ABI. |
 

@@ -1,6 +1,6 @@
 # chat · rust
 
-The native half of the chat example: a terminal chat on `fofoca-pipe`. It is
+The native half of the chat example: a terminal chat on `fofoca::membership`. It is
 the `chat` package, a workspace member, so the e2e suite builds it as
 `-p chat --bin chat` against the shared lockfile.
 

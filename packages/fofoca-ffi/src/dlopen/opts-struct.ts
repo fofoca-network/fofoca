@@ -18,7 +18,7 @@
  * } fofoca_opts;             // 72 bytes
  * ```
  *
- * 64-bit little-endian only, the same scope `frame.ts` claims for the same
+ * 64-bit little-endian only, the same scope `msg.ts` claims for the same
  * reason.
  */
 
@@ -42,12 +42,12 @@ const LITTLE_ENDIAN = new Uint8Array(new Uint32Array([1]).buffer)[0] === 1
 const encoder = new TextEncoder()
 
 export interface EncodedOpts {
-  /** The struct itself, to pass as the `fofoca_open` argument. */
+  /** The struct itself, to pass as the `fofoca_mesh_open` argument. */
   readonly struct: Uint8Array
   /**
    * The NUL-terminated string buffers whose addresses the struct embeds.
    *
-   * The caller MUST keep a reference to this array until `fofoca_open`
+   * The caller MUST keep a reference to this array until `fofoca_mesh_open`
    * returns: nothing else roots these buffers, and a GC between encode and
    * call would leave the struct pointing at freed memory.
    */
