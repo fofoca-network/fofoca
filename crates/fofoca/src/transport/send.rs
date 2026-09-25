@@ -66,8 +66,12 @@ pub async fn deliver(
 /// known endpoint, when its only path is a relay that carries no payload, when
 /// it is cold and on the per-peer dial-failure cooldown, when it is cold and a
 /// background dial to it is already in flight, or when the gossip broadcast
-/// failed. A `false` send is not queued: the caller tries again later. `true` does not prove delivery: a
-/// background dial or write can still fail, and is only logged.
+/// failed. A `false` send is not queued: the caller tries again later.
+///
+/// `true` does not prove delivery: a background dial or write can still fail,
+/// and is only logged. It is also optimistic in one case: an inline dial to
+/// the same peer can fail between the cooldown check and the background dial,
+/// and the background dial then stops on the new cooldown.
 pub async fn deliver_in_background(
     msg: &Message,
     bytes: Bytes,
