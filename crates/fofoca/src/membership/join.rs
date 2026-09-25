@@ -3,7 +3,6 @@
 
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
 use crate::embed::NodeSink;
 use crate::net::TransportOpts;
 use crate::protocol::JoinTarget;
@@ -12,6 +11,7 @@ use crate::protocol::{DirectorySelection, Lookup, MeshConfig, MeshName, RelayLad
 use crate::runtime::{CreateParams, JoinParams, Node, Resolved};
 use crate::runtime::{SetupKind, SetupParams, derive_topic_mesh_config, setup_mesh};
 use crate::util::tuning::GOSSIP_ACTIVE_VIEW_CAPACITY;
+use anyhow::{Context, Result};
 use serde::Deserialize;
 use tokio::sync::mpsc;
 

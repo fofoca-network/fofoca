@@ -144,7 +144,9 @@ mod tests {
         StreamHash {
             addr: EndpointAddr::from_parts(
                 id,
-                [TransportAddr::Ip("127.0.0.1:4433".parse().expect("socket addr"))],
+                [TransportAddr::Ip(
+                    "127.0.0.1:4433".parse().expect("socket addr"),
+                )],
             ),
             lookups: LookupOpts::loopback(),
             relay_transport,
@@ -158,7 +160,10 @@ mod tests {
         for relay_transport in [false, true] {
             let hash = sample(relay_transport);
             assert_eq!(StreamHash::decode(&hash.encode()).expect("decodes"), hash);
-            assert_eq!(hash.to_string().parse::<StreamHash>().expect("parses"), hash);
+            assert_eq!(
+                hash.to_string().parse::<StreamHash>().expect("parses"),
+                hash
+            );
         }
     }
 

@@ -64,7 +64,11 @@ impl StreamNode {
     /// Conflicting or invalid options, a loopback node in a browser, or an
     /// endpoint that fails to bind.
     pub async fn bind(opts: &StreamOpts) -> Result<Self> {
-        let config = MeshConfig::resolve(&opts.lookup, relay_ladder(&opts.relay_urls)?, &opts.transport)?;
+        let config = MeshConfig::resolve(
+            &opts.lookup,
+            relay_ladder(&opts.relay_urls)?,
+            &opts.transport,
+        )?;
         Self::bind_with(config.lookups, config.transport.relay_transport, opts.paths).await
     }
 
@@ -74,10 +78,19 @@ impl StreamNode {
     /// # Errors
     /// As [`bind`](Self::bind).
     pub async fn bind_for(hash: &StreamHash) -> Result<Self> {
-        Self::bind_with(hash.lookups.clone(), hash.relay_transport, PathFlags::default()).await
+        Self::bind_with(
+            hash.lookups.clone(),
+            hash.relay_transport,
+            PathFlags::default(),
+        )
+        .await
     }
 
-    async fn bind_with(lookups: LookupOpts, relay_transport: bool, paths: PathFlags) -> Result<Self> {
+    async fn bind_with(
+        lookups: LookupOpts,
+        relay_transport: bool,
+        paths: PathFlags,
+    ) -> Result<Self> {
         // A browser has no UDP socket, so a loopback node there is one no peer
         // can ever reach, and it would fail silently.
         #[cfg(target_arch = "wasm32")]
@@ -158,7 +171,8 @@ impl StreamNode {
         if self.paths.webrtc
             && pair_needs_lane(&hash.addr, self.paths.ip)
             && !self.webrtc.has_session(&hash.addr.id)
-            && let Err(error) = dial_signal(&self.endpoint, hash.addr.clone(), &self.webrtc, self.ice).await
+            && let Err(error) =
+                dial_signal(&self.endpoint, hash.addr.clone(), &self.webrtc, self.ice).await
             && !hash.relay_transport
         {
             return Err(error.context("opening a WebRTC lane to the producer"));

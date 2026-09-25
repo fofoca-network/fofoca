@@ -43,7 +43,9 @@ pub(crate) struct Registry(Mutex<HashMap<[u8; ID_LEN], Entry>>);
 impl Registry {
     fn entries(&self) -> std::sync::MutexGuard<'_, HashMap<[u8; ID_LEN], Entry>> {
         // A panic while holding the lock leaves a map that is still whole.
-        self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn open(&self, id: [u8; ID_LEN], secret: [u8; SECRET_LEN]) -> oneshot::Receiver<Link> {
@@ -70,7 +72,11 @@ impl Registry {
     /// The one consumer slot for `id`, if `secret` opens it. Taking the slot and
     /// checking it was free are one critical section, so two consumers racing
     /// the same hash cannot both be admitted.
-    fn claim(&self, id: &[u8; ID_LEN], secret: &[u8; SECRET_LEN]) -> Result<oneshot::Sender<Link>, u32> {
+    fn claim(
+        &self,
+        id: &[u8; ID_LEN],
+        secret: &[u8; SECRET_LEN],
+    ) -> Result<oneshot::Sender<Link>, u32> {
         let mut entries = self.entries();
         match entries.get_mut(id) {
             Some(entry) if ct_eq(secret, &entry.secret) => entry.waiting.take().ok_or(code::TAKEN),
@@ -100,8 +106,13 @@ impl ProtocolHandler for StreamAcceptor {
     async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
         // Before reading a byte, and before the slot is taken: a consumer
         // refused here must not spend the hash.
-        if !refuse_unless_direct(&conn, self.relay_transport, PROBE_DEADLINE, code::RELAY_REFUSED)
-            .await
+        if !refuse_unless_direct(
+            &conn,
+            self.relay_transport,
+            PROBE_DEADLINE,
+            code::RELAY_REFUSED,
+        )
+        .await
         {
             return Ok(());
         }

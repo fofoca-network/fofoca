@@ -7,9 +7,13 @@ use anyhow::Result;
 use async_trait::async_trait;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::embed::{AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver, NodeEvent};
+use crate::embed::{
+    AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver, NodeEvent,
+};
 use crate::ops::{StateMergeParams, broadcast_state_merge, send_app};
-use crate::protocol::{AppFrameParams, AppTag, Channel, Message, MessageBody, MessageKind, Nickname};
+use crate::protocol::{
+    AppFrameParams, AppTag, Channel, Message, MessageBody, MessageKind, Nickname,
+};
 use crate::util::consts::MAX_MESSAGE_SIZE;
 
 /// The one `App`-frame tag a member sends: a whole UTF-8 text, broadcast or
@@ -291,8 +295,12 @@ mod tests {
             .join(",")
             .parse()
             .expect("ladder");
-        let config = MeshConfig::resolve(&[Lookup::Mdns, Lookup::Dht, Lookup::Relay], Some(ladder), &[])
-            .expect("config");
+        let config = MeshConfig::resolve(
+            &[Lookup::Mdns, Lookup::Dht, Lookup::Relay],
+            Some(ladder),
+            &[],
+        )
+        .expect("config");
         let mesh = derive_topic_mesh_config("standup", config).expect("mesh");
         MeshId::new(mesh.to_string()).expect("id")
     }
