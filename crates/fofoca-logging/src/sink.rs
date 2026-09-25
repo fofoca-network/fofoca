@@ -37,12 +37,22 @@ enum State {
 /// Rotate `path` → `<path>.1` (overwriting any prior backup) and reopen
 /// `path` truncating. Bounds disk to `2 × max` per member while keeping
 /// the most recent ≥`max` bytes of history.
-fn rotate(path: &Path) -> io::Result<fs::File> {
-    use std::os::unix::fs::OpenOptionsExt as _;
-
+fn rotate(path: &Path, reopen: impl FnOnce(&Path) -> io::Result<fs::File>) -> io::Result<fs::File> {
     let mut backup = path.as_os_str().to_owned();
     backup.push(".1");
-    let _ = fs::rename(path, PathBuf::from(backup));
+    let backup = PathBuf::from(backup);
+    let _ = fs::rename(path, &backup);
+    reopen(path).inspect_err(|_| {
+        // The caller keeps writing through its old handle, which now points
+        // at the backup. Move it back so that handle stays on `path` and the
+        // next write retries the rotation.
+        let _ = fs::rename(&backup, path);
+    })
+}
+
+fn open_truncated(path: &Path) -> io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+
     fs::OpenOptions::new()
         .create(true)
         .write(true)
@@ -57,10 +67,20 @@ fn rotate(path: &Path) -> io::Result<fs::File> {
 /// disables rotation). Best-effort: on rotate failure keep the current file
 /// (temporarily over cap) and retry next write — never drop the sink.
 fn maybe_rotate(file: &mut fs::File, path: &Path, written: &mut u64, max: u64) {
+    maybe_rotate_with(file, path, written, max, open_truncated);
+}
+
+fn maybe_rotate_with(
+    file: &mut fs::File,
+    path: &Path,
+    written: &mut u64,
+    max: u64,
+    reopen: impl FnOnce(&Path) -> io::Result<fs::File>,
+) {
     if max == 0 || *written < max {
         return;
     }
-    if let Ok(rotated) = rotate(path) {
+    if let Ok(rotated) = rotate(path, reopen) {
         *file = rotated;
         *written = 0;
     }
@@ -131,7 +151,9 @@ impl LogSink {
                 };
             }
             Err(error) => {
-                eprintln!(
+                // Not `eprintln!`: it panics when stderr itself is on a full disk.
+                let _ = writeln!(
+                    io::stderr(),
                     "warning: cannot open log file {}: {error}; logging to stderr",
                     path.display()
                 );
@@ -221,6 +243,26 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::{LogSink, State};
+
+    #[test]
+    fn failed_reopen_keeps_the_handle_on_the_active_path() {
+        let dir =
+            std::env::temp_dir().join(format!("fofoca-logsink-reopen-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("rot.log");
+        let mut file = fs::File::create(&path).expect("open test log");
+        let mut written = 100u64;
+        super::maybe_rotate_with(&mut file, &path, &mut written, 100, |_| {
+            Err(std::io::Error::other("no space left on device"))
+        });
+        let active_exists = path.exists();
+        let _ = fs::remove_dir_all(&dir);
+        assert!(
+            active_exists,
+            "after a failed reopen the kept handle must still write to {}",
+            path.display()
+        );
+    }
 
     #[test]
     fn attached_file_rotates_at_cap() {
