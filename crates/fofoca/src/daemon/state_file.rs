@@ -66,6 +66,7 @@ pub struct StateFile {
     /// (see [`Self::set_discovery`]). Opaque to the engine, and the reason every
     /// write is 0o600: an app may put a bearer token in here.
     discovery: std::sync::Mutex<serde_json::Map<String, serde_json::Value>>,
+    write_failing: std::sync::atomic::AtomicBool,
 }
 
 impl StateFile {
@@ -78,6 +79,7 @@ impl StateFile {
             nickname: nickname.as_str().to_string(),
             topic: None,
             discovery: std::sync::Mutex::new(serde_json::Map::new()),
+            write_failing: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -129,8 +131,23 @@ impl StateFile {
     /// logged but not propagated — the statusline going stale must not
     /// crash the daemon.
     pub(crate) fn write(&self, peer_count: usize, ready: bool) {
-        if let Err(error) = self.try_write(peer_count, ready) {
-            eprintln!("state_file: write failed: {error}");
+        use std::sync::atomic::Ordering;
+
+        match self.try_write(peer_count, ready) {
+            Ok(()) => self.write_failing.store(false, Ordering::Relaxed),
+            Err(error) => {
+                let _ = std::fs::remove_file(tmp_sibling(&self.path));
+                // Warn once per failing streak: the heartbeat retries every
+                // few seconds, and a full disk fails every one of them.
+                if !self.write_failing.swap(true, Ordering::Relaxed) {
+                    tracing::warn!(
+                        target: "fofoca::lifecycle",
+                        path = %self.path.display(),
+                        %error,
+                        "state file write failed"
+                    );
+                }
+            }
         }
     }
 
@@ -364,6 +381,27 @@ mod tests {
             std::process::id(),
             clock::unix_nanos(),
         ))
+    }
+
+    #[test]
+    fn failed_write_removes_temp_file() {
+        let path = unique_path("failed");
+        // A non-empty directory at the target makes the final rename fail
+        // after the temp file is fully written.
+        std::fs::create_dir_all(path.join("occupied")).unwrap();
+        let state_file = StateFile::new(
+            path.clone(),
+            &MeshId::from("abcd"),
+            &Nickname::from("treat-empire"),
+            &name("cool-team"),
+        );
+        state_file.write(1, true);
+        state_file.write(1, true);
+        let tmp = super::tmp_sibling(&path);
+        let leftover = tmp.exists();
+        let _ = std::fs::remove_file(&tmp);
+        std::fs::remove_dir_all(&path).unwrap();
+        assert!(!leftover, "a failed write must not leave {}", tmp.display());
     }
 
     #[test]
