@@ -191,7 +191,7 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
     build::ensure_bun("the chat suite serves its page with bun")?;
     build::build_browser_peer()?;
     output::status("Building", "the native chat example");
-    let chat_binary = build::build_example("fofoca-pipe", "chat")?;
+    let chat_binary = build::build_binary("chat", "chat")?;
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

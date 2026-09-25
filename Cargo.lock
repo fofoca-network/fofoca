@@ -628,6 +628,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "chat"
+version = "0.6.0"
+dependencies = [
+ "anyhow",
+ "fofoca-pipe",
+ "serde_json",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "chrono"
 version = "0.4.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1635,7 +1646,6 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

@@ -2,9 +2,9 @@
 //! (`examples/chat/` holds the browser half and the README).
 //!
 //! ```text
-//! cargo run -p fofoca-pipe --example chat -- --topic room
-//! cargo run -p fofoca-pipe --example chat -- --topic room --nick ana --relay-url http://127.0.0.1:3340/
-//! cargo run -p fofoca-pipe --example chat -- --topic room --transport p2p,relay
+//! cargo run -p chat -- --topic room
+//! cargo run -p chat -- --topic room --nick ana --relay-url http://127.0.0.1:3340/
+//! cargo run -p chat -- --topic room --transport p2p,relay
 //! ```
 //!
 //! Type to broadcast; `/msg <nick> <text>` sends directed; `/peers` prints

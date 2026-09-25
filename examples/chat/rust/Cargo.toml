@@ -1,0 +1,21 @@
+[package]
+name = "chat"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "The chat example's native half: a terminal chat on the fofoca mesh"
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "chat"
+path = "src/main.rs"
+
+[dependencies]
+fofoca-pipe = { path = "../../../crates/fofoca-pipe" }
+anyhow.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }

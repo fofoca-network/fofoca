@@ -253,14 +253,8 @@ pub(crate) fn build_browser_peer() -> Result<PathBuf, String> {
     Ok(glue)
 }
 
-/// Build one cargo example and take its path from cargo's own JSON, for the
+/// Build one binary target and take its path from cargo's own JSON, for the
 /// same stale-artifact reason [`build`] does.
-#[cfg(feature = "mesh")]
-pub(crate) fn build_example(package: &str, example: &str) -> Result<PathBuf, String> {
-    build_target(package, "--example", example)
-}
-
-/// A binary target, the same way.
 #[cfg(feature = "mesh")]
 pub(crate) fn build_binary(package: &str, bin: &str) -> Result<PathBuf, String> {
     build_target(package, "--bin", bin)

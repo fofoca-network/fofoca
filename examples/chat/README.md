@@ -6,7 +6,7 @@ program a person can run, and the same program the e2e suite drives.
 
 | | |
 |---|---|
-| [`rust/`](rust) | A pointer to the native half, [`crates/fofoca-pipe/examples/chat.rs`](../../crates/fofoca-pipe/examples/chat.rs): a terminal chat over the byte-pipe wire contract. |
+| [`rust/`](rust) | The native half: a terminal chat on `fofoca-pipe`, the `chat` package. |
 | [`web/`](web) | The browser half: `fofoca-wasm` behind a chat page. |
 | [`bun-ffi/`](bun-ffi) | A terminal chat in TypeScript: Bun on `packages/fofoca-ffi`, which `dlopen`s the C ABI. |
 
@@ -20,7 +20,7 @@ Build the wasm once, serve the page, start a terminal peer, meet on a topic:
 ```sh
 cargo task build-wasm                              # once, and after engine changes
 cd examples/chat/web && bun run serve              # prints its URL, 3010 or the next free port
-cargo run -p fofoca-pipe --example chat -- --topic room --nick terminal
+cargo run -p chat -- --topic room --nick terminal
 ```
 
 A third peer from Bun, on the C ABI:
