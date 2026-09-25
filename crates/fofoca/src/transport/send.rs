@@ -94,15 +94,6 @@ pub async fn deliver_in_background(
     }
 }
 
-fn dial_in_background(eid: EndpointId, bytes: Bytes, state: &EventLoopState) {
-    let pool = state.unicast_pool.clone();
-    n0_future::task::spawn(async move {
-        if let Err(error) = pool.dial_and_send(eid, bytes).await {
-            tracing::debug!(target: super::LOG_TARGET, %eid, %error, "background send not delivered");
-        }
-    });
-}
-
 /// The chosen transport for a message — a **pure** decision so both planes are
 /// unit-testable without touching the network.
 #[derive(Debug, PartialEq, Eq)]
@@ -248,8 +239,10 @@ pub(crate) async fn send_best_effort(
     match state.unicast_pool.send_if_warm(eid, bytes.clone()).await {
         WarmSend::Sent => true,
         WarmSend::Cold if state.linked_endpoints.contains(&eid) => {
-            dial_in_background(eid, bytes, state);
-            true
+            state
+                .unicast_pool
+                .dial_and_send_in_background(eid, bytes)
+                .await
         }
         WarmSend::Cold | WarmSend::Refused => false,
     }
@@ -497,6 +490,25 @@ mod tests {
 
         assert!(first, "the first send starts the dial");
         assert!(!second, "the second send finds the dial in flight");
+        assert_eq!(state.unicast_pool.dial_attempts(), 1);
+    }
+
+    /// A courtesy reply and a background send to one cold linked neighbour
+    /// share one dial, the same as two background sends do.
+    #[tokio::test]
+    async fn a_courtesy_reply_shares_a_background_dial_in_flight() {
+        let (mut state, bob) = state_knowing_bob();
+        state.linked_endpoints.insert(bob);
+        let (_endpoint, sender) = loopback_node().await;
+        let msg = directed_msg();
+        let bytes = Bytes::from(msg.serialize().expect("serialize"));
+
+        let sent = super::deliver_in_background(&msg, bytes.clone(), &state, &sender).await;
+        let replied = super::send_best_effort(bob, bytes, &state).await;
+        tokio::task::yield_now().await;
+
+        assert!(sent, "the background send starts the dial");
+        assert!(!replied, "the reply finds the dial in flight");
         assert_eq!(state.unicast_pool.dial_attempts(), 1);
     }
 
