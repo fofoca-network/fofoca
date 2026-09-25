@@ -41,7 +41,9 @@ async fn produce(mut producer: Producer, payload: Vec<u8>, chunk: usize) {
 }
 
 fn payload(len: usize) -> Vec<u8> {
-    (0..len).map(|index| u8::try_from(index * 31 % 251).expect("below 251")).collect()
+    (0..len)
+        .map(|index| u8::try_from(index * 31 % 251).expect("below 251"))
+        .collect()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -84,7 +86,10 @@ async fn a_second_consumer_is_refused_as_taken() {
     let mut producer = producer_node.create();
     let hash = producer.hash().clone();
     let _first = consumer_node.open(&hash).await.expect("first open");
-    producer.attached().await.expect("the first consumer attaches");
+    producer
+        .attached()
+        .await
+        .expect("the first consumer attaches");
 
     let mut second = consumer_node.open(&hash).await.expect("second open");
     let error = read_all(&mut second).await.expect_err("second consumer");
@@ -94,22 +99,22 @@ async fn a_second_consumer_is_refused_as_taken() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn two_racing_consumers_admit_exactly_one() {
     let (producer_node, consumer_node) = (loopback().await, loopback().await);
-    let producer = producer_node.create();
+    let mut producer = producer_node.create();
     let hash = producer.hash().clone();
-    let writer = tokio::spawn(produce(producer, b"only one".to_vec(), 64));
 
-    let (mut left, mut right) = tokio::join!(consumer_node.open(&hash), consumer_node.open(&hash));
-    let (left, right) = (
-        read_all(left.as_mut().expect("open")).await,
-        read_all(right.as_mut().expect("open")).await,
-    );
-    let (won, lost) = match (left, right) {
-        (Ok(bytes), Err(error)) | (Err(error), Ok(bytes)) => (bytes, error),
+    let (left, right) = tokio::join!(consumer_node.open(&hash), consumer_node.open(&hash));
+    let (mut left, mut right) = (left.expect("open"), right.expect("open"));
+    // Held open until both have their first answer: once the stream closes the
+    // hash is spent, and a late loser would read "unknown" instead of "taken".
+    producer.write(b"only one").await.expect("write");
+    let (first_left, first_right) = tokio::join!(left.read(), right.read());
+    let (won, lost) = match (first_left, first_right) {
+        (Ok(Some(bytes)), Err(error)) | (Err(error), Ok(Some(bytes))) => (bytes, error),
         other => panic!("exactly one consumer must win: {other:?}"),
     };
-    assert_eq!(won, b"only one");
+    assert_eq!(&won[..], b"only one");
     assert_eq!(refusal(&lost), Some(Refused::Taken), "{lost:#}");
-    writer.await.expect("writer");
+    producer.close().await.expect("close");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -158,7 +163,9 @@ async fn a_producer_dropped_mid_stream_is_an_error_not_an_end() {
     let mut reader = consumer_node.open(&hash).await.expect("open");
     producer.write(b"half").await.expect("write");
     drop(producer);
-    let error = read_all(&mut reader).await.expect_err("abandoned mid-stream");
+    let error = read_all(&mut reader)
+        .await
+        .expect_err("abandoned mid-stream");
     assert_eq!(refusal(&error), Some(Refused::Abandoned), "{error:#}");
 }
 
@@ -180,7 +187,10 @@ async fn a_consumer_that_leaves_fails_the_write_and_spends_the_hash() {
         }
     })
     .await;
-    assert!(failed.is_ok(), "a write must fail once the consumer is gone");
+    assert!(
+        failed.is_ok(),
+        "a write must fail once the consumer is gone"
+    );
 
     let mut again = consumer_node.open(&hash).await.expect("open again");
     let error = read_all(&mut again).await.expect_err("spent hash");
@@ -200,7 +210,8 @@ async fn two_streams_on_one_node_stay_apart() {
         consumer_node.open(&first_hash).await.expect("open first"),
         consumer_node.open(&second_hash).await.expect("open second"),
     );
-    let (first_got, second_got) = tokio::join!(read_all(&mut first_reader), read_all(&mut second_reader));
+    let (first_got, second_got) =
+        tokio::join!(read_all(&mut first_reader), read_all(&mut second_reader));
     assert!(first_got.expect("first") == payload(300_000));
     assert!(second_got.expect("second") == b"second".repeat(50_000));
     writers.0.await.expect("first writer");
@@ -238,7 +249,10 @@ async fn a_relay_transport_stream_admits_a_relay_only_consumer() {
         .await
         .expect("within budget")
         .expect("open");
-    assert_eq!(read_all(&mut reader).await.expect("read"), b"over the relay");
+    assert_eq!(
+        read_all(&mut reader).await.expect("read"),
+        b"over the relay"
+    );
     writer.await.expect("writer");
 }
 
