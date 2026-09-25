@@ -19,7 +19,7 @@ use fofoca_netplay::RollbackDriver;
 
 use light_cycles_native::app::{Game, LightCycles};
 use light_cycles_native::grid::{Dir, TICK_MS};
-use light_cycles_native::sim::Outcome;
+use light_cycles_native::sim::{Outcome, World};
 
 struct Bot {
     node: Node<RollbackDriver<LightCycles>>,
@@ -95,6 +95,22 @@ async fn drive(
     }
 }
 
+/// What one bot showed of the first match when it was last decided.
+#[derive(Debug, Clone)]
+struct FirstMatch {
+    outcome: Outcome,
+    tick: u16,
+    positions: Vec<(i16, i16)>,
+}
+
+fn positions(world: &World) -> Vec<(i16, i16)> {
+    world
+        .cycles
+        .iter()
+        .map(|cycle| (cycle.x, cycle.y))
+        .collect()
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn two_bots_play_a_match_and_agree_on_its_outcome() {
     let _ = tracing_subscriber::fmt()
@@ -131,33 +147,53 @@ async fn two_bots_play_a_match_and_agree_on_its_outcome() {
          silent desync waiting to happen"
     );
 
+    // Each bot's view of the first match is recorded rather than read at the
+    // end: the proposer starts a rematch a grace period after its own match
+    // is decided, which resets both worlds, and a slow peer can confirm the
+    // ending after that. A slot holds the latest decided frame of match 1,
+    // is cleared when a rollback puts match 1 back in play, and freezes once
+    // the bot moves on.
+    let mut first_match: Vec<Option<FirstMatch>> = vec![None; bots.len()];
+
     // They play it out. Two cycles turning across a small arena decide
     // well inside the tick cap. Wait for agreement, not the first decided
     // frame: a bot can reach an ending on a predicted input, and the
-    // rollback that corrects it waits for the real input to arrive.
-    let agreed = drive(&mut bots, Duration::from_secs(60), |bots| {
-        let first = bots[0].game.outcome();
-        first != Outcome::InProgress && bots.iter().all(|bot| bot.game.outcome() == first)
+    // rollback that corrects it waits for the real input to arrive. The
+    // timeout is longer than the round cap (`ROUND_MAX_TICKS` at `TICK_MS`,
+    // 90 s), so a round that runs to the cap ends as a draw, not a timeout.
+    let agreed = drive(&mut bots, Duration::from_secs(100), |bots| {
+        for (slot, bot) in first_match.iter_mut().zip(bots) {
+            let snapshot = bot.game.snapshot();
+            if snapshot.match_number != 1 {
+                continue;
+            }
+            let outcome = bot.game.outcome();
+            *slot = (outcome != Outcome::InProgress).then(|| FirstMatch {
+                outcome,
+                tick: snapshot.world.tick,
+                positions: positions(&snapshot.world),
+            });
+        }
+        let first = first_match[0].as_ref().map(|seen| seen.outcome);
+        first.is_some()
+            && first_match
+                .iter()
+                .all(|seen| seen.as_ref().map(|seen| seen.outcome) == first)
     })
     .await;
     assert!(
         agreed,
-        "the two bots never agreed on who won: {:?}",
-        bots.iter()
-            .map(|bot| (bot.game.outcome(), bot.game.snapshot().world.tick))
-            .collect::<Vec<_>>()
+        "the two bots never agreed on who won: {first_match:?}"
     );
 
     // A match that ends before it starts would satisfy every assertion
     // above vacuously, so pin down that one was actually simulated.
-    for bot in &bots {
-        let snapshot = bot.game.snapshot();
+    for seen in first_match.iter().flatten() {
         assert!(
-            snapshot.world.tick > 5,
+            seen.tick > 5,
             "the match decided at tick {} — too early to have been played",
-            snapshot.world.tick
+            seen.tick
         );
-        assert_eq!(snapshot.match_number, 1);
     }
 
     assert!(
@@ -169,17 +205,10 @@ async fn two_bots_play_a_match_and_agree_on_its_outcome() {
     // job: the second match's id is not ordered below the first's, so the
     // tie-break alone would have refused it and the two would have sat on
     // a finished game forever.
-    let spawns = |bots: &[Bot]| -> Vec<(i16, i16)> {
-        bots[0]
-            .game
-            .snapshot()
-            .world
-            .cycles
-            .iter()
-            .map(|cycle| (cycle.x, cycle.y))
-            .collect()
-    };
-    let first_arena = spawns(&bots);
+    let first_arena = first_match[0]
+        .as_ref()
+        .map(|seen| seen.positions.clone())
+        .unwrap_or_default();
 
     let rematched = drive(&mut bots, Duration::from_secs(30), |bots| {
         bots.iter().all(|bot| bot.game.snapshot().match_number == 2)
@@ -193,7 +222,7 @@ async fn two_bots_play_a_match_and_agree_on_its_outcome() {
             .collect::<Vec<_>>()
     );
     assert_ne!(
-        spawns(&bots),
+        positions(&bots[0].game.snapshot().world),
         first_arena,
         "a rematch reusing the previous arena means the session id was \
          reused, and with it the magic that rejects stale packets"
