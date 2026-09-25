@@ -59,13 +59,14 @@ pub async fn deliver(
 /// stops the whole node for the dial and path-select budgets.
 ///
 /// A directed message to a warm peer is handed to the connection, the same as
-/// [`deliver`]. A cold peer with a known endpoint is dialed in the background,
-/// under the usual per-peer dial cooldown. A broadcast rides gossip, which
-/// never dials.
+/// [`deliver`]. A cold peer with a known endpoint is dialed in the background.
+/// A broadcast rides gossip, which never dials.
 ///
 /// Returns whether the send was started. `false` when the addressee has no
-/// known endpoint, when its only path is a relay that carries no payload, or
-/// when the gossip broadcast failed. `true` does not prove delivery: a
+/// known endpoint, when its only path is a relay that carries no payload, when
+/// it is cold and on the per-peer dial-failure cooldown, when it is cold and a
+/// background dial to it is already in flight, or when the gossip broadcast
+/// failed. A `false` send is not queued: the caller tries again later. `true` does not prove delivery: a
 /// background dial or write can still fail, and is only logged.
 pub async fn deliver_in_background(
     msg: &Message,
@@ -78,8 +79,10 @@ pub async fn deliver_in_background(
         Route::Unicast(eid) => match state.unicast_pool.send_if_warm(eid, bytes.clone()).await {
             WarmSend::Sent => true,
             WarmSend::Cold => {
-                dial_in_background(eid, bytes, state);
-                true
+                state
+                    .unicast_pool
+                    .dial_and_send_in_background(eid, bytes)
+                    .await
             }
             WarmSend::Refused => false,
         },
@@ -431,7 +434,7 @@ mod tests {
     }
 
     /// A cold peer that is not a linked neighbour is dialed too, in the
-    /// background: a task counterpart is often outside the gossip active view.
+    /// background: a directed-message peer is often outside the active view.
     #[tokio::test]
     async fn a_background_send_to_a_cold_unlinked_peer_dials_off_the_loop() {
         let (state, _bob) = state_knowing_bob();
@@ -453,6 +456,44 @@ mod tests {
             1,
             "the dial runs in the background"
         );
+    }
+
+    /// A peer on the dial-failure cooldown gets no dial, so nothing was
+    /// started and the caller must not count the send.
+    #[tokio::test]
+    async fn a_background_send_to_a_peer_on_dial_cooldown_is_not_sent() {
+        let (state, bob) = state_knowing_bob();
+        state.unicast_pool.note_dial_failure(bob).await;
+        let (_endpoint, sender) = loopback_node().await;
+        let msg = directed_msg();
+        let bytes = Bytes::from(msg.serialize().expect("serialize"));
+
+        let sent = super::deliver_in_background(&msg, bytes, &state, &sender).await;
+
+        assert!(
+            !sent,
+            "the cooldown refuses the dial, so nothing was started"
+        );
+        tokio::task::yield_now().await;
+        assert_eq!(state.unicast_pool.dial_attempts(), 0);
+    }
+
+    /// Two cold sends to one peer share one dial: each dial is a handshake
+    /// and a connection, and the pool keeps only the last one.
+    #[tokio::test]
+    async fn two_background_sends_to_one_cold_peer_share_one_dial() {
+        let (state, _bob) = state_knowing_bob();
+        let (_endpoint, sender) = loopback_node().await;
+        let msg = directed_msg();
+        let bytes = Bytes::from(msg.serialize().expect("serialize"));
+
+        let first = super::deliver_in_background(&msg, bytes.clone(), &state, &sender).await;
+        let second = super::deliver_in_background(&msg, bytes, &state, &sender).await;
+        tokio::task::yield_now().await;
+
+        assert!(first, "the first send starts the dial");
+        assert!(!second, "the second send finds the dial in flight");
+        assert_eq!(state.unicast_pool.dial_attempts(), 1);
     }
 
     /// No known endpoint: nothing to dial, and the caller learns that

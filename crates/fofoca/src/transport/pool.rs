@@ -4,7 +4,7 @@
 //! and with a short dial budget so a send to an unreachable peer fails fast
 //! rather than stalling the event loop.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -69,6 +69,9 @@ struct PoolInner {
     /// before dialing, and a warm hit inside never dials, but both mean the
     /// caller was willing to.
     dial_attempts: AtomicU64,
+    /// Endpoints with a background dial in flight, so that concurrent cold
+    /// sends to one peer share one dial instead of racing their own.
+    dialing: std::sync::Mutex<HashSet<EndpointId>>,
     /// `TransportPolicy::relay`. Off, a send on a connection whose selected
     /// path is the relay is refused; the connection stays pooled, since iroh
     /// may still punch a direct path on it.
@@ -96,6 +99,7 @@ impl UnicastPool {
                 conns: Mutex::new(HashMap::new()),
                 dial_failures: Mutex::new(Cooldown::new(DIAL_FAILURE_COOLDOWN)),
                 dial_attempts: AtomicU64::new(0),
+                dialing: std::sync::Mutex::new(HashSet::new()),
                 relay_transport,
             }),
         }
@@ -112,6 +116,7 @@ impl UnicastPool {
                 conns: Mutex::new(HashMap::new()),
                 dial_failures: Mutex::new(Cooldown::new(DIAL_FAILURE_COOLDOWN)),
                 dial_attempts: AtomicU64::new(0),
+                dialing: std::sync::Mutex::new(HashSet::new()),
                 relay_transport: false,
             }),
         }
@@ -163,6 +168,56 @@ impl UnicastPool {
     #[cfg(test)]
     pub(crate) fn dial_attempts(&self) -> u64 {
         self.inner.dial_attempts.load(Ordering::Relaxed)
+    }
+
+    /// Start a [`Self::dial_and_send`] to `eid` on a spawned task, and return
+    /// whether one was started. `false` when `eid` is on the dial-failure
+    /// cooldown, or when a background dial to it is already in flight; this
+    /// frame is then not sent, and the caller can try again later.
+    ///
+    /// # Panics
+    /// If the in-flight set's mutex is poisoned.
+    pub(crate) async fn dial_and_send_in_background(&self, eid: EndpointId, bytes: Bytes) -> bool {
+        if self
+            .inner
+            .dial_failures
+            .lock()
+            .await
+            .on_cooldown(&eid, Instant::now())
+        {
+            return false;
+        }
+        if !self
+            .inner
+            .dialing
+            .lock()
+            .expect("in-flight dial set not poisoned")
+            .insert(eid)
+        {
+            return false;
+        }
+        let pool = self.clone();
+        n0_future::task::spawn(async move {
+            if let Err(error) = pool.dial_and_send(eid, bytes).await {
+                tracing::debug!(target: LOG_TARGET, %eid, %error, "background send not delivered");
+            }
+            pool.inner
+                .dialing
+                .lock()
+                .expect("in-flight dial set not poisoned")
+                .remove(&eid);
+        });
+        true
+    }
+
+    /// Put `eid` on the dial-failure cooldown, as a failed dial does.
+    #[cfg(test)]
+    pub(crate) async fn note_dial_failure(&self, eid: EndpointId) {
+        self.inner
+            .dial_failures
+            .lock()
+            .await
+            .note(eid, Instant::now());
     }
 
     /// Ensure a connection to `eid` (reusing a warm one or dialing inline) and
