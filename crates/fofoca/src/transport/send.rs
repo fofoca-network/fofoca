@@ -59,16 +59,15 @@ pub async fn deliver(
 /// stops the whole node for the dial and path-select budgets.
 ///
 /// A directed message to a warm peer is handed to the connection, the same as
-/// [`deliver`]. A linked neighbour without a warm connection is dialed in the
-/// background, under the usual per-peer dial cooldown. A broadcast rides
-/// gossip, which never dials.
+/// [`deliver`]. A cold peer with a known endpoint is dialed in the background,
+/// under the usual per-peer dial cooldown. A broadcast rides gossip, which
+/// never dials.
 ///
 /// Returns whether the send was started. `false` when the addressee has no
-/// known endpoint, when its only path is a relay that carries no payload, when
-/// it is neither warm nor a linked neighbour, or when the gossip broadcast
-/// failed. `true` does not prove delivery: a background dial or write can
-/// still fail, and is only logged.
-pub async fn deliver_if_warm(
+/// known endpoint, when its only path is a relay that carries no payload, or
+/// when the gossip broadcast failed. `true` does not prove delivery: a
+/// background dial or write can still fail, and is only logged.
+pub async fn deliver_in_background(
     msg: &Message,
     bytes: Bytes,
     state: &EventLoopState,
@@ -76,9 +75,25 @@ pub async fn deliver_if_warm(
 ) -> bool {
     match route(msg, state) {
         Route::Broadcast => broadcast(sender, bytes).await.is_ok(),
-        Route::Unicast(eid) => send_best_effort(eid, bytes, state).await,
+        Route::Unicast(eid) => match state.unicast_pool.send_if_warm(eid, bytes.clone()).await {
+            WarmSend::Sent => true,
+            WarmSend::Cold => {
+                dial_in_background(eid, bytes, state);
+                true
+            }
+            WarmSend::Refused => false,
+        },
         Route::Held(_) | Route::Undeliverable => false,
     }
+}
+
+fn dial_in_background(eid: EndpointId, bytes: Bytes, state: &EventLoopState) {
+    let pool = state.unicast_pool.clone();
+    n0_future::task::spawn(async move {
+        if let Err(error) = pool.dial_and_send(eid, bytes).await {
+            tracing::debug!(target: super::LOG_TARGET, %eid, %error, "background send not delivered");
+        }
+    });
 }
 
 /// The chosen transport for a message — a **pure** decision so both planes are
@@ -226,12 +241,7 @@ pub(crate) async fn send_best_effort(
     match state.unicast_pool.send_if_warm(eid, bytes.clone()).await {
         WarmSend::Sent => true,
         WarmSend::Cold if state.linked_endpoints.contains(&eid) => {
-            let pool = state.unicast_pool.clone();
-            n0_future::task::spawn(async move {
-                if let Err(error) = pool.dial_and_send(eid, bytes).await {
-                    tracing::debug!(target: super::LOG_TARGET, %eid, %error, "background send to a linked neighbor not delivered");
-                }
-            });
+            dial_in_background(eid, bytes, state);
             true
         }
         WarmSend::Cold | WarmSend::Refused => false,
@@ -381,14 +391,14 @@ mod tests {
         state
     }
 
-    /// **A warm-only send to a cold peer returns at once.**
+    /// **A background send to a cold peer returns at once.**
     ///
     /// An app hook on the tick runs inside the event loop's `select!`, so a
     /// send that dials inline stops the whole node for up to the dial budget
     /// plus the path-select budget. Bob is a linked neighbour whose address is
     /// a UDP socket that never answers: the worst case, where a dial happens.
     #[tokio::test]
-    async fn a_warm_only_send_to_a_cold_linked_peer_returns_at_once() {
+    async fn a_background_send_to_a_cold_linked_peer_returns_at_once() {
         let (endpoint, sender) = loopback_node().await;
         let silent = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind a silent socket");
         let bob = iroh::SecretKey::generate().public();
@@ -404,7 +414,7 @@ mod tests {
         let bytes = Bytes::from(msg.serialize().expect("serialize"));
 
         let started = std::time::Instant::now();
-        let sent = super::deliver_if_warm(&msg, bytes, &state, &sender).await;
+        let sent = super::deliver_in_background(&msg, bytes, &state, &sender).await;
         let elapsed = started.elapsed();
 
         assert!(
@@ -420,24 +430,50 @@ mod tests {
         );
     }
 
-    /// A cold peer that is not a linked neighbour gets no dial at all, and
-    /// the caller learns that nothing went out.
+    /// A cold peer that is not a linked neighbour is dialed too, in the
+    /// background: a task counterpart is often outside the gossip active view.
     #[tokio::test]
-    async fn a_warm_only_send_to_a_cold_unlinked_peer_is_not_sent() {
+    async fn a_background_send_to_a_cold_unlinked_peer_dials_off_the_loop() {
         let (state, _bob) = state_knowing_bob();
         let (_endpoint, sender) = loopback_node().await;
         let msg = directed_msg();
         let bytes = Bytes::from(msg.serialize().expect("serialize"));
 
-        let sent = super::deliver_if_warm(&msg, bytes, &state, &sender).await;
+        let sent = super::deliver_in_background(&msg, bytes, &state, &sender).await;
 
-        assert!(!sent, "there is no warm path and no link to this peer");
+        assert!(sent, "a known peer gets a background dial");
+        assert_eq!(
+            state.unicast_pool.dial_attempts(),
+            0,
+            "the caller entered the inline-dial path itself"
+        );
+        tokio::task::yield_now().await;
+        assert_eq!(
+            state.unicast_pool.dial_attempts(),
+            1,
+            "the dial runs in the background"
+        );
+    }
+
+    /// No known endpoint: nothing to dial, and the caller learns that
+    /// nothing went out.
+    #[tokio::test]
+    async fn a_background_send_to_an_unknown_peer_is_not_sent() {
+        let state = fresh_state();
+        let (_endpoint, sender) = loopback_node().await;
+        let msg = directed_msg();
+        let bytes = Bytes::from(msg.serialize().expect("serialize"));
+
+        let sent = super::deliver_in_background(&msg, bytes, &state, &sender).await;
+
+        assert!(!sent, "bob has no known endpoint");
+        tokio::task::yield_now().await;
         assert_eq!(state.unicast_pool.dial_attempts(), 0);
     }
 
     /// A warm peer gets the frame, whole.
     #[tokio::test]
-    async fn a_warm_only_send_to_a_warm_peer_delivers() {
+    async fn a_background_send_to_a_warm_peer_delivers() {
         let (bob_endpoint, _bob_sender) = loopback_node().await;
         let (endpoint, sender) = loopback_node().await;
         let state = state_with_pool(&endpoint, bob_endpoint.addr());
@@ -464,7 +500,7 @@ mod tests {
         let msg = directed_msg();
         let bytes = Bytes::from(msg.serialize().expect("serialize"));
 
-        let sent = super::deliver_if_warm(&msg, bytes.clone(), &state, &sender).await;
+        let sent = super::deliver_in_background(&msg, bytes.clone(), &state, &sender).await;
 
         assert!(sent, "a warm peer is sent to");
         let (got, _bob_endpoint, _conn) =

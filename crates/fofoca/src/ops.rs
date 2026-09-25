@@ -7,7 +7,7 @@
 pub use crate::gossip::{
     StateMergeParams, broadcast_msg, broadcast_state_merge, send_app, unicast_farewell,
 };
-pub use crate::transport::{MeshSender, deliver, deliver_if_warm};
+pub use crate::transport::{MeshSender, deliver, deliver_in_background};
 
 /// The CRDT-backed `state` / `meta` channels.
 pub mod doc {
