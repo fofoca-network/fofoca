@@ -1688,6 +1688,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "fofoca-stream"
+version = "0.6.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "fofoca",
+ "n0-future",
+ "rand 0.9.4",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "fofoca-util"
 version = "0.6.0"
 dependencies = [

@@ -140,11 +140,11 @@ pub(crate) const STEPS: &[Step] = &[
         scope: Scope::Crate("fofoca-iroh-webrtc-transport"),
         args: &["--features", "native", "--all-targets"],
     },
-    // Five crates are reachable on wasm32 and between them that is a
+    // Six crates are reachable on wasm32 and between them that is a
     // substantial amount of code nothing else compiles: `fofoca-chunks`'s
     // IndexedDB backend, the whole `web` backend of the WebRTC transport, the
     // portable half of the engine, `fofoca-netplay`'s simulation, and
-    // `fofoca-pipe`'s wire contract.
+    // `fofoca-pipe`'s wire contract, and `fofoca-stream`.
     // Without these rows that code rots silently, and the `#[expect(...)]`
     // attributes inside it are never lint-checked either.
     // `wasm-simd` only changes blake3's codegen, so checking with it on costs
@@ -195,6 +195,13 @@ pub(crate) const STEPS: &[Step] = &[
         scope: Scope::Crate("fofoca-pipe"),
         args: &[],
     },
+    // `fofoca-stream` runs unchanged in a tab, where a producer's accept side
+    // and a consumer's dial both live; the browser package needs it to build.
+    Step {
+        kind: Kind::WasmCheck,
+        scope: Scope::Crate("fofoca-stream"),
+        args: &[],
+    },
     // The browser peer itself — `packages/fofoca-wasm`'s Rust half. wasm32 is
     // the only target it has: the crate is a `cdylib` over wasm-bindgen, so
     // nothing else builds it as the browser will.
@@ -228,6 +235,11 @@ pub(crate) const STEPS: &[Step] = &[
     Step {
         kind: Kind::WasmClippy,
         scope: Scope::Crate("fofoca-pipe"),
+        args: &[],
+    },
+    Step {
+        kind: Kind::WasmClippy,
+        scope: Scope::Crate("fofoca-stream"),
         args: &[],
     },
     Step {
