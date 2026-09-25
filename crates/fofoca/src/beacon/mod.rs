@@ -984,6 +984,7 @@ mod tests {
                 task: n0_future::task::spawn(std::future::pending()),
                 monitor: Some(monitor),
                 endpoint,
+                lane: None,
             };
 
             rendezvous.shed_and_wait().await;
