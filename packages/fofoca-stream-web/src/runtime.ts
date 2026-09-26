@@ -132,7 +132,10 @@ export class StreamRuntime {
           this.#attached = true
         },
         (error: unknown) => {
-          this.#error = String(error)
+          // Our own close ends the wait for a reader; that is not a failure.
+          if (!this.#complete) {
+            this.#error = String(error)
+          }
         },
       )
     } else {
@@ -223,8 +226,15 @@ export class StreamRuntime {
    * With no consumer yet, the stream is abandoned instead.
    */
   async close(): Promise<void> {
-    await this.#producer().close()
+    const sink = this.#producer()
     this.#complete = true
+    try {
+      await sink.close()
+    } catch (error) {
+      this.#complete = false
+      this.#error = String(error)
+      throw error
+    }
   }
 
   /**

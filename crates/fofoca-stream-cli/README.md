@@ -12,7 +12,7 @@ fofoca-stream <hash> > received.txt
 With stdin piped in, the binary creates a stream and prints its hash, and
 `open <url>#<hash>` when `--web-url` is set, to stderr. It waits for the one
 reader, streams stdin to it, and ends the stream at EOF. The reader paces the
-writer, so a slow reader slows the pipe down instead of losing bytes.
+writer, so a slow reader slows the stream down instead of losing bytes.
 
 With a hash as the argument, it reads that stream to stdout and exits at its
 end. A stream has exactly one reader: a second one is refused.

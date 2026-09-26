@@ -6,7 +6,7 @@ rust-version.workspace = true
 description = "The chat example's native half: a terminal chat on the fofoca mesh"
 publish = false
 
-# LAN and DHT lookups for a `--topic` chat, forwarded the way the pipe CLI
+# LAN and DHT lookups for a `--topic` chat, forwarded the way the stream CLI
 # forwards them: they gate engine dependencies, so they are named on `fofoca`.
 [features]
 default = ["mdns", "dht"]

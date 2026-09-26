@@ -47,9 +47,13 @@ export interface FakeSink {
 
 export function fakeSink(hash = 'the-hash'): FakeSink {
   let attach: () => void = () => {}
-  const attached = new Promise<void>((resolve) => {
+  let refuse: (error: Error) => void = () => {}
+  const attached = new Promise<void>((resolve, reject) => {
     attach = resolve
+    refuse = reject
   })
+  // Unobserved until a caller waits on it, like the real handle's promise.
+  attached.catch(() => {})
   const handle: FakeSink = {
     writes: [],
     closes: 0,
@@ -61,8 +65,10 @@ export function fakeSink(hash = 'the-hash'): FakeSink {
         await attached
         handle.writes.push(typeof data === 'string' ? data : new TextDecoder().decode(data))
       },
+      // Like the wasm producer: a close ends any wait for the reader.
       close: async () => {
         handle.closes += 1
+        refuse(new Error('this stream is closed'))
       },
     },
   }

@@ -22,8 +22,8 @@ pub use crate::transport::MAX_DIRECT_PEERS;
 
 /// A direct lane to one peer, without a mesh: the `WebRTC` endpoint, both
 /// halves of the JSEP round, and the gate that holds payload until iroh
-/// selects a non-relay path. The mesh uses the same pieces; the pipe is the
-/// second caller.
+/// selects a non-relay path. The mesh uses the same pieces; `fofoca-stream`
+/// is the second caller.
 pub mod direct {
     pub use crate::lookup::build_peer_webrtc;
     pub use crate::transport::path::{PROBE_DEADLINE, refuse_unless_direct, wait_direct};

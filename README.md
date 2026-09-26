@@ -24,7 +24,8 @@ fofoca-util          host helpers, no deps of consequence   (13 crates resolved)
         ├── fofoca-doc          shared-state CRDT channels
         ├── fofoca-logging      tracing sink + filter
         └── fofoca         the engine, + iroh, iroh-gossip (436 crates)
-              ├── fofoca-pipe                   the byte pipe, tab and terminal
+              ├── fofoca-stream                 1-1 byte streams, tab and terminal
+              │     ├── fofoca-stream-cli       the `fofoca-stream` binary
               │     ├── fofoca-ffi              the C ABI
               │     └── fofoca-wasm             the browser peer (wasm32 only)
               ├── fofoca-netplay                rollback netcode for p2p games

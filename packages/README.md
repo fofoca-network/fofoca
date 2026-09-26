@@ -49,6 +49,28 @@ cannot open a direct path stays unlinked for data. `transport: ['p2p',
 joiners inherit whatever the creator chose. `relayUrls` says *which* relay
 and nothing about its role.
 
+## Byte streams
+
+A mesh carries short text messages. To move bytes from one peer to one other,
+use a stream: it rides a direct path (a WebRTC data channel from a tab), never
+the gossip.
+
+```ts
+import { bindStreams, bindStreamsFor } from 'fofoca-wasm'
+
+const producer = await (await bindStreams({ lookup: ['relay'] })).create()
+share(producer.hash) // whoever holds the hash can read the stream, once
+await producer.write('hello')
+await producer.close()
+
+const reader = await (await bindStreamsFor(hash)).open(hash)
+for await (const chunk of reader) { … }
+```
+
+[`fofoca-stream-web`](fofoca-stream-web) is a page built on this: it reads the
+stream in its URL fragment, or produces one. The `fofoca-stream` binary
+(`crates/fofoca-stream-cli`) is the terminal end.
+
 ## The harness page
 
 `fofoca-wasm` ships a driverless test page: build the wasm

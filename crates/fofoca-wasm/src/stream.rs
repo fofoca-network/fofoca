@@ -78,7 +78,9 @@ impl StreamNode {
     /// # Errors
     /// The node is closed.
     pub async fn create(&self) -> Result<Producer, JsValue> {
-        let producer = self.node()?.create().await;
+        let node = self.node()?;
+        let producer = node.create().await;
+        self.closed_meanwhile(node).await?;
         Ok(Producer {
             hash: producer.hash().encode(),
             end: Mutex::new(Some(producer)),
@@ -93,11 +95,10 @@ impl StreamNode {
     /// `hash` does not decode, the producer cannot be reached, or it refuses.
     pub async fn open(&self, hash: String) -> Result<Reader, JsValue> {
         let hash: StreamHash = hash.parse().map_err(|error| to_js_error(&error))?;
-        let reader = self
-            .node()?
-            .open(&hash)
-            .await
-            .map_err(|error| to_js_error(&format!("{error:#}")))?;
+        let node = self.node()?;
+        let reader = node.open(&hash).await;
+        self.closed_meanwhile(node).await?;
+        let reader = reader.map_err(|error| js(&error))?;
         Ok(Reader {
             end: Mutex::new(Some(reader)),
             closing: watch::channel(false).0,
@@ -108,11 +109,24 @@ impl StreamNode {
     /// Shut the node down; streams still open on it are abandoned.
     pub async fn close(&self) {
         let node = self.node.borrow_mut().take();
-        // Another handle may still hold the node for an `open` in flight; it
-        // then goes down when that open lets go.
+        // A `create` or `open` in flight still holds the node; it finishes
+        // the shutdown when it lets go (`closed_meanwhile`).
         if let Some(node) = node.and_then(|node| Rc::try_unwrap(node).ok()) {
             node.close().await;
         }
+    }
+
+    /// After a call that held `node` across an await: if a `close` came in
+    /// the meantime, shut the node down, as that close could not, and fail
+    /// the call.
+    async fn closed_meanwhile(&self, node: Rc<fofoca_stream::StreamNode>) -> Result<(), JsValue> {
+        if self.node.borrow().is_some() {
+            return Ok(());
+        }
+        if let Ok(node) = Rc::try_unwrap(node) {
+            node.close().await;
+        }
+        Err(to_js_error("this stream node is closed"))
     }
 }
 
@@ -219,10 +233,21 @@ impl Producer {
         let Some(producer) = producer else {
             return Ok(());
         };
-        producer
-            .close_or_abandon()
-            .await
-            .map_err(|error| js(&error))
+        // An abandon that comes while the end drains still abandons: dropping
+        // the close drops the producer, which closes the link `ABANDONED`.
+        or(
+            async {
+                producer
+                    .close_or_abandon()
+                    .await
+                    .map_err(|error| js(&error))
+            },
+            async {
+                reached(&self.ending, Ending::Abandoned).await;
+                Err(to_js_error("this stream was abandoned"))
+            },
+        )
+        .await
     }
 
     /// Give the stream up without ending it: a reader gets an error, not the
@@ -251,15 +276,15 @@ pub struct Reader {
 
 #[wasm_bindgen]
 impl Reader {
-    /// The next bytes, in order; `undefined` at the end of the stream, or
-    /// once this reader is closed.
+    /// The next bytes, in order; `undefined` at the end of the stream.
     ///
     /// # Errors
-    /// The producer refused or abandoned the stream, or the link was lost.
+    /// The producer refused or abandoned the stream, the link was lost, or
+    /// this reader was closed: a reader that gave up did not see the end.
     pub async fn read(&self) -> Result<Option<Vec<u8>>, JsValue> {
         let mut guard = self.end.lock().await;
         let Some(reader) = guard.as_mut() else {
-            return Ok(None);
+            return Err(reader_closed());
         };
         or(
             async {
@@ -271,15 +296,19 @@ impl Reader {
             },
             async {
                 let _ = self.closing.subscribe().wait_for(|closing| *closing).await;
-                Ok(None)
+                Err(reader_closed())
             },
         )
         .await
     }
 
-    /// Give the stream up. A read in flight returns the end.
+    /// Give the stream up. A read in flight fails as closed.
     pub async fn close(&self) {
         self.closing.send_replace(true);
         drop(self.end.lock().await.take());
     }
+}
+
+fn reader_closed() -> JsValue {
+    to_js_error("this reader is closed")
 }

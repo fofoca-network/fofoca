@@ -167,6 +167,15 @@ describe('a producing StreamRuntime', () => {
     expect(runtime.status()).toMatchObject({ attached: true, complete: true, bytes: 2 })
   })
 
+  test('a close with no reader ends the stream without an error', async () => {
+    const runtime = StreamRuntime.producing(fakeSink().sink)
+    await runtime.close()
+    await settle()
+    const status = runtime.status()
+    expect(status.complete).toBe(true)
+    expect(status.error).toBeUndefined()
+  })
+
   test('a producing tab cannot read', async () => {
     const runtime = StreamRuntime.producing(fakeSink().sink)
     await expect(runtime.read({ waitMs: 0 })).rejects.toThrow('consumer reads it')

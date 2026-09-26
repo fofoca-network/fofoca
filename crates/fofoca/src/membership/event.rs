@@ -170,7 +170,7 @@ impl NodeSink for JsonSink {
 
 /// A sink plus the queue it fills.
 ///
-/// Unbounded, unlike the frame queue: dropping a `pipe_data` frame costs one
+/// Unbounded, unlike the frame queue: dropping an app frame costs one
 /// message, where dropping a `left` leaves a phantom peer in the consumer's
 /// mirror forever. Events are small and rare.
 #[must_use]

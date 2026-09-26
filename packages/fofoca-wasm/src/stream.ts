@@ -45,7 +45,7 @@ export interface Producer {
 }
 
 export interface Reader extends AsyncIterable<Uint8Array> {
-  /** The next bytes, or `null` at the end of the stream or once closed. */
+  /** The next bytes, or `null` at the end of the stream. Throws once closed. */
   read(): Promise<Uint8Array | null>
   close(): Promise<void>
 }
