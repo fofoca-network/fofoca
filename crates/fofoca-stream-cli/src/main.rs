@@ -39,26 +39,49 @@ async fn main() -> Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
-    let args = Args::parse();
-    tokio::select! {
-        outcome = run(&args) => outcome,
-        _ = tokio::signal::ctrl_c() => std::process::exit(130),
-    }
+    run(&Args::parse()).await
 }
 
+/// The node outlives the stream work, and is closed after it however it
+/// ended, Ctrl-C included: closing is what gets a dropped stream's
+/// `ABANDONED` to the peer. Exiting straight from the signal lost that race
+/// about one time in five, and the peer then waited out the idle timeout.
 async fn run(args: &Args) -> Result<()> {
-    if let Some(hash) = &args.hash {
-        return read(args, &hash.parse()?).await;
+    let (node, outcome) = if let Some(hash) = &args.hash {
+        let hash: StreamHash = hash.parse()?;
+        let node = StreamNode::bind_for(&hash).await?;
+        let outcome = until_interrupted(read(args, &node, &hash)).await;
+        (node, outcome)
+    } else {
+        if std::io::stdin().is_terminal() {
+            bail!("pipe data in to stream it, or pass a hash to read one");
+        }
+        let node = StreamNode::bind(&args.opts()).await?;
+        let outcome = until_interrupted(produce(args, &node)).await;
+        (node, outcome)
+    };
+    if outcome.is_none() {
+        note(args, "interrupted");
     }
-    if std::io::stdin().is_terminal() {
-        bail!("pipe data in to stream it, or pass a hash to read one");
+    // A second Ctrl-C during the close means leave now, flush or not.
+    tokio::select! {
+        () = node.close() => {}
+        _ = tokio::signal::ctrl_c() => {}
     }
-    produce(args).await
+    outcome.unwrap_or_else(|| std::process::exit(130))
+}
+
+/// `work`'s outcome, or `None` at Ctrl-C. Either way `work` is dropped by the
+/// time this returns.
+async fn until_interrupted(work: impl Future<Output = Result<()>>) -> Option<Result<()>> {
+    tokio::select! {
+        outcome = work => Some(outcome),
+        _ = tokio::signal::ctrl_c() => None,
+    }
 }
 
 /// Read the stream behind `hash` to stdout.
-async fn read(args: &Args, hash: &StreamHash) -> Result<()> {
-    let node = StreamNode::bind_for(hash).await?;
+async fn read(args: &Args, node: &StreamNode, hash: &StreamHash) -> Result<()> {
     let mut reader = node.open(hash).await?;
     note(args, "reading");
     let mut stdout = std::io::stdout().lock();
@@ -68,13 +91,11 @@ async fn read(args: &Args, hash: &StreamHash) -> Result<()> {
     }
     drop(stdout);
     note(args, "end of stream");
-    node.close().await;
     Ok(())
 }
 
 /// Stream stdin to the one reader of a new stream.
-async fn produce(args: &Args) -> Result<()> {
-    let node = StreamNode::bind(&args.opts()).await?;
+async fn produce(args: &Args, node: &StreamNode) -> Result<()> {
     let mut producer = node.create().await;
     report_ready(args, producer.hash());
     producer.attached().await?;
@@ -82,7 +103,6 @@ async fn produce(args: &Args) -> Result<()> {
     pump(&mut producer, spawn_stdin()).await?;
     producer.close().await?;
     note(args, "stream closed");
-    node.close().await;
     Ok(())
 }
 
