@@ -17,7 +17,7 @@
 
 mod args;
 
-use std::io::{IsTerminal as _, Read as _, Write as _};
+use std::io::{IsTerminal as _, Write as _};
 
 use anyhow::{Context as _, Result, bail};
 use clap::Parser as _;
@@ -101,22 +101,27 @@ async fn pump(
 /// the whole input.
 fn spawn_stdin() -> mpsc::Receiver<std::io::Result<Vec<u8>>> {
     let (tx, rx) = mpsc::channel(4);
-    std::thread::spawn(move || {
-        let mut stdin = std::io::stdin().lock();
-        let mut buf = vec![0_u8; CHUNK];
-        loop {
-            let chunk = match stdin.read(&mut buf) {
-                Ok(0) => break,
-                Ok(len) => Ok(buf[..len].to_vec()),
-                Err(error) => Err(error),
-            };
-            let failed = chunk.is_err();
-            if tx.blocking_send(chunk).is_err() || failed {
-                break;
-            }
-        }
-    });
+    std::thread::spawn(move || forward(std::io::stdin().lock(), &tx));
     rx
+}
+
+/// Send `input` down `tx` in chunks until its end, or its first error. An
+/// `Interrupted` read is retried, not sent.
+fn forward(mut input: impl std::io::Read, tx: &mpsc::Sender<std::io::Result<Vec<u8>>>) {
+    let mut buf = vec![0_u8; CHUNK];
+    loop {
+        let chunk = match input.read(&mut buf) {
+            Ok(0) => break,
+            Ok(len) => Ok(buf[..len].to_vec()),
+            // A signal landed mid-read; nothing was lost, so read again.
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => Err(error),
+        };
+        let failed = chunk.is_err();
+        if tx.blocking_send(chunk).is_err() || failed {
+            break;
+        }
+    }
 }
 
 fn report_ready(args: &Args, hash: &StreamHash) {
@@ -142,5 +147,68 @@ fn note(args: &Args, text: &str) {
         eprintln!("{}", serde_json::json!({ "kind": "note", "text": text }));
     } else {
         eprintln!("* {text}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{Error, ErrorKind, Read};
+
+    use tokio::sync::mpsc;
+
+    /// Returns `Interrupted` once, then `data`, then the end.
+    struct InterruptedOnce {
+        interrupted: bool,
+        data: &'static [u8],
+    }
+
+    impl Read for InterruptedOnce {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if !self.interrupted {
+                self.interrupted = true;
+                return Err(Error::from(ErrorKind::Interrupted));
+            }
+            let len = self.data.len().min(buf.len());
+            buf[..len].copy_from_slice(&self.data[..len]);
+            self.data = &self.data[len..];
+            Ok(len)
+        }
+    }
+
+    /// `Interrupted` means "try again" (a signal landed mid-read), not a
+    /// failed input: the stream must carry on, not end in an error.
+    #[test]
+    fn an_interrupted_read_is_retried() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let input = InterruptedOnce {
+            interrupted: false,
+            data: b"after the signal",
+        };
+        std::thread::spawn(move || super::forward(input, &tx));
+        let mut got = Vec::new();
+        while let Some(chunk) = rx.blocking_recv() {
+            got.extend(chunk.expect("an interrupted read is not an error"));
+        }
+        assert_eq!(got, b"after the signal");
+    }
+
+    /// Any other failure is sent once and ends the input: the producer then
+    /// fails, and never closes the stream as if the input had ended.
+    #[test]
+    fn a_failed_read_ends_the_stream_as_an_error() {
+        struct Failing;
+        impl Read for Failing {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(Error::other("the disk went away"))
+            }
+        }
+        let (tx, mut rx) = mpsc::channel(4);
+        std::thread::spawn(move || super::forward(Failing, &tx));
+        let first = rx.blocking_recv().expect("the error is sent");
+        assert_eq!(
+            first.expect_err("a failed read is an error").to_string(),
+            "the disk went away"
+        );
+        assert!(rx.blocking_recv().is_none(), "nothing follows the error");
     }
 }
