@@ -346,7 +346,8 @@ pub struct EventLoopState {
     /// jittered cadence.
     pub(crate) rival_recheck_rounds: u32,
     /// Consecutive due sheds held back because a data-channel peer depends
-    /// on this beacon; see `beacon_arm::defer_shed`. Cleared by a shed.
+    /// on this beacon; see `beacon_arm::defer_shed`. Cleared by a shed and by a
+    /// fresh claim (`beacon_arm::schedule_rival_recheck`).
     pub(crate) rival_recheck_deferrals: u32,
     /// Recently-seen message ids, for duplicate suppression. Gossip
     /// (GRAFT/repair, topology churn, our own re-broadcasts, anti-entropy
