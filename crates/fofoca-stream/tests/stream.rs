@@ -211,6 +211,25 @@ async fn a_producer_dropped_mid_stream_is_an_error_not_an_end() {
     assert_eq!(refusal(&error), Some(Refused::Abandoned), "{error:#}");
 }
 
+/// The consumer's link can reach the producer before anything polls
+/// `attached()`, and then waits in the hand-off. A producer dropped then has
+/// abandoned the stream as surely as one dropped mid-write.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_producer_dropped_with_its_link_unclaimed_abandons_the_stream() {
+    let (producer_node, consumer_node) = (loopback().await, loopback().await);
+    let producer = producer_node.create().await;
+    let hash = producer.hash().clone();
+    let mut reader = consumer_node.open(&hash).await.expect("open");
+    // Past the acceptor's hand-off, without ever calling `attached()`.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    drop(producer);
+    let outcome = tokio::time::timeout(BUDGET, read_all(&mut reader))
+        .await
+        .expect("within budget");
+    let error = outcome.expect_err("an abandoned stream must not read as ended");
+    assert_eq!(refusal(&error), Some(Refused::Abandoned), "{error:#}");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_consumer_that_leaves_fails_the_write_and_spends_the_hash() {
     let (producer_node, consumer_node) = (loopback().await, loopback().await);

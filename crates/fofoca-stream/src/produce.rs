@@ -275,9 +275,17 @@ impl Producer {
 impl Drop for Producer {
     fn drop(&mut self) {
         self.registry.forget(&self.hash.id);
-        if !self.closed
-            && let Some(link) = &self.link
-        {
+        if self.closed {
+            return;
+        }
+        // A link can wait in the hand-off when nothing polled `attached()`.
+        // Dropped there, its send half finishes, and the consumer would read
+        // an empty, cleanly ended stream instead of an abandoned one.
+        let waiting = self
+            .attach
+            .as_mut()
+            .and_then(|attach| attach.try_recv().ok());
+        if let Some(link) = self.link.as_ref().or(waiting.as_ref()) {
             link.conn.close(code::ABANDONED.into(), b"abandoned");
         }
     }
