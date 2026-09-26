@@ -11,7 +11,7 @@
 use std::fmt::Write as _;
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -45,6 +45,9 @@ const CLI_CHUNK: usize = 64 * 1024;
 /// the engine log where it does not.
 struct Cli {
     child: Child,
+    /// The producer's stdin, for [`Input::Open`]: the suite appends to it
+    /// the way a file grows under `tail -f`.
+    stdin: Option<ChildStdin>,
     stdout: mpsc::Receiver<Vec<u8>>,
     stderr_lines: mpsc::Receiver<String>,
     received: Vec<u8>,
@@ -59,11 +62,20 @@ impl Drop for Cli {
     }
 }
 
+/// What the CLI's stdin gets.
+enum Input {
+    /// Nothing: a reader.
+    Nothing,
+    /// These bytes, from a thread, then EOF: a producer reads stdin only once
+    /// its reader attaches, so a write from here would block on the full pipe.
+    Bytes(Vec<u8>),
+    /// A pipe the suite holds open and appends to.
+    Open,
+}
+
 impl Cli {
-    /// Start the CLI with `args`. With `stdin`, those bytes go down its stdin
-    /// from a thread, then EOF: a producer reads stdin only once its reader
-    /// attaches, so a write from here would block on the full pipe.
-    fn spawn(binary: &Path, args: &[&str], stdin: Option<Vec<u8>>) -> Result<Self, Skip> {
+    /// Start the CLI with `args` and `input` on its stdin.
+    fn spawn(binary: &Path, args: &[&str], input: Input) -> Result<Self, Skip> {
         let mut child = Command::new(binary)
             .args(args)
             .arg("--robot")
@@ -71,24 +83,30 @@ impl Cli {
                 "RUST_LOG",
                 std::env::var("RUST_LOG").unwrap_or_else(|_| "fofoca=info".to_owned()),
             )
-            .stdin(if stdin.is_some() {
-                Stdio::piped()
-            } else {
+            .stdin(if matches!(input, Input::Nothing) {
                 Stdio::null()
+            } else {
+                Stdio::piped()
             })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|error| Skip(format!("could not start fofoca-stream: {error}")))?;
-        if let Some(bytes) = stdin {
-            let mut pipe = child
-                .stdin
-                .take()
-                .ok_or_else(|| Skip("fofoca-stream has no stdin pipe".to_owned()))?;
-            std::thread::spawn(move || {
-                let _ = pipe.write_all(&bytes);
-            });
-        }
+        let pipe = child.stdin.take();
+        let stdin = match input {
+            Input::Nothing => None,
+            Input::Bytes(bytes) => {
+                let mut pipe =
+                    pipe.ok_or_else(|| Skip("fofoca-stream has no stdin pipe".to_owned()))?;
+                std::thread::spawn(move || {
+                    let _ = pipe.write_all(&bytes);
+                });
+                None
+            }
+            Input::Open => {
+                Some(pipe.ok_or_else(|| Skip("fofoca-stream has no stdin pipe".to_owned()))?)
+            }
+        };
         let mut stdout = child
             .stdout
             .take()
@@ -115,12 +133,28 @@ impl Cli {
         });
         Ok(Self {
             child,
+            stdin,
             stdout: bytes,
             stderr_lines,
             received: Vec::new(),
             seen: Vec::new(),
             engine_log: String::new(),
         })
+    }
+
+    /// Append to an [`Input::Open`] stdin. A few lines fit the pipe's buffer,
+    /// so this does not block on a producer that has not started reading.
+    fn append(&mut self, bytes: &[u8]) -> Result<(), String> {
+        let stdin = self.stdin.as_mut().ok_or("stdin is not open")?;
+        stdin
+            .write_all(bytes)
+            .and_then(|()| stdin.flush())
+            .map_err(|error| format!("writing to fofoca-stream: {error}"))
+    }
+
+    /// End an [`Input::Open`] stdin: the producer's EOF.
+    fn end_input(&mut self) {
+        self.stdin = None;
     }
 
     fn pump(&mut self) {
@@ -296,6 +330,13 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
         "the stream page \u{2192} fofoca-stream  byte-exact, ended, exited clean",
     );
 
+    output::status("Running", "a growing input, as `tail -f` feeds it");
+    tail_to_page(&cli_binary, relay_url.as_str(), &web_url)?;
+    output::status(
+        "ok",
+        "a growing input, as `tail -f` feeds it  both lines, in order, then the end",
+    );
+
     output::status("Running", "the stream page closes with no reader");
     unread_close(&cli_binary, relay_url.as_str(), &web_url)?;
     output::status(
@@ -320,7 +361,7 @@ fn cli_to_page(binary: &Path, relay_url: &str, web_url: &str) -> Result<(), Fail
             "--web-url",
             web_url,
         ],
-        Some(sent.clone().into_bytes()),
+        Input::Bytes(sent.clone().into_bytes()),
     )
     .map_err(|Skip(reason)| reason)?;
 
@@ -421,7 +462,8 @@ fn page_to_cli(binary: &Path, relay_url: &str, web_url: &str) -> Result<(), Fail
         return Err(format!("the page showed no hash: {}", page_text(&page, "share")).into());
     }
 
-    let mut cli = Cli::spawn(binary, &[hash.as_str()], None).map_err(|Skip(reason)| reason)?;
+    let mut cli =
+        Cli::spawn(binary, &[hash.as_str()], Input::Nothing).map_err(|Skip(reason)| reason)?;
     let attached = wait_for(ATTACH_TIMEOUT, Duration::from_millis(500), || {
         (dataset(&page, "#share", "attached") == "true").then_some(())
     });
@@ -471,6 +513,86 @@ fn page_to_cli(binary: &Path, relay_url: &str, web_url: &str) -> Result<(), Fail
     Ok(())
 }
 
+/// The shape of `examples/tail`: the producer's input grows after the reader
+/// attaches, and what is appended then reaches the reader too.
+fn tail_to_page(binary: &Path, relay_url: &str, web_url: &str) -> Result<(), Failure> {
+    let mut cli = Cli::spawn(
+        binary,
+        &[
+            "--lookup",
+            "relay",
+            "--relay-url",
+            relay_url,
+            "--web-url",
+            web_url,
+        ],
+        Input::Open,
+    )
+    .map_err(|Skip(reason)| reason)?;
+    cli.append(b"before the reader\n")?;
+    let Some(ready) = wait_for(Duration::from_mins(1), Duration::from_millis(250), || {
+        cli.saw_kind("ready")
+    }) else {
+        return fail(&mut cli, None, "the cli never reported its stream");
+    };
+    let hash = ready
+        .get("hash")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let page = match open_page(&format!("{web_url}?log=fofoca=info#{hash}"), "reader") {
+        Ok(page) => page,
+        Err(reason) => return fail(&mut cli, None, &reason),
+    };
+
+    let first = "before the reader\n";
+    if wait_for(PAYLOAD_TIMEOUT, Duration::from_millis(250), || {
+        (view_text(&page, false) == first).then_some(())
+    })
+    .is_none()
+    {
+        return fail(&mut cli, Some(&page), "the first line never arrived");
+    }
+    cli.append(b"after the reader\n")?;
+    let both = "before the reader\nafter the reader\n";
+    if wait_for(PAYLOAD_TIMEOUT, Duration::from_millis(250), || {
+        (view_text(&page, false) == both).then_some(())
+    })
+    .is_none()
+    {
+        let reason = format!(
+            "the appended line never arrived (page holds {:?})",
+            view_text(&page, false)
+        );
+        return fail(&mut cli, Some(&page), &reason);
+    }
+    if view_complete(&page, false) {
+        return fail(
+            &mut cli,
+            Some(&page),
+            "the stream ended while its input was open",
+        );
+    }
+
+    cli.end_input();
+    let ended = wait_for(PAYLOAD_TIMEOUT, Duration::from_millis(250), || {
+        view_complete(&page, false).then_some(())
+    });
+    if ended.is_none() {
+        return fail(
+            &mut cli,
+            Some(&page),
+            "the page never saw the end of stream",
+        );
+    }
+    let exited = wait_for(EXIT_TIMEOUT, Duration::from_millis(250), || cli.exit_code());
+    if exited != Some(0) {
+        let reason = format!("the cli did not exit 0 at the end of input (exit {exited:?})");
+        return fail(&mut cli, Some(&page), &reason);
+    }
+    Ok(())
+}
+
 /// A producer page closes before any reader arrives: the close settles, and
 /// the stream is abandoned, so a reader that comes later is refused.
 fn unread_close(binary: &Path, relay_url: &str, web_url: &str) -> Result<(), Failure> {
@@ -481,7 +603,8 @@ fn unread_close(binary: &Path, relay_url: &str, web_url: &str) -> Result<(), Fai
     let hash = dataset(&page, "#share", "hash");
     call_page(&page, "stream", "close()")?;
 
-    let mut cli = Cli::spawn(binary, &[hash.as_str()], None).map_err(|Skip(reason)| reason)?;
+    let mut cli =
+        Cli::spawn(binary, &[hash.as_str()], Input::Nothing).map_err(|Skip(reason)| reason)?;
     let exited = wait_for(ATTACH_TIMEOUT, Duration::from_millis(250), || {
         cli.exit_code()
     });
