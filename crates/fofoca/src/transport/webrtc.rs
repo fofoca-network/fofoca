@@ -1757,6 +1757,100 @@ mod tests {
         client.close().await;
     }
 
+    /// A relayed connection still open when the session attaches, which is
+    /// what the beacon's accept gate does to a graft for up to its deadline:
+    /// iroh then holds a selected relay path to the remote and consults no
+    /// address lookup for it, so registering the session address in a lookup
+    /// alone left every later bare-id dial on the relay. Observed as a
+    /// browser-first mesh cell that never linked.
+    #[cfg(feature = "iroh-test-utils")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_bare_id_dial_rides_the_session_past_a_held_relay_link() {
+        use iroh::endpoint::Connection;
+        use iroh::protocol::{AcceptError, ProtocolHandler};
+
+        /// Keeps every accepted connection open until the dialer closes it.
+        #[derive(Debug, Clone)]
+        struct Hold;
+        impl ProtocolHandler for Hold {
+            async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
+                conn.closed().await;
+                Ok(())
+            }
+        }
+        const HOLD_ALPN: &[u8] = b"fofoca/test-hold";
+
+        let (relay_url, _relay_server) = crate::lookup::test_relay::spawn_plain()
+            .await
+            .expect("local relay");
+        // No IP on either side, as between a tab and a tab-held beacon: the
+        // relay and the session are the only paths there are.
+        let relay_only = |key: SecretKey, handle: &WebRtcHandle| {
+            let builder = Endpoint::builder(presets::Minimal)
+                .secret_key(key)
+                .relay_mode(RelayMode::custom([relay_url.clone()]))
+                .add_custom_transport(handle.transport())
+                .path_selector(handle.path_selector())
+                .clear_ip_transports();
+            async move { builder.bind().await.expect("bind relay-only endpoint") }
+        };
+        let server_key = SecretKey::generate();
+        let server_hub = WebRtcHandle::new(WebRtcTransport::new(server_key.public()));
+        let server = relay_only(server_key, &server_hub).await;
+        let client_key = SecretKey::generate();
+        let client_hub = WebRtcHandle::new(WebRtcTransport::new(client_key.public()));
+        let client = relay_only(client_key, &client_hub).await;
+
+        let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
+        let router = Router::builder(server.clone())
+            .accept(
+                MESH_WEBRTC_SIGNAL_ALPN,
+                WebRtcSignalAcceptor::new(
+                    server_hub.clone(),
+                    server.clone(),
+                    server.id(),
+                    admission.clone(),
+                    IceProfile { host_only: true },
+                ),
+            )
+            .accept(HOLD_ALPN, Hold)
+            .spawn();
+
+        let relay_addr = EndpointAddr::new(server.id()).with_relay_url(relay_url.clone());
+        let held = client
+            .connect(relay_addr.clone(), HOLD_ALPN)
+            .await
+            .expect("a relayed connection before any session");
+        dial_signal_with(
+            &client,
+            relay_addr,
+            &client_hub,
+            quick(),
+            IceProfile { host_only: true },
+        )
+        .await
+        .expect("the signal round must attach a session");
+
+        let conn = tokio::time::timeout(
+            Duration::from_secs(10),
+            client.connect(EndpointAddr::new(server.id()), HOLD_ALPN),
+        )
+        .await
+        .expect("a bare-id dial must not hang")
+        .expect("a bare-id dial must connect");
+        let direct = super::super::path::wait_direct(&conn, Duration::from_secs(10)).await;
+        conn.close(0u32.into(), b"done");
+        held.close(0u32.into(), b"done");
+        assert!(
+            direct,
+            "a dial after the attach must reach the session, not only the relay"
+        );
+
+        router.shutdown().await.expect("shutdown");
+        client.close().await;
+        server.close().await;
+    }
+
     /// The real join order: the graft is attempted *before* any session
     /// exists — the gate holds the relayed connection for its deadline and
     /// closes it — and only then does the session attach. The re-graft after
