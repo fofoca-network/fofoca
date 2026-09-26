@@ -43,40 +43,70 @@ async fn main() -> Result<()> {
 }
 
 /// The node outlives the stream work, and is closed after it however it
-/// ended, Ctrl-C included: closing is what gets a dropped stream's
+/// ended, a stop signal included: closing is what gets a dropped stream's
 /// `ABANDONED` to the peer. Exiting straight from the signal lost that race
-/// about one time in five, and the peer then waited out the idle timeout.
+/// about one time in five on Ctrl-C and every time on SIGTERM, and the peer
+/// then waited out the idle timeout.
 async fn run(args: &Args) -> Result<()> {
     let (node, outcome) = if let Some(hash) = &args.hash {
         let hash: StreamHash = hash.parse()?;
         let node = StreamNode::bind_for(&hash).await?;
-        let outcome = until_interrupted(read(args, &node, &hash)).await;
+        let outcome = until_stopped(read(args, &node, &hash)).await;
         (node, outcome)
     } else {
         if std::io::stdin().is_terminal() {
             bail!("pipe data in to stream it, or pass a hash to read one");
         }
         let node = StreamNode::bind(&args.opts()).await?;
-        let outcome = until_interrupted(produce(args, &node)).await;
+        let outcome = until_stopped(produce(args, &node)).await;
         (node, outcome)
     };
-    if outcome.is_none() {
-        note(args, "interrupted");
+    if let Err(code) = outcome {
+        note(args, &format!("stopped by a signal (exit {code})"));
     }
-    // A second Ctrl-C during the close means leave now, flush or not.
+    // A second signal during the close means leave now, flush or not.
     tokio::select! {
         () = node.close() => {}
-        _ = tokio::signal::ctrl_c() => {}
+        _ = stop_signal() => {}
     }
-    outcome.unwrap_or_else(|| std::process::exit(130))
+    outcome.unwrap_or_else(|code| std::process::exit(code))
 }
 
-/// `work`'s outcome, or `None` at Ctrl-C. Either way `work` is dropped by the
-/// time this returns.
-async fn until_interrupted(work: impl Future<Output = Result<()>>) -> Option<Result<()>> {
+/// `work`'s outcome, or the exit code of the signal that stopped it. Either
+/// way `work` is dropped by the time this returns.
+async fn until_stopped(work: impl Future<Output = Result<()>>) -> Result<Result<()>, i32> {
     tokio::select! {
-        outcome = work => Some(outcome),
-        _ = tokio::signal::ctrl_c() => None,
+        outcome = work => Ok(outcome),
+        code = stop_signal() => Err(code),
+    }
+}
+
+/// Resolves at Ctrl-C or SIGTERM, with the exit code a shell gives each:
+/// 128 plus the signal number. A handler that cannot be installed never
+/// fires, as the default action then still applies.
+async fn stop_signal() -> i32 {
+    let interrupt = async {
+        match tokio::signal::ctrl_c().await {
+            Ok(()) => 130,
+            Err(_) => std::future::pending().await,
+        }
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        use tokio::signal::unix::{SignalKind, signal};
+        match signal(SignalKind::terminate()) {
+            Ok(mut term) => {
+                term.recv().await;
+                143
+            }
+            Err(_) => std::future::pending().await,
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<i32>();
+    tokio::select! {
+        code = interrupt => code,
+        code = terminate => code,
     }
 }
 
