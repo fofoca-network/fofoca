@@ -5,14 +5,15 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use fofoca::iroh::Endpoint;
+use fofoca::iroh::address_lookup::memory::MemoryLookup;
 use fofoca::iroh::protocol::Router;
 use fofoca::net::direct::{
     IceProfile, MAX_DIRECT_PEERS, MESH_WEBRTC_SIGNAL_ALPN, PROBE_DEADLINE, SignalAdmission,
     WebRtcHandle, WebRtcSignalAcceptor, build_peer_webrtc, dial_signal, pair_needs_lane,
     wait_direct,
 };
-use fofoca::net::{PathFlags, TransportOpts, add_peer_addr};
-use fofoca::protocol::{Lookup, LookupOpts, MeshConfig, RelayLadder, Transport};
+use fofoca::net::{PathFlags, TransportOpts};
+use fofoca::protocol::{Lookup, LookupOpts, MeshConfig, RelayChoice, RelayLadder, Transport};
 use rand::RngCore as _;
 use serde::Deserialize;
 
@@ -21,8 +22,8 @@ use crate::hash::{ID_LEN, SECRET_LEN, StreamHash};
 use crate::produce::{Producer, Registry, StreamAcceptor};
 use crate::read::{Reader, Refused};
 
-/// How long `bind` waits for the endpoint to learn its own addresses, so the
-/// first hash it mints is reachable. Best effort: it never blocks past this.
+/// How long `create` waits for the endpoint to reach its home relay, so the
+/// hash it mints carries it. Best effort: it never blocks past this.
 const ONLINE_WAIT: Duration = Duration::from_secs(5);
 
 /// How a node finds peers and what may carry its bytes — the same three lists
@@ -55,6 +56,10 @@ pub struct StreamNode {
     relay_transport: bool,
     paths: PathFlags,
     ice: IceProfile,
+    /// The producers this node has opened, by address. One lookup for all of
+    /// them, so a node that opens many streams does not grow its address book
+    /// by one lookup service per open.
+    producers: MemoryLookup,
 }
 
 impl StreamNode {
@@ -123,9 +128,8 @@ impl StreamNode {
             );
         }
         let router = router.spawn();
-        if !lookups.is_loopback() {
-            let _ = n0_future::time::timeout(ONLINE_WAIT, endpoint.online()).await;
-        }
+        let producers = MemoryLookup::new();
+        endpoint.address_lookup()?.add(producers.clone());
         Ok(Self {
             endpoint,
             router,
@@ -135,13 +139,22 @@ impl StreamNode {
             relay_transport,
             paths,
             ice,
+            producers,
         })
     }
 
     /// Open a new stream and return its writing end. Hand its
     /// [`hash`](Producer::hash) to the one consumer.
-    #[must_use]
-    pub fn create(&self) -> Producer {
+    ///
+    /// With a relay lookup, it first waits (at most [`ONLINE_WAIT`], once) for
+    /// the endpoint to reach its home relay, so the hash carries it. Here and
+    /// not in `bind`: a node that only reads never pays for it.
+    pub async fn create(&self) -> Producer {
+        // `online` resolves only once a home relay is reached, so without a
+        // relay lookup it would cost the whole wait.
+        if self.lookups.relay_lookup != RelayChoice::Disabled {
+            let _ = n0_future::time::timeout(ONLINE_WAIT, self.endpoint.online()).await;
+        }
         let mut id = [0; ID_LEN];
         let mut secret = [0; SECRET_LEN];
         rand::rng().fill_bytes(&mut id);
@@ -164,12 +177,19 @@ impl StreamNode {
     /// The producer cannot be reached, the only path is a relay the stream
     /// refuses, or the producer refuses the hash (a [`Refused`]).
     pub async fn open(&self, hash: &StreamHash) -> Result<Reader> {
-        add_peer_addr(&self.endpoint, hash.addr.clone())?;
+        let needs_lane = pair_needs_lane(&hash.addr, self.paths.ip);
+        // Only a data channel could carry the bytes, and this node has none:
+        // what is left is the relay the stream refuses, so say so now rather
+        // than after the direct-path probe.
+        if needs_lane && !self.paths.webrtc && !hash.relay_transport {
+            bail!(Refused::RelayRefused);
+        }
+        self.producers.add_endpoint_info(hash.addr.clone());
         // The WebRTC lane first: iroh does not move a live connection onto a
         // transport attached after it, so a browser's connection must start on
         // the data channel.
         if self.paths.webrtc
-            && pair_needs_lane(&hash.addr, self.paths.ip)
+            && needs_lane
             && !self.webrtc.has_session(&hash.addr.id)
             && let Err(error) =
                 dial_signal(&self.endpoint, hash.addr.clone(), &self.webrtc, self.ice).await
@@ -211,4 +231,33 @@ fn relay_ladder(urls: &[String]) -> Result<Option<RelayLadder>> {
         .parse::<RelayLadder>()
         .map(Some)
         .map_err(|error| anyhow::anyhow!("{error}"))
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn opening_many_streams_adds_one_address_lookup() {
+        let producer_node = StreamNode::bind(&StreamOpts::default())
+            .await
+            .expect("bind");
+        let consumer_node = StreamNode::bind(&StreamOpts::default())
+            .await
+            .expect("bind");
+        let lookups = || {
+            consumer_node
+                .endpoint
+                .address_lookup()
+                .expect("an address book")
+                .len()
+        };
+        let before = lookups();
+        for _ in 0..5 {
+            let producer = producer_node.create().await;
+            consumer_node.open(producer.hash()).await.expect("open");
+        }
+        let after = lookups();
+        assert!(after <= before + 1, "{before} lookups grew to {after}");
+    }
 }

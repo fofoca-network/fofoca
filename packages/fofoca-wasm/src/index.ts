@@ -21,6 +21,8 @@ import { loadWasm } from './module.ts'
 export { openWasm } from './backend.ts'
 export { loadWasm } from './module.ts'
 export type { FofocaWasmModule, MeshPeerHandle } from './module.ts'
+export { bindStreams, bindStreamsFor } from './stream.ts'
+export type { Producer, Reader, StreamOpts, Streams } from './stream.ts'
 
 /** Extras every open accepts, beside the mesh selectors. */
 export interface WasmOpts {

@@ -7,8 +7,13 @@
 //! messages, and read/write the shared automerge state document — in-process,
 //! with no daemon and no socket.
 //!
-//! [`mesh`] is the blocking handle over `fofoca::membership`; [`ffi`] is the
-//! thin unsafe shim over it.
+//! It also exposes byte streams: a producer creates one and hands its hash to
+//! one consumer, over a direct QUIC path rather than gossip.
+//!
+//! [`mesh`] is the blocking handle over `fofoca::membership`, [`stream`] the
+//! blocking handles over `fofoca-stream`; [`ffi`] is the thin unsafe shim over
+//! both.
 
 pub mod ffi;
 pub mod mesh;
+pub mod stream;

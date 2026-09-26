@@ -7,9 +7,12 @@ description = "1-1 byte streams between two peers, addressed by a hash: QUIC dir
 readme = "README.md"
 publish = false
 
-# No features, for the reason `fofoca-ffi` spells out: the discovery legs
-# (`mdns` / `dht`) gate engine dependencies, and a consumer that wants them
-# names them on `fofoca` itself, where cargo unifies them onto the one build.
+# No features, on purpose. The discovery legs (`mdns` / `dht`) gate engine
+# dependencies, and which ones a build has is the final binary's decision: the
+# CLI and `fofoca-ffi` forward them to `fofoca` itself, and cargo unifies them
+# onto the one `fofoca` build. A forward here would be a second place to make
+# that choice, and the browser peer, which builds this crate too, can have
+# neither.
 
 [lints]
 workspace = true

@@ -1,9 +1,9 @@
 {
-  "name": "fofoca-pipe-web",
+  "name": "fofoca-stream-web",
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "The fofoca-pipe web app: a tab on the byte pipe, with its runtime exposed as WebMCP tools",
+  "description": "The fofoca-stream web app: one end of a byte stream in a tab, with its runtime exposed as WebMCP tools",
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "bun test",
@@ -11,7 +11,6 @@
     "build": "bun run build.ts"
   },
   "dependencies": {
-    "fofoca-api": "workspace:*",
     "fofoca-wasm": "workspace:*"
   }
 }

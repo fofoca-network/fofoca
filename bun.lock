@@ -40,11 +40,10 @@
         "koffi",
       ],
     },
-    "packages/fofoca-pipe-web": {
-      "name": "fofoca-pipe-web",
+    "packages/fofoca-stream-web": {
+      "name": "fofoca-stream-web",
       "version": "0.0.0",
       "dependencies": {
-        "fofoca-api": "workspace:*",
         "fofoca-wasm": "workspace:*",
       },
     },
@@ -111,7 +110,7 @@
 
     "fofoca-ffi": ["fofoca-ffi@workspace:packages/fofoca-ffi"],
 
-    "fofoca-pipe-web": ["fofoca-pipe-web@workspace:packages/fofoca-pipe-web"],
+    "fofoca-stream-web": ["fofoca-stream-web@workspace:packages/fofoca-stream-web"],
 
     "fofoca-wasm": ["fofoca-wasm@workspace:packages/fofoca-wasm"],
 

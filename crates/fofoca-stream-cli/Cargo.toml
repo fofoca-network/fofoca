@@ -1,13 +1,13 @@
 [package]
-name = "fofoca-pipe-cli"
+name = "fofoca-stream-cli"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "`fofoca-pipe`: stdin to a gossip mesh, the mesh to stdout"
+description = "`fofoca-stream`: stdin to one reader over a direct path, or a stream's bytes to stdout"
 readme = "README.md"
 publish = false
 
-# A sibling of `fofoca-pipe` rather than a `[[bin]]` inside it: the wasm gate
+# A sibling of `fofoca-stream` rather than a `[[bin]]` inside it: the wasm gate
 # builds that crate for wasm32, and a binary needs the tokio runtime that
 # cannot go there. Same shape as `fofoca-ffi`, the other host-only consumer.
 
@@ -20,13 +20,13 @@ dht = ["fofoca/dht"]
 workspace = true
 
 [[bin]]
-name = "fofoca-pipe"
+name = "fofoca-stream"
 path = "src/main.rs"
 
 [dependencies]
 fofoca = { path = "../fofoca", default-features = false }
-fofoca-pipe = { path = "../fofoca-pipe" }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time"] }
+fofoca-stream = { path = "../fofoca-stream" }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal"] }
 anyhow.workspace = true
 clap = { workspace = true, features = ["env"] }
 serde_json.workspace = true

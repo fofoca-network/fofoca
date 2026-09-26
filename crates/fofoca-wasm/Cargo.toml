@@ -25,11 +25,15 @@ anyhow.workspace = true
 # `--no-default-features`: the portable half only — no `host`, no IPC
 # listener, no state file, nothing a browser has no equivalent of.
 fofoca = { path = "../fofoca", default-features = false }
+# The byte streams behind the `StreamNode` class.
+fofoca-stream = { path = "../fofoca-stream" }
 serde_json.workspace = true
 # Deliberately not the workspace entry: that one turns on `net`, which drags
 # `mio`, which refuses to build for wasm32. `sync` alone is the plain
 # channel/mutex data structures — no runtime, no `tokio::spawn`.
 tokio = { version = "1", default-features = false, features = ["sync"] }
+# `future::or`: a stream handle's waits race its close.
+n0-future.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 

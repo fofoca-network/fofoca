@@ -64,6 +64,18 @@ impl Registry {
         self.entries().remove(id);
     }
 
+    /// Forget `id` unless a consumer has claimed it; `true` when forgotten.
+    /// Under the lock [`claim`](Self::claim) takes, so a consumer that has
+    /// presented the secret cannot be dropped between its claim and its link.
+    fn forget_unless_claimed(&self, id: &[u8; ID_LEN]) -> bool {
+        let mut entries = self.entries();
+        if entries.get(id).is_some_and(|entry| entry.waiting.is_none()) {
+            return false;
+        }
+        entries.remove(id);
+        true
+    }
+
     /// Everything open is abandoned: every waiting producer's `attached` ends.
     pub(crate) fn clear(&self) {
         self.entries().clear();
@@ -242,6 +254,21 @@ impl Producer {
         link.conn.close(code::DONE.into(), b"done");
         self.closed = true;
         Ok(())
+    }
+}
+
+impl Producer {
+    /// End the stream if a consumer has claimed it, as [`close`](Self::close)
+    /// does; otherwise abandon it at once instead of waiting for one. A
+    /// consumer that arrives later is refused as unknown.
+    ///
+    /// # Errors
+    /// As [`close`](Self::close), once a consumer has claimed the stream.
+    pub async fn close_or_abandon(self) -> Result<()> {
+        if self.link.is_none() && self.registry.forget_unless_claimed(&self.hash.id) {
+            return Ok(());
+        }
+        self.close().await
     }
 }
 

@@ -41,9 +41,13 @@ describe('the signature table and the header', () => {
 describe('the shape of each signature', () => {
   test('every handle-taking call takes the handle first', () => {
     const standalone = new Set(['fofoca_last_error', 'fofoca_version', 'fofoca_max_msg'])
+    // Opens a node from a hash alone: there is no handle yet to pass.
+    const fromHash = new Set(['fofoca_streams_bind_for'])
     for (const [name, signature] of Object.entries(ABI)) {
       if (standalone.has(name)) {
         expect(signature.args).toEqual([])
+      } else if (fromHash.has(name)) {
+        expect(signature.args).toEqual(['cstr'])
       } else {
         expect(signature.args[0]).toBe('ptr')
       }

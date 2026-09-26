@@ -75,7 +75,7 @@ jobs:
       # that is a substantial amount of code no other job compiles:
       # `fofoca-chunks`'s IndexedDB backend, the whole `web` backend of the
       # WebRTC transport, the portable half of the engine, `fofoca-netplay`'s
-      # simulation, `fofoca-pipe`'s wire contract, and `fofoca-wasm`, the
+      # simulation, `fofoca-stream`'s byte streams, and `fofoca-wasm`, the
       # browser peer, which has no other target at all. Without these steps
       # that code rots silently, and the `#[expect(...)]` attributes inside it
       # are never lint-checked either.
@@ -109,12 +109,6 @@ jobs:
           # between a browser and a terminal only works if both run a
           # bit-identical simulation.
           cargo check --target wasm32-unknown-unknown -p fofoca-netplay --no-default-features
-          # fofoca-pipe is the wire contract a browser tab and a terminal
-          # share. If it stops compiling here the browser package cannot be
-          # built at all, and that package is its own cargo workspace — so
-          # this is the only place the breakage is caught from inside the
-          # workspace.
-          cargo check --target wasm32-unknown-unknown -p fofoca-pipe
           # fofoca-stream runs unchanged in a tab: both the producer's accept
           # side and the consumer's dial.
           cargo check --target wasm32-unknown-unknown -p fofoca-stream
@@ -127,7 +121,6 @@ jobs:
           cargo clippy --target wasm32-unknown-unknown -p fofoca-iroh-webrtc-transport --features web -- -D warnings
           cargo clippy --target wasm32-unknown-unknown -p fofoca --no-default-features -- -D warnings
           cargo clippy --target wasm32-unknown-unknown -p fofoca-netplay --no-default-features -- -D warnings
-          cargo clippy --target wasm32-unknown-unknown -p fofoca-pipe -- -D warnings
           cargo clippy --target wasm32-unknown-unknown -p fofoca-stream -- -D warnings
           cargo clippy --target wasm32-unknown-unknown -p fofoca-wasm -- -D warnings
 

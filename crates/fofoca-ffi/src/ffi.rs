@@ -19,6 +19,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use crate::mesh::{Inbound, MAX_MSG, Mesh, Opts};
+use crate::stream::{Read, ReadEnd, Streams, Writer};
 
 /// Capacity of [`FofocaMsg::nick`], including the NUL. A minted nickname is two
 /// short words; a longer chosen one is truncated to 63 bytes.
@@ -587,6 +588,345 @@ pub unsafe extern "C" fn fofoca_mesh_close(handle: *mut FofocaMesh) -> c_int {
         let mut owned = unsafe { Box::from_raw(handle) };
         report(owned.mesh.close())
     })
+}
+
+/// How a stream node reaches peers, mirroring `fofoca_stream_opts` in the
+/// header: the same three lists and two switches `fofoca_opts` carries, without
+/// the mesh selectors a stream has no use for.
+#[repr(C)]
+#[derive(Debug)]
+pub struct FofocaStreamOpts {
+    pub lookup: *const c_char,
+    pub transport: *const c_char,
+    pub relay_urls: *const c_char,
+    pub disable_ip: c_int,
+    pub disable_webrtc: c_int,
+}
+
+/// Pinned like `FofocaOpts`: a reordered field would silently misread a
+/// caller's struct.
+const _: () = {
+    use std::mem::{align_of, offset_of, size_of};
+
+    assert!(size_of::<FofocaStreamOpts>() == 32);
+    assert!(align_of::<FofocaStreamOpts>() == 8);
+    assert!(offset_of!(FofocaStreamOpts, lookup) == 0);
+    assert!(offset_of!(FofocaStreamOpts, transport) == 8);
+    assert!(offset_of!(FofocaStreamOpts, relay_urls) == 16);
+    assert!(offset_of!(FofocaStreamOpts, disable_ip) == 24);
+    assert!(offset_of!(FofocaStreamOpts, disable_webrtc) == 28);
+};
+
+/// The opaque handle behind `fofoca_streams *`.
+#[expect(
+    missing_debug_implementations,
+    reason = "wraps Streams, which owns a tokio Runtime and so has no Debug impl"
+)]
+pub struct FofocaStreams {
+    streams: Streams,
+}
+
+/// The opaque handle behind `fofoca_producer *`, with a NUL-terminated copy of
+/// the hash so [`fofoca_stream_hash`] can lend it out.
+#[expect(
+    missing_debug_implementations,
+    reason = "wraps Writer, which holds a tokio Runtime and so has no Debug impl"
+)]
+pub struct FofocaProducer {
+    writer: Writer,
+    hash: CString,
+}
+
+/// The opaque handle behind `fofoca_reader *`.
+#[expect(
+    missing_debug_implementations,
+    reason = "wraps ReadEnd, which holds a tokio Runtime and so has no Debug impl"
+)]
+pub struct FofocaReader {
+    reader: ReadEnd,
+}
+
+fn timeout_of(timeout_ms: c_int) -> Duration {
+    Duration::from_millis(u64::try_from(timeout_ms.max(0)).unwrap_or(0))
+}
+
+/// Stand up a stream node, or NULL on failure.
+///
+/// # Safety
+/// `opts` must point to a readable [`FofocaStreamOpts`] whose string fields are
+/// NULL or NUL-terminated. Release the node with [`fofoca_streams_close`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fofoca_streams_bind(opts: *const FofocaStreamOpts) -> *mut FofocaStreams {
+    guard(std::ptr::null_mut(), || {
+        clear_error();
+        if opts.is_null() {
+            set_error("fofoca_streams_bind: opts is NULL");
+            return std::ptr::null_mut();
+        }
+        // SAFETY: non-NULL and readable per the contract above.
+        let opts = unsafe { &*opts };
+        // SAFETY: NUL-terminated or NULL, per the header contract.
+        let lists = unsafe {
+            (
+                optional_str(opts.lookup),
+                optional_str(opts.transport),
+                optional_str(opts.relay_urls),
+            )
+        };
+        let (Ok(lookup), Ok(transport), Ok(relay_urls)) = lists else {
+            return std::ptr::null_mut();
+        };
+        let (Ok(lookup), Ok(transport)) = (comma_list(lookup), comma_list(transport)) else {
+            return std::ptr::null_mut();
+        };
+        let parsed = fofoca_stream::StreamOpts {
+            lookup,
+            transport,
+            relay_urls: relay_urls
+                .map(|urls| urls.split(',').map(|url| url.trim().to_owned()).collect())
+                .unwrap_or_default(),
+            paths: fofoca::net::PathFlags {
+                ip: opts.disable_ip == 0,
+                webrtc: opts.disable_webrtc == 0,
+            },
+        };
+        boxed(Streams::bind(&parsed).map(|streams| FofocaStreams { streams }))
+    })
+}
+
+/// Stand up a stream node that can reach the producer of `hash`: the hash's
+/// own lookups and relay policy. NULL on failure.
+///
+/// # Safety
+/// `hash` must be NUL-terminated. Release the node with [`fofoca_streams_close`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fofoca_streams_bind_for(hash: *const c_char) -> *mut FofocaStreams {
+    guard(std::ptr::null_mut(), || {
+        clear_error();
+        // SAFETY: NUL-terminated or NULL, per the contract above.
+        let Ok(Some(hash)) = (unsafe { optional_str(hash) }) else {
+            set_error("fofoca_streams_bind_for: hash is NULL or not UTF-8");
+            return std::ptr::null_mut();
+        };
+        boxed(Streams::bind_for(hash).map(|streams| FofocaStreams { streams }))
+    })
+}
+
+/// Shut a stream node down and free it. Its producers and readers stay valid
+/// handles, but their streams are abandoned. NULL is a no-op; returns 0.
+///
+/// # Safety
+/// `handle` must come from a `fofoca_streams_bind*` call (or be NULL) and must
+/// not be used after this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fofoca_streams_close(handle: *mut FofocaStreams) -> c_int {
+    guard(-1, || {
+        clear_error();
+        if handle.is_null() {
+            return 0;
+        }
+        // SAFETY: from `Box::into_raw` in a bind call, and not used again.
+        let mut owned = unsafe { Box::from_raw(handle) };
+        owned.streams.close();
+        0
+    })
+}
+
+/// Open a new stream for one consumer. With a relay lookup it blocks (at most
+/// 5 s, once) until the node reaches its home relay, so the hash carries it.
+/// NULL on failure. Release it with [`fofoca_stream_close`].
+///
+/// # Safety
+/// `handle` must be a live stream node, or NULL.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fofoca_stream_create(handle: *mut FofocaStreams) -> *mut FofocaProducer {
+    guard(std::ptr::null_mut(), || {
+        clear_error();
+        // SAFETY: live handle or NULL, per the contract above.
+        let Some(handle) = (unsafe { handle.as_ref() }) else {
+            set_error("fofoca_stream_create: handle is NULL");
+            return std::ptr::null_mut();
+        };
+        boxed(handle.streams.create().map(|writer| FofocaProducer {
+            hash: CString::new(writer.hash()).unwrap_or_default(),
+            writer,
+        }))
+    })
+}
+
+/// The hash a consumer opens this stream with, borrowed for the producer's
+/// lifetime.
+///
+/// # Safety
+/// `handle` must be a live producer, or NULL.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fofoca_stream_hash(handle: *const FofocaProducer) -> *const c_char {
+    guard(std::ptr::null(), || {
+        // SAFETY: live handle or NULL, per the contract above.
+        match unsafe { handle.as_ref() } {
+            Some(handle) => handle.hash.as_ptr(),
+            None => std::ptr::null(),
+        }
+    })
+}
+
+/// Write all `len` bytes. Returns 1 once written, 0 when no consumer attached
+/// within `timeout_ms` (nothing was written), or -1 on failure. Once a consumer
+/// has attached, the write runs to the end, paced by the consumer.
+///
+/// # Safety
+/// `handle` must be a live producer; `buf` readable for `len` bytes (NULL when
+/// `len` is 0).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fofoca_stream_write(
+    handle: *mut FofocaProducer,
+    buf: *const u8,
+    len: usize,
+    timeout_ms: c_int,
+) -> c_int {
+    guard(-1, || {
+        clear_error();
+        // SAFETY: live, exclusively-owned handle per the contract above.
+        let Some(handle) = (unsafe { handle.as_mut() }) else {
+            set_error("fofoca_stream_write: handle is NULL");
+            return -1;
+        };
+        if len > 0 && buf.is_null() {
+            set_error("fofoca_stream_write: buf is NULL with a non-zero len");
+            return -1;
+        }
+        let bytes = if len == 0 {
+            &[][..]
+        } else {
+            // SAFETY: readable for `len` bytes per the contract above.
+            unsafe { std::slice::from_raw_parts(buf, len) }
+        };
+        match handle.writer.write(bytes, timeout_of(timeout_ms)) {
+            Ok(true) => 1,
+            Ok(false) => 0,
+            Err(error) => {
+                set_error(&format!("{error:#}"));
+                -1
+            }
+        }
+    })
+}
+
+/// End the stream and free the producer. With a consumer attached, it reads
+/// everything written and then the end of stream; with none, the stream is
+/// abandoned. The producer is freed even on -1. NULL is a no-op.
+///
+/// # Safety
+/// `handle` must be a live producer (or NULL) and must not be used after.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fofoca_stream_close(handle: *mut FofocaProducer) -> c_int {
+    guard(-1, || {
+        clear_error();
+        if handle.is_null() {
+            return 0;
+        }
+        // SAFETY: from `Box::into_raw` in `fofoca_stream_create`, not used again.
+        let mut owned = unsafe { Box::from_raw(handle) };
+        report(owned.writer.close())
+    })
+}
+
+/// Take the consumer slot of the stream behind `hash`. NULL on failure: the
+/// producer cannot be reached, or refuses the hash. Release the reader with
+/// [`fofoca_reader_close`].
+///
+/// # Safety
+/// `handle` must be a live stream node; `hash` NUL-terminated.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fofoca_stream_open(
+    handle: *mut FofocaStreams,
+    hash: *const c_char,
+) -> *mut FofocaReader {
+    guard(std::ptr::null_mut(), || {
+        clear_error();
+        // SAFETY: live handle or NULL, per the contract above.
+        let Some(handle) = (unsafe { handle.as_ref() }) else {
+            set_error("fofoca_stream_open: handle is NULL");
+            return std::ptr::null_mut();
+        };
+        // SAFETY: NUL-terminated or NULL, per the contract above.
+        let Ok(Some(hash)) = (unsafe { optional_str(hash) }) else {
+            set_error("fofoca_stream_open: hash is NULL or not UTF-8");
+            return std::ptr::null_mut();
+        };
+        boxed(
+            handle
+                .streams
+                .open(hash)
+                .map(|reader| FofocaReader { reader }),
+        )
+    })
+}
+
+/// Read the next bytes into `buf`, waiting up to `timeout_ms`. Returns how many
+/// bytes were written (> 0), 0 on timeout, -1 on failure (the producer refused
+/// or abandoned the stream, or the link was lost), or -2 at the end of the
+/// stream. Bytes that do not fit in `cap` wait for the next call.
+///
+/// # Safety
+/// `handle` must be a live reader; `buf` writable for `cap` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fofoca_stream_read(
+    handle: *mut FofocaReader,
+    buf: *mut u8,
+    cap: usize,
+    timeout_ms: c_int,
+) -> c_long {
+    guard(-1, || {
+        clear_error();
+        // SAFETY: live, exclusively-owned handle per the contract above.
+        let Some(handle) = (unsafe { handle.as_mut() }) else {
+            set_error("fofoca_stream_read: handle is NULL");
+            return -1;
+        };
+        if buf.is_null() || cap == 0 {
+            set_error("fofoca_stream_read: buf is NULL or cap is 0");
+            return -1;
+        }
+        // SAFETY: writable for `cap` bytes per the contract above.
+        let buf = unsafe { std::slice::from_raw_parts_mut(buf, cap) };
+        match handle.reader.read(buf, timeout_of(timeout_ms)) {
+            Ok(Read::Bytes(read)) => c_long::try_from(read).unwrap_or(c_long::MAX),
+            Ok(Read::Timeout) => 0,
+            Ok(Read::End) => -2,
+            Err(error) => {
+                set_error(&format!("{error:#}"));
+                -1
+            }
+        }
+    })
+}
+
+/// Free a reader, giving up the stream. NULL is a no-op; returns 0.
+///
+/// # Safety
+/// `handle` must be a live reader (or NULL) and must not be used after.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fofoca_reader_close(handle: *mut FofocaReader) -> c_int {
+    guard(-1, || {
+        clear_error();
+        if !handle.is_null() {
+            // SAFETY: from `Box::into_raw` in `fofoca_stream_open`, not used again.
+            drop(unsafe { Box::from_raw(handle) });
+        }
+        0
+    })
+}
+
+/// Box a handle for the caller, or record the error and return NULL.
+fn boxed<T>(made: anyhow::Result<T>) -> *mut T {
+    match made {
+        Ok(value) => Box::into_raw(Box::new(value)),
+        Err(error) => {
+            set_error(&format!("{error:#}"));
+            std::ptr::null_mut()
+        }
+    }
 }
 
 /// The reason for the most recent failure on this thread, or NULL if the last

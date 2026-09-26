@@ -9,6 +9,8 @@
 //! call per queue: the receivers are behind async mutexes, so a second
 //! concurrent `nextMsg()` waits rather than panics.
 
+mod stream;
+
 use std::cell::RefCell;
 
 use fofoca::membership::{Inbound, MAX_MSG, MembershipApp, Opts, Request, json_sink};
@@ -215,7 +217,7 @@ fn msg_json(msg: &Inbound) -> String {
     .to_string()
 }
 
-fn to_js_error(message: &(impl std::fmt::Display + ?Sized)) -> JsValue {
+pub(crate) fn to_js_error(message: &(impl std::fmt::Display + ?Sized)) -> JsValue {
     JsValue::from_str(&message.to_string())
 }
 

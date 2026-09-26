@@ -1546,7 +1546,10 @@ name = "fofoca-ffi"
 version = "0.6.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "fofoca",
+ "fofoca-stream",
+ "n0-future",
  "serde_json",
  "tokio",
 ]
@@ -1634,33 +1637,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fofoca-pipe"
-version = "0.6.0"
-dependencies = [
- "anyhow",
- "base64",
- "fofoca",
- "n0-future",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "fofoca-pipe-cli"
-version = "0.6.0"
-dependencies = [
- "anyhow",
- "clap",
- "fofoca",
- "fofoca-pipe",
- "serde_json",
- "tokio",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "fofoca-protocol"
 version = "0.6.0"
 dependencies = [
@@ -1702,6 +1678,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "fofoca-stream-cli"
+version = "0.6.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "fofoca",
+ "fofoca-stream",
+ "serde_json",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "fofoca-util"
 version = "0.6.0"
 dependencies = [
@@ -1719,6 +1708,8 @@ dependencies = [
  "anyhow",
  "console_error_panic_hook",
  "fofoca",
+ "fofoca-stream",
+ "n0-future",
  "serde_json",
  "tokio",
  "tracing",

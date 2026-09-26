@@ -49,7 +49,7 @@ fn payload(len: usize) -> Vec<u8> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ten_megabytes_arrive_complete_and_in_order() {
     let (producer_node, consumer_node) = (loopback().await, loopback().await);
-    let producer = producer_node.create();
+    let producer = producer_node.create().await;
     let hash = producer.hash().clone();
     let sent = payload(10 * 1024 * 1024);
     let writer = tokio::spawn(produce(producer, sent.clone(), 64 * 1024));
@@ -72,7 +72,7 @@ async fn ten_megabytes_arrive_complete_and_in_order() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_empty_stream_reaches_the_end() {
     let (producer_node, consumer_node) = (loopback().await, loopback().await);
-    let producer = producer_node.create();
+    let producer = producer_node.create().await;
     let hash = producer.hash().clone();
     let closer = tokio::spawn(producer.close());
     let mut reader = consumer_node.open(&hash).await.expect("open");
@@ -81,9 +81,26 @@ async fn an_empty_stream_reaches_the_end() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_read_after_the_end_is_the_end_again() {
+    let (producer_node, consumer_node) = (loopback().await, loopback().await);
+    let producer = producer_node.create().await;
+    let hash = producer.hash().clone();
+    let writer = tokio::spawn(produce(producer, b"once".to_vec(), 64));
+    let mut reader = consumer_node.open(&hash).await.expect("open");
+    assert_eq!(read_all(&mut reader).await.expect("read"), b"once");
+    writer.await.expect("writer");
+    // Past the reader's own `DONE` close, which the first end triggered.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        reader.read().await.expect("a read after the end").is_none(),
+        "the end of stream must repeat"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_second_consumer_is_refused_as_taken() {
     let (producer_node, consumer_node) = (loopback().await, loopback().await);
-    let mut producer = producer_node.create();
+    let mut producer = producer_node.create().await;
     let hash = producer.hash().clone();
     let _first = consumer_node.open(&hash).await.expect("first open");
     producer
@@ -99,7 +116,7 @@ async fn a_second_consumer_is_refused_as_taken() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn two_racing_consumers_admit_exactly_one() {
     let (producer_node, consumer_node) = (loopback().await, loopback().await);
-    let mut producer = producer_node.create();
+    let mut producer = producer_node.create().await;
     let hash = producer.hash().clone();
 
     let (left, right) = tokio::join!(consumer_node.open(&hash), consumer_node.open(&hash));
@@ -120,7 +137,7 @@ async fn two_racing_consumers_admit_exactly_one() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_wrong_secret_reads_nothing() {
     let (producer_node, consumer_node) = (loopback().await, loopback().await);
-    let producer = producer_node.create();
+    let producer = producer_node.create().await;
     let mut forged: StreamHash = producer.hash().clone();
     forged.secret[0] ^= 1;
     let mut reader = consumer_node.open(&forged).await.expect("open");
@@ -132,7 +149,7 @@ async fn a_wrong_secret_reads_nothing() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_closed_stream_is_spent() {
     let (producer_node, consumer_node) = (loopback().await, loopback().await);
-    let producer = producer_node.create();
+    let producer = producer_node.create().await;
     let hash = producer.hash().clone();
     let writer = tokio::spawn(produce(producer, b"once".to_vec(), 64));
     let mut reader = consumer_node.open(&hash).await.expect("open");
@@ -145,9 +162,34 @@ async fn a_closed_stream_is_spent() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn close_or_abandon_with_no_consumer_abandons_at_once() {
+    let (producer_node, consumer_node) = (loopback().await, loopback().await);
+    let producer = producer_node.create().await;
+    let hash = producer.hash().clone();
+    tokio::time::timeout(Duration::from_secs(1), producer.close_or_abandon())
+        .await
+        .expect("no wait for a consumer")
+        .expect("abandoned");
+    let mut reader = consumer_node.open(&hash).await.expect("open");
+    let error = read_all(&mut reader).await.expect_err("abandoned stream");
+    assert_eq!(refusal(&error), Some(Refused::Unknown), "{error:#}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn close_or_abandon_with_a_consumer_ends_the_stream() {
+    let (producer_node, consumer_node) = (loopback().await, loopback().await);
+    let mut producer = producer_node.create().await;
+    let hash = producer.hash().clone();
+    let mut reader = consumer_node.open(&hash).await.expect("open");
+    producer.write(b"kept").await.expect("write");
+    producer.close_or_abandon().await.expect("closed");
+    assert_eq!(read_all(&mut reader).await.expect("read"), b"kept");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_dropped_producer_refuses_later_consumers() {
     let (producer_node, consumer_node) = (loopback().await, loopback().await);
-    let producer = producer_node.create();
+    let producer = producer_node.create().await;
     let hash = producer.hash().clone();
     drop(producer);
     let mut reader = consumer_node.open(&hash).await.expect("open");
@@ -158,7 +200,7 @@ async fn a_dropped_producer_refuses_later_consumers() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_producer_dropped_mid_stream_is_an_error_not_an_end() {
     let (producer_node, consumer_node) = (loopback().await, loopback().await);
-    let mut producer = producer_node.create();
+    let mut producer = producer_node.create().await;
     let hash = producer.hash().clone();
     let mut reader = consumer_node.open(&hash).await.expect("open");
     producer.write(b"half").await.expect("write");
@@ -172,7 +214,7 @@ async fn a_producer_dropped_mid_stream_is_an_error_not_an_end() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_consumer_that_leaves_fails_the_write_and_spends_the_hash() {
     let (producer_node, consumer_node) = (loopback().await, loopback().await);
-    let mut producer = producer_node.create();
+    let mut producer = producer_node.create().await;
     let hash = producer.hash().clone();
     let reader = consumer_node.open(&hash).await.expect("open");
     producer.attached().await.expect("attached");
@@ -200,7 +242,7 @@ async fn a_consumer_that_leaves_fails_the_write_and_spends_the_hash() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn two_streams_on_one_node_stay_apart() {
     let (producer_node, consumer_node) = (loopback().await, loopback().await);
-    let (first, second) = (producer_node.create(), producer_node.create());
+    let (first, second) = (producer_node.create().await, producer_node.create().await);
     let (first_hash, second_hash) = (first.hash().clone(), second.hash().clone());
     let writers = (
         tokio::spawn(produce(first, payload(300_000), 4096)),
@@ -241,7 +283,7 @@ async fn a_relay_transport_stream_admits_a_relay_only_consumer() {
         webrtc: false,
     };
     let consumer_node = on_relay(&url, both, relay_only).await;
-    let producer = producer_node.create();
+    let producer = producer_node.create().await;
     assert!(producer.hash().relay_transport);
     let hash = producer.hash().clone();
     let writer = tokio::spawn(produce(producer, b"over the relay".to_vec(), 64));
@@ -268,7 +310,7 @@ async fn a_webrtc_only_consumer_reads_over_the_data_channel() {
         webrtc: true,
     };
     let consumer_node = on_relay(&url, vec![Transport::P2p], webrtc_only).await;
-    let producer = producer_node.create();
+    let producer = producer_node.create().await;
     assert!(!producer.hash().relay_transport);
     let hash = producer.hash().clone();
     let sent = payload(1024 * 1024);
@@ -283,4 +325,47 @@ async fn a_webrtc_only_consumer_reads_over_the_data_channel() {
         .expect("read");
     assert!(got == sent, "bytes differ");
     writer.await.expect("writer");
+}
+
+/// The producer has no IP path, the relay may not carry the bytes, and the
+/// consumer has WebRTC off: no lane can exist, so the open fails at once
+/// rather than after the direct-path probe.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_consumer_with_no_lane_to_a_webrtc_only_producer_fails_fast() {
+    let (url, _relay) = test_relay::spawn_plain().await.expect("relay");
+    let url = url.to_string();
+    let webrtc_only = PathFlags {
+        ip: false,
+        webrtc: true,
+    };
+    let producer_node = on_relay(&url, vec![Transport::P2p], webrtc_only).await;
+    let no_webrtc = PathFlags {
+        ip: true,
+        webrtc: false,
+    };
+    let consumer_node = on_relay(&url, vec![Transport::P2p], no_webrtc).await;
+    let producer = producer_node.create().await;
+    let hash = producer.hash().clone();
+    let started = Instant::now();
+    let error = consumer_node.open(&hash).await.expect_err("no lane");
+    let elapsed = started.elapsed();
+    assert_eq!(refusal(&error), Some(Refused::RelayRefused), "{error:#}");
+    assert!(elapsed < Duration::from_secs(2), "took {elapsed:?}");
+}
+
+/// A node made to read a hash can produce as well, and the hash it mints must
+/// carry its home relay like one from `bind` does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hash_minted_by_a_bind_for_node_carries_its_relay() {
+    let (url, _relay) = test_relay::spawn_plain().await.expect("relay");
+    let url = url.to_string();
+    let first = on_relay(&url, vec![Transport::P2p], PathFlags::default()).await;
+    let given = first.create().await.hash().clone();
+    let node = StreamNode::bind_for(&given).await.expect("bind for");
+    let minted = node.create().await.hash().clone();
+    assert!(
+        minted.addr.relay_urls().next().is_some(),
+        "no relay in {:?}",
+        minted.addr
+    );
 }

@@ -13,10 +13,13 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use fofoca_ffi::ffi::{
-    FofocaMesh, FofocaMsg, FofocaOpts, fofoca_last_error, fofoca_max_msg, fofoca_mesh_close,
-    fofoca_mesh_id, fofoca_mesh_name, fofoca_mesh_nickname, fofoca_mesh_open,
-    fofoca_mesh_peer_count, fofoca_mesh_peers_json, fofoca_mesh_state_json,
-    fofoca_mesh_state_merge, fofoca_msg_recv, fofoca_msg_send, fofoca_version,
+    FofocaMesh, FofocaMsg, FofocaOpts, FofocaProducer, FofocaStreamOpts, FofocaStreams,
+    fofoca_last_error, fofoca_max_msg, fofoca_mesh_close, fofoca_mesh_id, fofoca_mesh_name,
+    fofoca_mesh_nickname, fofoca_mesh_open, fofoca_mesh_peer_count, fofoca_mesh_peers_json,
+    fofoca_mesh_state_json, fofoca_mesh_state_merge, fofoca_msg_recv, fofoca_msg_send,
+    fofoca_reader_close, fofoca_stream_close, fofoca_stream_create, fofoca_stream_hash,
+    fofoca_stream_open, fofoca_stream_read, fofoca_stream_write, fofoca_streams_bind,
+    fofoca_streams_close, fofoca_version,
 };
 
 /// Zeroed selectors: no id and no topic, so [`fofoca_mesh_open`] mints a private
@@ -555,4 +558,117 @@ fn four_peers_converge_on_loopback() {
 #[test]
 fn four_peers_converge_on_public() {
     four_peers_converge(true);
+}
+
+fn loopback_streams() -> *mut FofocaStreams {
+    let opts = FofocaStreamOpts {
+        lookup: std::ptr::null(),
+        transport: std::ptr::null(),
+        relay_urls: std::ptr::null(),
+        disable_ip: 0,
+        disable_webrtc: 0,
+    };
+    // SAFETY: a fully-initialized struct with NULL strings.
+    let streams = unsafe { fofoca_streams_bind(&raw const opts) };
+    assert!(
+        !streams.is_null(),
+        "fofoca_streams_bind failed: {:?}",
+        last_error()
+    );
+    streams
+}
+
+/// Create → write → read over two loopback nodes, with a read buffer smaller
+/// than the stream so the remainder must wait for the next read, and the end
+/// of stream reported as -2.
+#[test]
+fn a_stream_carries_bytes_to_its_one_reader() {
+    let (producing, consuming) = (loopback_streams(), loopback_streams());
+    // SAFETY: live node handles for the rest of this test.
+    let producer = unsafe { fofoca_stream_create(producing) };
+    assert!(
+        !producer.is_null(),
+        "fofoca_stream_create failed: {:?}",
+        last_error()
+    );
+    // SAFETY: live producer; the hash is copied before the producer moves.
+    let hash = unsafe { CStr::from_ptr(fofoca_stream_hash(producer)) }.to_owned();
+
+    let sent: Vec<u8> = (0..100_000_u32).map(|index| (index % 251) as u8).collect();
+    let producer_addr = producer as usize;
+    let payload = sent.clone();
+    let writer = thread::spawn(move || {
+        let owned = producer_addr as *mut FofocaProducer;
+        // SAFETY: the producer is used by this thread alone from here on.
+        unsafe {
+            let wrote = fofoca_stream_write(owned, payload.as_ptr(), payload.len(), 30_000);
+            assert_eq!(wrote, 1, "fofoca_stream_write failed: {:?}", last_error());
+            assert_eq!(
+                fofoca_stream_close(owned),
+                0,
+                "close failed: {:?}",
+                last_error()
+            );
+        }
+    });
+
+    // SAFETY: live node, NUL-terminated hash.
+    let reader = unsafe { fofoca_stream_open(consuming, hash.as_ptr()) };
+    assert!(
+        !reader.is_null(),
+        "fofoca_stream_open failed: {:?}",
+        last_error()
+    );
+    let mut got = Vec::new();
+    let mut small = [0_u8; 1000];
+    loop {
+        // SAFETY: live reader, buffer writable for its length.
+        let read = unsafe { fofoca_stream_read(reader, small.as_mut_ptr(), small.len(), 10_000) };
+        match read {
+            -2 => break,
+            read if read > 0 => {
+                got.extend_from_slice(&small[..usize::try_from(read).expect("positive")]);
+            }
+            other => panic!("read returned {other}: {:?}", last_error()),
+        }
+    }
+    writer.join().expect("writer thread");
+    assert!(
+        got == sent,
+        "the bytes differ ({} of {})",
+        got.len(),
+        sent.len()
+    );
+
+    // SAFETY: each handle is released once and not used after.
+    unsafe {
+        assert_eq!(fofoca_reader_close(reader), 0);
+        assert_eq!(fofoca_streams_close(consuming), 0);
+        assert_eq!(fofoca_streams_close(producing), 0);
+    }
+}
+
+#[test]
+fn a_write_with_no_consumer_times_out_and_a_wrong_hash_is_refused() {
+    let streams = loopback_streams();
+    // SAFETY: live node for the rest of this test.
+    let producer = unsafe { fofoca_stream_create(streams) };
+    // SAFETY: live producer; one byte from a live array.
+    let wrote = unsafe { fofoca_stream_write(producer, [7_u8].as_ptr(), 1, 200) };
+    assert_eq!(wrote, 0, "no consumer means a timeout: {:?}", last_error());
+
+    // SAFETY: live node, NUL-terminated string that is not a hash.
+    let reader = unsafe { fofoca_stream_open(streams, c"not-a-hash".as_ptr()) };
+    assert!(reader.is_null(), "a malformed hash must not open");
+    assert!(last_error().is_some(), "a refused open leaves a reason");
+
+    // SAFETY: each handle is released once and not used after.
+    unsafe {
+        assert_eq!(
+            fofoca_stream_close(producer),
+            0,
+            "abandoning is not a failure"
+        );
+        assert_eq!(fofoca_streams_close(streams), 0);
+    }
 }

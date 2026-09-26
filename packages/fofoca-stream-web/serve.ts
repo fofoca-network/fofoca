@@ -3,7 +3,7 @@
  * `index.html` and the wasm glue under `packages/fofoca-wasm/wasm/`. No HMR,
  * no watch — the same shape as the chat example's server.
  *
- *   bun run serve [port]          # from packages/fofoca-pipe-web
+ *   bun run serve [port]          # from packages/fofoca-stream-web
  *
  * Without a port it takes 3020, or the next free port up to 3029; a named
  * port is bound exactly or not at all.
@@ -49,4 +49,4 @@ const server = serveOnLadder(explicit, 3020, (port) =>
   }),
 )
 
-console.log(`pipe on http://127.0.0.1:${server.port}/ (wasm from ${wasmDir})`)
+console.log(`stream page on http://127.0.0.1:${server.port}/ (wasm from ${wasmDir})`)

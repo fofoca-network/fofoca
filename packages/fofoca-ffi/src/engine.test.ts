@@ -111,6 +111,16 @@ function fakeLib(
         }
         case 'fofoca_mesh_open':
         case 'fofoca_mesh_peer_count':
+        case 'fofoca_streams_bind':
+        case 'fofoca_streams_bind_for':
+        case 'fofoca_streams_close':
+        case 'fofoca_stream_create':
+        case 'fofoca_stream_hash':
+        case 'fofoca_stream_write':
+        case 'fofoca_stream_close':
+        case 'fofoca_stream_open':
+        case 'fofoca_stream_read':
+        case 'fofoca_reader_close':
           throw new Error(`${name} is not part of the engine's vocabulary`)
         default:
           name satisfies never

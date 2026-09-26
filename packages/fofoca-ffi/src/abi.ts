@@ -53,6 +53,25 @@ export const ABI = {
   fofoca_mesh_peer_count: { args: ['ptr'], returns: 'isize' },
 
   fofoca_mesh_close: { args: ['ptr'], returns: 'i32' },
+
+  /**
+   * Byte streams. Bound because the header declares them; the TS stream API
+   * lives in `fofoca-wasm`, so nothing here calls them yet. A `bun:ffi` or
+   * Deno caller builds `fofoca_streams_bind`'s argument with
+   * `encodeStreamOpts` (`dlopen/opts-struct.ts`).
+   */
+  fofoca_streams_bind: { args: ['ptr'], returns: 'ptr' },
+  fofoca_streams_bind_for: { args: ['cstr'], returns: 'ptr' },
+  fofoca_streams_close: { args: ['ptr'], returns: 'i32' },
+  fofoca_stream_create: { args: ['ptr'], returns: 'ptr' },
+  fofoca_stream_hash: { args: ['ptr'], returns: 'ptr' },
+  /** 1 = written, 0 = no consumer attached in time, -1 = failure. */
+  fofoca_stream_write: { args: ['ptr', 'buf', 'usize', 'i32'], returns: 'i32' },
+  fofoca_stream_close: { args: ['ptr'], returns: 'i32' },
+  fofoca_stream_open: { args: ['ptr', 'cstr'], returns: 'ptr' },
+  /** > 0 = bytes, 0 = timeout, -1 = failure, -2 = end of stream. */
+  fofoca_stream_read: { args: ['ptr', 'buf', 'usize', 'i32'], returns: 'isize' },
+  fofoca_reader_close: { args: ['ptr'], returns: 'i32' },
   fofoca_last_error: { args: [], returns: 'ptr' },
   fofoca_version: { args: [], returns: 'ptr' },
   fofoca_max_msg: { args: [], returns: 'usize' },

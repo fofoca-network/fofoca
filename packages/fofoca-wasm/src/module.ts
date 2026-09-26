@@ -31,6 +31,26 @@ export interface MeshPeerHandle {
   close(): Promise<void>
 }
 
+export interface StreamNodeHandle {
+  create(): Promise<ProducerHandle>
+  open(hash: string): Promise<ReaderHandle>
+  close(): Promise<void>
+}
+
+export interface ProducerHandle {
+  hash(): string
+  attached(): Promise<void>
+  write(bytes: Uint8Array): Promise<void>
+  close(): Promise<void>
+  abandon(): Promise<void>
+}
+
+export interface ReaderHandle {
+  /** The next bytes, or `undefined` at the end of the stream. */
+  read(): Promise<Uint8Array | undefined>
+  close(): Promise<void>
+}
+
 export interface FofocaWasmModule {
   /** wasm-bindgen's init — must resolve before anything else is touched. */
   default(input?: unknown): Promise<unknown>
@@ -38,6 +58,10 @@ export interface FofocaWasmModule {
   initTracing(filter: string): void
   MeshPeer: {
     open(optsJson: string): Promise<MeshPeerHandle>
+  }
+  StreamNode: {
+    bind(optsJson: string): Promise<StreamNodeHandle>
+    forHash(hash: string): Promise<StreamNodeHandle>
   }
 }
 

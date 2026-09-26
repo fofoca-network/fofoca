@@ -85,6 +85,10 @@ function fake(): Fake {
     default: () => Promise.resolve(undefined),
     initTracing: () => {},
     MeshPeer: { open: () => Promise.resolve(peer) },
+    StreamNode: {
+      bind: () => Promise.reject(new Error('streams are not part of this test')),
+      forHash: () => Promise.reject(new Error('streams are not part of this test')),
+    },
   }
   return handle
 }

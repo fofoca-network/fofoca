@@ -139,6 +139,81 @@ long fofoca_mesh_peer_count(fofoca_mesh *handle);
 int fofoca_mesh_close(fofoca_mesh *handle);
 
 /*
+ * Byte streams
+ * ------------
+ * A producer creates a stream and hands its hash to one consumer, which opens
+ * it. The bytes ride one QUIC stream on a direct path (hole-punched UDP, or a
+ * WebRTC data channel), never the mesh's gossip. A stream admits exactly one
+ * consumer; a second is refused. The hash is a bearer ticket: whoever holds it
+ * can take that one slot.
+ *
+ * A node, its producers and its readers are separate handles, each released
+ * with its own close; they can be closed in any order.
+ */
+typedef struct fofoca_streams fofoca_streams;
+typedef struct fofoca_producer fofoca_producer;
+typedef struct fofoca_reader fofoca_reader;
+
+/* How a stream node reaches peers: the same lists and switches as fofoca_opts,
+ * without the mesh selectors. Zero-initialize for a loopback node. */
+typedef struct {
+  const char *lookup;     /* "mdns,dht,relay", any subset; NULL = loopback */
+  const char *transport;  /* "p2p" or "p2p,relay"; NULL = "p2p" */
+  const char *relay_urls; /* comma-separated custom relay ladder; NULL = default */
+  int disable_ip;
+  int disable_webrtc;
+} fofoca_stream_opts;
+
+/* Stand up a stream node. NULL on failure. */
+fofoca_streams *fofoca_streams_bind(const fofoca_stream_opts *opts);
+
+/* A node that can reach the producer of `hash` (its lookups and relay policy). */
+fofoca_streams *fofoca_streams_bind_for(const char *hash);
+
+/* Shut a node down; streams still open on it are abandoned. NULL is a no-op. */
+int fofoca_streams_close(fofoca_streams *streams);
+
+/* Open a new stream. With a relay lookup, blocks (at most 5 s, once) until the
+ * node reaches its home relay, so the hash carries it. Release it with
+ * fofoca_stream_close(). NULL on failure. */
+fofoca_producer *fofoca_stream_create(fofoca_streams *streams);
+
+/* The hash the one consumer opens the stream with, borrowed for the producer's
+ * lifetime. */
+const char *fofoca_stream_hash(const fofoca_producer *producer);
+
+/*
+ * Write all `len` bytes. Returns 1 once written, 0 when no consumer attached
+ * within `timeout_ms` (nothing was written), -1 on failure (the consumer went
+ * away). Once a consumer has attached, the call runs until every byte is out,
+ * paced by the consumer.
+ */
+int fofoca_stream_write(fofoca_producer *producer, const uint8_t *buf, size_t len,
+                        int timeout_ms);
+
+/*
+ * End the stream and free the producer. With a consumer attached, it reads
+ * everything written and then the end of stream; with none, the stream is
+ * abandoned and a later consumer is refused. Freed even on -1.
+ */
+int fofoca_stream_close(fofoca_producer *producer);
+
+/* Take the consumer slot of the stream behind `hash`. NULL on failure: the
+ * producer cannot be reached, or refuses the hash. */
+fofoca_reader *fofoca_stream_open(fofoca_streams *streams, const char *hash);
+
+/*
+ * Read the next bytes, waiting up to `timeout_ms`. Returns how many bytes were
+ * written to `buf` (> 0), 0 on timeout, -1 on failure (the producer refused or
+ * abandoned the stream, or the link was lost), or -2 at the end of the stream.
+ * Bytes that do not fit in `cap` wait for the next call.
+ */
+long fofoca_stream_read(fofoca_reader *reader, uint8_t *buf, size_t cap, int timeout_ms);
+
+/* Free a reader, giving up the stream. NULL is a no-op. */
+int fofoca_reader_close(fofoca_reader *reader);
+
+/*
  * Why the most recent call on this thread failed, or NULL if it succeeded.
  * Borrowed until this thread's next fofoca_* call, so copy it to keep it.
  */

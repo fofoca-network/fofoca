@@ -4,15 +4,15 @@
  * WebMCP (`document.modelContext`, earlier `navigator.modelContext`) lets a
  * page register schema-backed tools a browser agent can call. A tool is one
  * `execute` promise: the spec has no streaming or progress channel yet
- * (webmachinelearning/webmcp #82, #196), so the pipe's inbound side is a
- * consume-once `pipe_read` that long-polls for the first chunk.
+ * (webmachinelearning/webmcp #82, #196), so the reading side is a
+ * `stream_read` that long-polls for the first chunk.
  *
- * `pipeTools` is pure so the tests can call each `execute` directly; the
+ * `streamTools` is pure so the tests can call each `execute` directly; the
  * registration is the only part that touches the browser, and it no-ops
  * where there is no model context.
  */
 
-import type { PipeRuntime } from './runtime.ts'
+import type { StreamRuntime } from './runtime.ts'
 import { MAX_WAIT_MS } from './runtime.ts'
 
 export interface ToolResult {
@@ -55,59 +55,50 @@ function isModelContext(value: unknown): value is ModelContextLike {
   )
 }
 
-/** Register every pipe tool. `false` when this browser has no model context. */
-export function registerPipeTools(
-  runtime: PipeRuntime,
+/** Register every stream tool. `false` when this browser has no model context. */
+export function registerStreamTools(
+  runtime: StreamRuntime,
   context: ModelContextLike | undefined = findModelContext(),
 ): boolean {
   if (context === undefined) {
     return false
   }
-  for (const tool of pipeTools(runtime)) {
+  for (const tool of streamTools(runtime)) {
     context.registerTool(tool)
   }
   return true
 }
 
-export function pipeTools(runtime: PipeRuntime): ToolDescriptor[] {
+export function streamTools(runtime: StreamRuntime): ToolDescriptor[] {
   return [
     {
-      name: 'pipe_send',
+      name: 'stream_write',
       description:
-        'Send text into the mesh. Broadcast by default; `to` addresses one peer by nickname. Long text is split into frames and reassembled in order on the other side. A directed send to a peer whose transport is still relay-only is parked by the mesh and delivered once a direct path forms; check pipe_peers first.',
+        'Write text to the stream this tab produces. Waits until the one reader has attached, then until it has room: the reader paces the writer. Only a producing tab can write.',
       inputSchema: {
         type: 'object',
-        properties: {
-          text: { type: 'string', description: 'The text to send.' },
-          to: { type: 'string', description: 'A peer nickname; omit to broadcast.' },
-        },
+        properties: { text: { type: 'string', description: 'The text to write.' } },
         required: ['text'],
       },
       execute: async (input) => {
-        const { text, to } = fields(input)
-        await runtime.send(requireString(text, 'text'), optionalString(to, 'to'))
-        return ok({ sent: true })
+        const { text } = fields(input)
+        await runtime.write(requireString(text, 'text'))
+        return ok({ written: true })
       },
     },
     {
-      name: 'pipe_send_eof',
+      name: 'stream_close',
       description:
-        'Mark the end of the stream you have been sending — the receiver learns it has everything. Send again afterwards to start a new stream.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          to: { type: 'string', description: 'The peer nickname the stream went to; omit for the broadcast stream.' },
-        },
-      },
-      execute: async (input) => {
-        const { to } = fields(input)
-        await runtime.sendEof(optionalString(to, 'to'))
-        return ok({ sent: true })
+        'End the stream this tab produces: the reader gets everything written, then the end of the stream. With no reader yet, the stream is abandoned and a later reader is refused. The stream cannot be written to afterwards.',
+      inputSchema: { type: 'object', properties: {} },
+      execute: async () => {
+        await runtime.close()
+        return ok({ closed: true })
       },
     },
     {
-      name: 'pipe_read',
-      description: `Read what has arrived, in stream order, and get back a cursor. Pass that cursor to the next call to continue where you stopped; omit it to read from the oldest entry still held. Reading takes nothing away, so another reader with its own cursor sees the same stream. If there is nothing to read, wait up to waitMs (at most ${MAX_WAIT_MS}) for the first entry, then return what arrived, possibly nothing. Call it in a loop to follow a stream; an item with eof=true closes that sender's stream. Ask for encoding "base64" to get bytes that are not text back exactly.`,
+      name: 'stream_read',
+      description: `Read what has arrived on the stream this tab reads, in order, and get back a cursor. Pass that cursor to the next call to continue where you stopped; omit it to read from the oldest entry still held. Reading takes nothing away, so another reader with its own cursor sees the same bytes. If there is nothing to read, wait up to waitMs (at most ${MAX_WAIT_MS}) for the first entry, then return what arrived, possibly nothing. Call it in a loop to follow the stream; an item with eof=true is its end. Ask for encoding "base64" to get bytes that are not text back exactly.`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -144,40 +135,11 @@ export function pipeTools(runtime: PipeRuntime): ToolDescriptor[] {
       },
     },
     {
-      name: 'pipe_peers',
-      description: 'The peers on the mesh right now, with how each one is reached.',
-      inputSchema: { type: 'object', properties: {} },
-      execute: async () => ok(runtime.peers()),
-    },
-    {
-      name: 'pipe_status',
+      name: 'stream_status',
       description:
-        'This tab on the mesh: its id, name and nickname, the peer count, how much the read log holds, the cursor a reader wanting only new data starts from, the oldest cursor still readable, and every stream seen so far.',
+        "This tab's end of the stream: whether it reads or produces, the stream's hash, whether the reader has attached, whether the stream ended (or why it stopped early), the bytes so far, and the read log's cursors.",
       inputSchema: { type: 'object', properties: {} },
       execute: async () => ok(runtime.status()),
-    },
-    {
-      name: 'pipe_state_get',
-      description: 'The shared state document, a JSON object every peer converges on.',
-      inputSchema: { type: 'object', properties: {} },
-      execute: async () => ok(runtime.stateGet()),
-    },
-    {
-      name: 'pipe_state_merge',
-      description:
-        'Apply an RFC 7386 merge patch to the shared state document: present keys are set, null keys are deleted, the rest is left alone.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          patch: { type: 'object', description: 'The merge patch.' },
-        },
-        required: ['patch'],
-      },
-      execute: async (input) => {
-        const { patch } = fields(input)
-        await runtime.stateMerge(requireObject(patch, 'patch'))
-        return ok({ merged: true })
-      },
     },
   ]
 }
@@ -203,10 +165,6 @@ function requireString(value: unknown, name: string): string {
   return value
 }
 
-function optionalString(value: unknown, name: string): string | undefined {
-  return value === undefined || value === null ? undefined : requireString(value, name)
-}
-
 function requireInteger(value: unknown, name: string): number {
   if (typeof value !== 'number' || !Number.isInteger(value)) {
     throw new TypeError(`${name} must be an integer`)
@@ -221,9 +179,3 @@ function requireEncoding(value: unknown): 'text' | 'base64' {
   return value
 }
 
-function requireObject(value: unknown, name: string): Record<string, unknown> {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-    throw new TypeError(`${name} must be an object`)
-  }
-  return value as Record<string, unknown>
-}

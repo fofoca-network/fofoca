@@ -4,7 +4,7 @@
  * lands at the same relative path the dev server serves it from, which is
  * what the bundle's `../wasm/fofoca_wasm.js` import resolves against.
  *
- *   bun run build                 # from packages/fofoca-pipe-web
+ *   bun run build                 # from packages/fofoca-stream-web
  *
  * The wasm glue must exist first (`cargo task build-wasm`).
  */
@@ -31,7 +31,7 @@ export async function bundle(): Promise<string> {
     target: 'browser',
   })
   if (!built.success) {
-    console.error('pipe bundle failed:')
+    console.error('stream page bundle failed:')
     for (const log of built.logs) {
       console.error(String(log))
     }
@@ -39,7 +39,7 @@ export async function bundle(): Promise<string> {
   }
   const output = built.outputs[0]
   if (!output) {
-    console.error('pipe bundle produced no output')
+    console.error('stream page bundle produced no output')
     process.exit(1)
   }
   return output.text()
