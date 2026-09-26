@@ -24,6 +24,8 @@ mod loopback;
 #[cfg(feature = "mesh")]
 mod mesh;
 mod server;
+#[cfg(feature = "mesh")]
+mod stream;
 mod webdriver;
 
 use server::Harness;
@@ -120,6 +122,10 @@ enum Suite {
     /// The chat example end to end: the native terminal chat in robot mode
     /// against the browser chat page, over a local relay.
     Chat,
+    /// A stream end to end: the `fofoca-stream` CLI against the stream web
+    /// page, over a local relay: bytes in on one side, the same bytes out on
+    /// the other, each side as producer once.
+    Stream,
 }
 
 /// Which wasm build a cell runs.
@@ -258,10 +264,10 @@ fn run_engine_suite(args: &Args) -> TaskOutcome {
     if !args.list {
         build::check_tooling()?;
     }
-    if args.suite == Suite::Mesh {
-        mesh::run(args)
-    } else {
-        chat::run(args)
+    match args.suite {
+        Suite::Mesh => mesh::run(args),
+        Suite::Stream => stream::run(args),
+        Suite::Chat | Suite::Matrix | Suite::Loopback => chat::run(args),
     }
 }
 
@@ -294,7 +300,7 @@ fn run_engine_suite(_: &Args) -> TaskOutcome {
 }
 
 pub(crate) fn run(args: &Args) -> TaskOutcome {
-    if matches!(args.suite, Suite::Mesh | Suite::Chat) {
+    if matches!(args.suite, Suite::Mesh | Suite::Chat | Suite::Stream) {
         return run_engine_suite(args);
     }
 

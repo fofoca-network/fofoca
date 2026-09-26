@@ -140,11 +140,11 @@ pub(crate) const STEPS: &[Step] = &[
         scope: Scope::Crate("fofoca-iroh-webrtc-transport"),
         args: &["--features", "native", "--all-targets"],
     },
-    // Five crates are reachable on wasm32 and between them that is a
+    // Six crates are reachable on wasm32 and between them that is a
     // substantial amount of code nothing else compiles: `fofoca-chunks`'s
     // IndexedDB backend, the whole `web` backend of the WebRTC transport, the
-    // portable half of the engine, `fofoca-netplay`'s simulation, and
-    // `fofoca-pipe`'s wire contract.
+    // portable half of the engine, `fofoca-netplay`'s simulation,
+    // `fofoca-stream`'s byte streams, and `fofoca-wasm`, the browser peer.
     // Without these rows that code rots silently, and the `#[expect(...)]`
     // attributes inside it are never lint-checked either.
     // `wasm-simd` only changes blake3's codegen, so checking with it on costs
@@ -184,15 +184,11 @@ pub(crate) const STEPS: &[Step] = &[
         scope: Scope::Crate("fofoca-netplay"),
         args: &["--no-default-features"],
     },
-    // `fofoca-pipe` is the wire contract a tab and a terminal share. If it stops
-    // compiling for wasm32 the browser package cannot be built at all, and that
-    // package is its own cargo workspace, out of `-p`'s reach — so this row is
-    // the only place the breakage is caught from inside the workspace. No
-    // feature args: the crate deliberately has none, so there is nothing to
-    // turn off.
+    // `fofoca-stream` runs unchanged in a tab, where a producer's accept side
+    // and a consumer's dial both live; the browser package needs it to build.
     Step {
         kind: Kind::WasmCheck,
-        scope: Scope::Crate("fofoca-pipe"),
+        scope: Scope::Crate("fofoca-stream"),
         args: &[],
     },
     // The browser peer itself — `packages/fofoca-wasm`'s Rust half. wasm32 is
@@ -227,7 +223,7 @@ pub(crate) const STEPS: &[Step] = &[
     },
     Step {
         kind: Kind::WasmClippy,
-        scope: Scope::Crate("fofoca-pipe"),
+        scope: Scope::Crate("fofoca-stream"),
         args: &[],
     },
     Step {
