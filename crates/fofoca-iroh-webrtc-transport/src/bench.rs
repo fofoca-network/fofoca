@@ -90,55 +90,71 @@ fn header(direction: Direction, wanted: u32) -> [u8; HEADER_LEN] {
 
 /// The bulk peer: reads a header, then plays whichever direction it names.
 ///
-/// Serves one bi-stream per connection, then parks on `closed()`: callers that
-/// want many exchanges open a fresh connection each — the data channel is the
-/// session, the QUIC connection is not.
+/// Serves one exchange per bi-stream, as many streams as the client opens,
+/// until the connection closes. A benchmark reuses one connection so only its
+/// warm-up round pays the handshake and the congestion-window ramp.
 #[derive(Debug, Clone)]
 pub struct Bench;
 
 impl ProtocolHandler for Bench {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
-        let (mut send, mut recv) = connection.accept_bi().await?;
-
-        let mut head = [0u8; HEADER_LEN];
-        recv.read_exact(&mut head)
-            .await
-            .map_err(AcceptError::from_err)?;
-        let wanted = u32::from_le_bytes([head[1], head[2], head[3], head[4]]) as usize;
-
-        // Anything after the header on the request stream is the client's bulk
-        // upload. Drained and verified before replying, so a corrupted upload
-        // fails as an upload rather than as a mismatched reply.
-        if matches!(head[0], 1 | 2) {
-            let uploaded = recv
-                .read_to_end(MAX_TRANSFER_BYTES)
+        // The client closing the connection is how every session ends, so an
+        // `accept_bi` error is the normal exit, not a failure.
+        while let Ok((mut send, mut recv)) = connection.accept_bi().await {
+            let mut head = [0u8; HEADER_LEN];
+            recv.read_exact(&mut head)
                 .await
                 .map_err(AcceptError::from_err)?;
-            if !is_payload(&uploaded) {
-                return Err(AcceptError::from_err(std::io::Error::other(
-                    "uploaded body did not match the expected pattern",
-                )));
-            }
-        }
+            let wanted = u32::from_le_bytes([head[1], head[2], head[3], head[4]]) as usize;
 
-        // One write of the whole reply: handing QUIC the entire body at once is
-        // what produces the burst the outbound pump has to survive. Feeding it
-        // in small pieces would pace the sender for it and hide the defect.
-        send.write_all(&payload(wanted))
-            .await
-            .map_err(AcceptError::from_err)?;
-        send.finish().map_err(AcceptError::from_err)?;
-        connection.closed().await;
+            // Anything after the header on the request stream is the client's
+            // bulk upload. Drained and verified before replying, so a corrupted
+            // upload fails as an upload rather than as a mismatched reply.
+            if matches!(head[0], 1 | 2) {
+                let uploaded = recv
+                    .read_to_end(MAX_TRANSFER_BYTES)
+                    .await
+                    .map_err(AcceptError::from_err)?;
+                if !is_payload(&uploaded) {
+                    return Err(AcceptError::from_err(std::io::Error::other(
+                        "uploaded body did not match the expected pattern",
+                    )));
+                }
+            }
+
+            // One write of the whole reply: handing QUIC the entire body at
+            // once is what produces the burst the outbound pump has to survive.
+            // Feeding it in small pieces would pace the sender for it and hide
+            // the defect.
+            send.write_all(&payload(wanted))
+                .await
+                .map_err(AcceptError::from_err)?;
+            send.finish().map_err(AcceptError::from_err)?;
+        }
         Ok(())
     }
 }
+
+/// One period of [`payload`]. A prime length, so the pattern does not line
+/// up with any power-of-two buffer or packet size.
+const BLOCK: [u8; 251] = {
+    let mut block = [0u8; 251];
+    let mut index = 0;
+    while index < block.len() {
+        #[expect(clippy::cast_possible_truncation, reason = "index < 251")]
+        {
+            block[index] = index as u8;
+        }
+        index += 1;
+    }
+    block
+};
 
 /// A recognisable, position-dependent body, so a truncated or misordered
 /// transfer fails on content rather than only on length.
 #[must_use]
 pub fn payload(len: usize) -> Vec<u8> {
-    let block: Vec<u8> = (0..=250).collect();
-    let mut body = block.repeat(len.div_ceil(block.len()));
+    let mut body = BLOCK.repeat(len.div_ceil(BLOCK.len()));
     body.truncate(len);
     body
 }
@@ -150,9 +166,8 @@ pub fn payload(len: usize) -> Vec<u8> {
 /// OOM-killed tab is not a transport finding.
 #[must_use]
 pub fn is_payload(body: &[u8]) -> bool {
-    body.iter()
-        .enumerate()
-        .all(|(index, byte)| usize::from(*byte) == index % 251)
+    body.chunks(BLOCK.len())
+        .all(|chunk| chunk == &BLOCK[..chunk.len()])
 }
 
 /// Does any path of this connection ride the `WebRTC` transport?

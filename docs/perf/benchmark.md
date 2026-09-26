@@ -8,20 +8,23 @@ iroh↔WebRTC integration the bottleneck, and is the double encryption (DTLS
 outside, QUIC TLS inside) the reason?
 
 The short answer: **no, and no**. Browser↔browser, fofoca reaches the data
-channel's own per-message ceiling. Native↔native over str0m, the cost is one
-UDP syscall per packet in the driver. The inner encryption is under 2% of
-native CPU, and about a quarter of the browser tab's wall time — half of its
-busy time — but the tab is half idle, so it does not set the throughput.
+channel's own per-message ceiling. Native↔native over str0m, the driver's
+CPU goes to one UDP syscall per packet, and a long connection loses speed
+for a reason below the transport that is not yet found. The inner
+encryption is under 2% of native CPU, and about a quarter of the browser
+tab's wall time — half of its busy time — but the tab is half idle, so it
+does not set the throughput.
 
 ## Method
 
-- One transfer per round, on a fresh connection (the server serves one
-  stream, then parks on `closed()`). One warm-up round is discarded because
-  the first transfer pays the congestion-window ramp (measured: 34 Mbit/s on
-  the raw channel's first round, 460 Mbit/s after).
+- One transfer per round, each on a new bi-stream of one QUIC connection.
+  One warm-up round is discarded because the first transfer pays the
+  handshake and the congestion-window ramp (measured: 34 Mbit/s on the raw
+  channel's first round, 460 Mbit/s after).
 - Timed on the receiving side only, from stream open to the last verified
-  byte. The JSEP round is timed separately (`JSEP ms`) and is not in the
-  window.
+  byte. The check compares 251-byte chunks against one block (0.16 ms for
+  8 MiB), so it is not a measurable part of the window. The JSEP round is
+  timed separately (`JSEP ms`) and is not in the window.
 - Every cell asserts the path that carried it (`webrtc` / `ip` /
   `data-channel`), so a cell cannot quietly measure the wrong lane.
 - Browser cells run in two separate Chrome-for-Testing processes, driven
@@ -38,20 +41,25 @@ cargo task benchmark --direction up          # or `both`
 
 ## Results
 
-Apple M5, macOS 27.0, rustc 1.95.0, Chrome for Testing 152.0.7977.42,
-commit `1ce7fb1` plus this branch. 8 MiB downloads, 5 timed rounds, two
-runs. `Mbit/s` is decimal megabits per second, the median of the rounds;
-the range is min–max across both runs.
+Apple M5, macOS 27.0, rustc 1.95.0, Chrome for Testing 152.0.7977.42.
+8 MiB downloads, 5 timed rounds, two runs. `Mbit/s` is decimal megabits per
+second, the median of the rounds; the range is min–max across both runs.
 
 | cell | path | Mbit/s run 1 | Mbit/s run 2 | range | JSEP ms |
 |---|---|---|---|---|---|
-| fofoca web-web | webrtc | 242 | 234 | 216–247 | ~1000 |
-| fofoca web-native | webrtc | 163 | 149 | 147–170 | ~630 |
-| fofoca native-native | ip | 1787 | 1703 | 1216–1812 | 0 |
-| fofoca native-native (webrtc-only) | webrtc | 135 | 182 | 120–247 | 5 |
-| iroh native-native (baseline) | ip | 1778 | 1787 | 1753–1804 | 0 |
-| webrtc web-web (raw, 64 KiB msgs) | data-channel | 474 | 477 | 461–487 | ~680 |
-| webrtc web-web (raw, 1200 B msgs) | data-channel | — | 257 | 226–285 | ~690 |
+| fofoca web-web | webrtc | 266 | 249 | 209–277 | ~970 |
+| fofoca web-native | webrtc | 166 | 164 | 121–171 | ~620 |
+| fofoca native-native | ip | 2215 | 2186 | 1788–2389 | 0 |
+| fofoca native-native (webrtc-only) | webrtc | 76 | 79 | 64–104 | 5 |
+| iroh native-native (baseline) | ip | 1862 | 2392 | 1018–2404 | 0 |
+| webrtc web-web (raw, 64 KiB msgs) | data-channel | 466 | 463 | 364–478 | ~690 |
+| webrtc web-web (raw, 1200 B msgs) | data-channel | 258 | 255 | 249–273 | ~710 |
+
+Until this revision every round opened a new connection, so every timed
+round paid the handshake and slow start. That hid one cell: on a new
+connection per round, webrtc-only measured 136–153 Mbit/s; on one reused
+connection it measures 64–104. The other cells did not move outside their
+run-to-run spread.
 
 Notes on the cells:
 
@@ -70,19 +78,40 @@ Notes on the cells:
 
 ## Reading
 
-**Browser↔browser.** fofoca (234–242 Mbit/s) equals the raw channel at
-1200-byte messages (240–257 Mbit/s). The integration adds nothing
-measurable on top of the channel's per-message cost. The channel at
-64 KiB messages is twice as fast, so the lever is the number of messages,
-not what is in them: larger QUIC datagrams on the WebRTC path would halve the
-message count per byte. That is an MTU question for the transport and
-iroh's path config, not a crypto one.
+**Browser↔browser.** fofoca (209–277 Mbit/s) equals the raw channel at
+1200-byte messages (249–273 Mbit/s). The integration adds nothing
+measurable on top of the channel's per-message cost.
 
-**Native (str0m).** 135–182 Mbit/s, below the browser, with the widest spread.
-A 15 s `sample` of the runner during the webrtc-only cell (80 rounds)
-puts the driver task's busy time at roughly: `sendto` 70%, `recvfrom` 12%,
-`str0m::Rtc::poll_output` 7%, and both AEADs together (ring `aes_gcm_*` for
-QUIC, aws-lc `aesv8_gcm_*` for DTLS) under 2%. The cost is one blocking
+The cost is not the number of messages. It is how each message fits into
+SCTP packets. A sweep of the raw cell's message size (one run each, median
+Mbit/s):
+
+| message bytes | 1000 | 1062 | 1100 | 1150 | 1160 | 1170 | 1200 | 1500 | 2048 | 4096 | 8192 | 16384 | 65536 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| Mbit/s | 407 | 429 | 439 | 446 | 440 | 253 | 256 | 315 | 411 | 419 | 468 | 467 | 468 |
+
+Throughput halves between 1160 and 1170 bytes. Past that size, Chrome's
+SCTP sends each message as one full packet and one small packet. A QUIC
+packet is at least 1200 bytes, so every datagram the transport sends is
+past the limit. There are two ways out:
+
+- Put several QUIC datagrams into one data-channel message. At 8 KiB or
+  more the channel reaches its 64 KiB ceiling. This is a change inside the
+  transport. The cost is loss amplification: one lost SCTP packet loses the
+  whole message.
+- Make QUIC datagrams on the WebRTC path larger, with the same loss cost.
+  This is an MTU question for iroh's path configuration.
+
+**Native (str0m).** 64–104 Mbit/s on one reused connection, below the
+browser. It was 135–182 when each round used a new connection, and the
+transport's outbound and inbound queues drop nothing in either case, so the
+loss of speed on a long connection is below the transport: SCTP's own
+congestion control under QUIC's, or UDP loss, is not yet measured. A 15 s
+`sample` of the runner during the webrtc-only cell (80 rounds, a new
+connection each, before this revision) puts the driver task's busy time at
+roughly: `sendto` 70%, `recvfrom` 12%, `str0m::Rtc::poll_output` 7%, and
+both AEADs together (ring `aes_gcm_*` for QUIC, aws-lc `aesv8_gcm_*` for
+DTLS) under 2%. The cost is one blocking
 `UdpSocket::send_to` per SCTP packet in `native/driver.rs`; batching sends
 is the lever there.
 
@@ -94,7 +123,7 @@ one-shot and cannot hold profiler state):
 |---|---|
 | 50% | idle |
 | 27% | QUIC packet protection: `aes_nohw_encrypt_batch`, `aes_nohw_sub_bytes`, `gcm_mul64_nohw` |
-| 15% | other wasm (5% is `curve25519` handshakes, an artefact of the fresh connection per round) |
+| 15% | other wasm (5% is `curve25519` handshakes: the profile predates the reused connection) |
 | 5% | `(program)` |
 | 3% | JS glue |
 
@@ -113,6 +142,7 @@ run, and the tab profile does not see it.
   but not the bottleneck. If it is done, the gain to claim is CPU, not
   Mbit/s, and it must be measured under pressure (`cargo task e2e` has the
   pressure axis) rather than here.
-- The cheaper wins this table points at: larger datagrams on the WebRTC
-  path (browser and native), and batched sends in the str0m driver
-  (native).
+- The cheaper wins this table points at: data-channel messages past
+  Chrome's ~1165-byte SCTP limit, by batching QUIC datagrams per message or
+  by larger datagrams on the WebRTC path (browser); batched sends in the
+  str0m driver, and the long-connection slowdown (native).

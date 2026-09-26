@@ -17,6 +17,7 @@ use std::cell::RefCell;
 use fofoca_iroh_webrtc_transport::bench::{
     BENCH_ALPN, Bench, Direction, browser_endpoint, exchange, on_webrtc,
 };
+use fofoca_iroh_webrtc_transport::iroh::endpoint::Connection;
 use fofoca_iroh_webrtc_transport::iroh::protocol::Router;
 use fofoca_iroh_webrtc_transport::iroh::{
     Endpoint, EndpointAddr, EndpointId, SecretKey, TransportAddr,
@@ -34,6 +35,9 @@ struct State {
     pending: Pending,
     /// Kept alive for the page's lifetime: dropping it would stop accepting.
     router: Option<Router>,
+    /// The client side's connection, reused by every `download` to the same
+    /// peer so only the warm-up round pays the handshake and slow start.
+    connection: Option<(EndpointId, Connection)>,
 }
 
 enum Pending {
@@ -81,6 +85,7 @@ pub async fn init() -> Result<String, JsValue> {
             hub,
             pending: Pending::None,
             router: None,
+            connection: None,
         });
     });
     Ok(id.to_string())
@@ -165,8 +170,29 @@ pub fn serve() -> Result<String, JsValue> {
     })
 }
 
+async fn connection_to(remote: EndpointId) -> Result<Connection, JsValue> {
+    let (endpoint, open) = with_state(|state| {
+        let open = state
+            .connection
+            .as_ref()
+            .filter(|(id, connection)| *id == remote && connection.close_reason().is_none())
+            .map(|(_, connection)| connection.clone());
+        Ok((state.endpoint.clone(), open))
+    })?;
+    if let Some(connection) = open {
+        return Ok(connection);
+    }
+    let addr = EndpointAddr::from_parts(remote, [TransportAddr::Custom(custom_addr(remote))]);
+    let connection = endpoint.connect(addr, BENCH_ALPN).await.map_err(js_error)?;
+    with_state(|state| {
+        state.connection = Some((remote, connection.clone()));
+        Ok(())
+    })?;
+    Ok(connection)
+}
+
 /// One timed exchange of `bytes` in `direction` (`down`, `up`, `both`) with
-/// the peer `remote` (hex id) over a fresh connection. Resolves to
+/// the peer `remote` (hex id) over this page's connection to it. Resolves to
 /// `{"bytes", "elapsed_ms", "path"}`: `elapsed_ms` covers the stream open
 /// through the last verified byte, not the connection, and `path` is
 /// `webrtc` or `other`.
@@ -178,9 +204,7 @@ pub async fn download(remote: String, bytes: usize, direction: String) -> Result
     let direction = Direction::from_label(&direction)
         .ok_or_else(|| js_error(format!("unknown direction {direction:?}")))?;
     let remote: EndpointId = remote.parse().map_err(js_error)?;
-    let endpoint = with_state(|state| Ok(state.endpoint.clone()))?;
-    let addr = EndpointAddr::from_parts(remote, [TransportAddr::Custom(custom_addr(remote))]);
-    let connection = endpoint.connect(addr, BENCH_ALPN).await.map_err(js_error)?;
+    let connection = connection_to(remote).await?;
     let path = if on_webrtc(&connection) {
         "webrtc"
     } else {
@@ -192,7 +216,6 @@ pub async fn download(remote: String, bytes: usize, direction: String) -> Result
         .await
         .map_err(js_error)?;
     let elapsed = started.elapsed();
-    connection.close(0u32.into(), b"done");
 
     Ok(serde_json::json!({
         "bytes": received,

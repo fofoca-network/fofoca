@@ -63,20 +63,19 @@ fn path_of(connection: &fofoca_iroh_webrtc_transport::iroh::endpoint::Connection
     if on_ip { "ip" } else { "other" }.to_owned()
 }
 
-/// Warm-up plus `rounds` transfers from `client` to `server`, a fresh
-/// connection each (the server parks on `closed()` after one stream), timed
-/// from stream open to the last verified byte.
+/// Warm-up plus `rounds` transfers from `client` to `server` over one
+/// connection, each timed from stream open to the last verified byte.
 async fn rounds(
     client: &Endpoint,
     server: EndpointAddr,
     args: &Args,
 ) -> Result<Vec<Sample>, String> {
+    let connection = client
+        .connect(server, BENCH_ALPN)
+        .await
+        .map_err(|error| format!("connect failed: {error:#}"))?;
     let mut samples = Vec::with_capacity(args.rounds + 1);
     for _ in 0..=args.rounds {
-        let connection = client
-            .connect(server.clone(), BENCH_ALPN)
-            .await
-            .map_err(|error| format!("connect failed: {error:#}"))?;
         let path = path_of(&connection);
         let started = Instant::now();
         let bytes = tokio::time::timeout(
@@ -87,13 +86,13 @@ async fn rounds(
         .map_err(|_| format!("a transfer stalled past {TRANSFER_TIMEOUT:?}"))?
         .map_err(|error| format!("exchange failed: {error:#}"))?;
         let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
-        connection.close(0u32.into(), b"done");
         samples.push(Sample {
             bytes,
             elapsed_ms,
             path,
         });
     }
+    connection.close(0u32.into(), b"done");
     Ok(samples)
 }
 
