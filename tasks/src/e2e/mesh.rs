@@ -831,6 +831,12 @@ pub(super) fn launch_page(only: &str) -> Result<Page, Skip> {
         if !browser.name.contains(only) {
             continue;
         }
+        if browser.binary.is_empty() {
+            return Err(Skip(format!(
+                "{}: set $CHROME_BIN and $CHROMEDRIVER to run it",
+                browser.name
+            )));
+        }
         if !PathBuf::from(&browser.binary).exists() {
             return Err(Skip(format!("not installed: {}", browser.binary)));
         }

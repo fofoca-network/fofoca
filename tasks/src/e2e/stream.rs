@@ -237,8 +237,8 @@ fn view_complete(page: &Page, own: bool) -> bool {
 /// Open `url` in a fresh tab and wait for its stream end to open. A reader's
 /// end opens only after the lookup, the JSEP round and the direct-path wait,
 /// so it gets the attach budget; a producer's needs only its bind.
-fn open_page(url: &str, role: &str) -> Result<Page, String> {
-    let page = launch_page("cft").map_err(|Skip(reason)| reason)?;
+fn open_page(url: &str, role: &str, browser: &str) -> Result<Page, String> {
+    let page = launch_page(browser).map_err(|Skip(reason)| reason)?;
     page.navigate_watching_console(url, CONSOLE_WINDOW);
     let budget = if role == "reader" {
         ATTACH_TIMEOUT
@@ -317,28 +317,48 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
     let web_url = format!("{}/", server.url);
 
     output::status("Running", "fofoca-stream \u{2192} the stream page");
-    cli_to_page(&cli_binary, relay_url.as_str(), &web_url)?;
+    cli_to_page(
+        &cli_binary,
+        relay_url.as_str(),
+        &web_url,
+        args.page_browser(),
+    )?;
     output::status(
         "ok",
         "fofoca-stream \u{2192} the stream page  byte-exact, ended, exited clean",
     );
 
     output::status("Running", "the stream page \u{2192} fofoca-stream");
-    page_to_cli(&cli_binary, relay_url.as_str(), &web_url)?;
+    page_to_cli(
+        &cli_binary,
+        relay_url.as_str(),
+        &web_url,
+        args.page_browser(),
+    )?;
     output::status(
         "ok",
         "the stream page \u{2192} fofoca-stream  byte-exact, ended, exited clean",
     );
 
     output::status("Running", "a growing input, as `tail -f` feeds it");
-    tail_to_page(&cli_binary, relay_url.as_str(), &web_url)?;
+    tail_to_page(
+        &cli_binary,
+        relay_url.as_str(),
+        &web_url,
+        args.page_browser(),
+    )?;
     output::status(
         "ok",
         "a growing input, as `tail -f` feeds it  both lines, in order, then the end",
     );
 
     output::status("Running", "the stream page closes with no reader");
-    unread_close(&cli_binary, relay_url.as_str(), &web_url)?;
+    unread_close(
+        &cli_binary,
+        relay_url.as_str(),
+        &web_url,
+        args.page_browser(),
+    )?;
     output::status(
         "ok",
         "the stream page closes with no reader  settled, hash refused",
@@ -347,7 +367,12 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
 }
 
 /// The CLI produces from stdin; the page reads at the URL the CLI printed.
-fn cli_to_page(binary: &Path, relay_url: &str, web_url: &str) -> Result<(), Failure> {
+fn cli_to_page(
+    binary: &Path,
+    relay_url: &str,
+    web_url: &str,
+    browser: &str,
+) -> Result<(), Failure> {
     let sent = payload();
     // Stdin is written and closed *now*, before any reader exists: the way a
     // person pipes. The CLI, not the caller, waits for the reader.
@@ -383,7 +408,11 @@ fn cli_to_page(binary: &Path, relay_url: &str, web_url: &str) -> Result<(), Fail
     }
 
     // The fragment stays exactly as printed; the log filter rides the query.
-    let page = match open_page(&format!("{web_url}?log=fofoca=info#{hash}"), "reader") {
+    let page = match open_page(
+        &format!("{web_url}?log=fofoca=info#{hash}"),
+        "reader",
+        browser,
+    ) {
         Ok(page) => page,
         Err(reason) => return fail(&mut cli, None, &reason),
     };
@@ -452,10 +481,16 @@ fn cli_to_page(binary: &Path, relay_url: &str, web_url: &str) -> Result<(), Fail
 }
 
 /// The page produces; the CLI reads the hash the page shows to stdout.
-fn page_to_cli(binary: &Path, relay_url: &str, web_url: &str) -> Result<(), Failure> {
+fn page_to_cli(
+    binary: &Path,
+    relay_url: &str,
+    web_url: &str,
+    browser: &str,
+) -> Result<(), Failure> {
     let page = open_page(
         &format!("{web_url}?relay={}&log=fofoca=info", urlencode(relay_url)),
         "producer",
+        browser,
     )?;
     let hash = dataset(&page, "#share", "hash");
     if hash.is_empty() {
@@ -515,7 +550,12 @@ fn page_to_cli(binary: &Path, relay_url: &str, web_url: &str) -> Result<(), Fail
 
 /// The shape of `examples/tail`: the producer's input grows after the reader
 /// attaches, and what is appended then reaches the reader too.
-fn tail_to_page(binary: &Path, relay_url: &str, web_url: &str) -> Result<(), Failure> {
+fn tail_to_page(
+    binary: &Path,
+    relay_url: &str,
+    web_url: &str,
+    browser: &str,
+) -> Result<(), Failure> {
     let mut cli = Cli::spawn(
         binary,
         &[
@@ -540,7 +580,11 @@ fn tail_to_page(binary: &Path, relay_url: &str, web_url: &str) -> Result<(), Fai
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default()
         .to_owned();
-    let page = match open_page(&format!("{web_url}?log=fofoca=info#{hash}"), "reader") {
+    let page = match open_page(
+        &format!("{web_url}?log=fofoca=info#{hash}"),
+        "reader",
+        browser,
+    ) {
         Ok(page) => page,
         Err(reason) => return fail(&mut cli, None, &reason),
     };
@@ -595,10 +639,16 @@ fn tail_to_page(binary: &Path, relay_url: &str, web_url: &str) -> Result<(), Fai
 
 /// A producer page closes before any reader arrives: the close settles, and
 /// the stream is abandoned, so a reader that comes later is refused.
-fn unread_close(binary: &Path, relay_url: &str, web_url: &str) -> Result<(), Failure> {
+fn unread_close(
+    binary: &Path,
+    relay_url: &str,
+    web_url: &str,
+    browser: &str,
+) -> Result<(), Failure> {
     let page = open_page(
         &format!("{web_url}?relay={}&log=fofoca=info", urlencode(relay_url)),
         "producer",
+        browser,
     )?;
     let hash = dataset(&page, "#share", "hash");
     call_page(&page, "stream", "close()")?;

@@ -70,15 +70,14 @@ impl Driver {
     pub(super) fn start(browser: &str) -> Result<Self, Skip> {
         let port = free_port()?;
         let mut command = match browser {
-            "chrome-151" => {
+            "chrome-151" | "chrome-ci" => {
                 // A chromedriver whose version matches the Chrome it drives. A
                 // mismatch fails session creation with a bare HTTP 404 and no
                 // hint that the version is what is wrong.
                 let driver = locate("CHROMEDRIVER", "chromedriver").ok_or_else(|| {
-                    Skip(
-                        "no chromedriver for Chrome 151 — set $CHROMEDRIVER to a matching build"
-                            .to_owned(),
-                    )
+                    Skip(format!(
+                        "no chromedriver for {browser} — set $CHROMEDRIVER to a matching build"
+                    ))
                 })?;
                 let mut command = Command::new(driver);
                 command.arg(format!("--port={port}"));
@@ -150,6 +149,19 @@ fn capabilities(browser: &str, binary: &str) -> serde_json::Value {
                 "args": [
                     "--headless=new",
                     "--disable-gpu",
+                    "--disable-features=WebRtcHideLocalIpsWithMdns",
+                ],
+            },
+        }}}),
+        // A Linux CI runner: its Chrome runs without the user-namespace
+        // sandbox the runner cannot grant.
+        "chrome-ci" => serde_json::json!({ "capabilities": { "alwaysMatch": {
+            "goog:chromeOptions": {
+                "binary": binary,
+                "args": [
+                    "--headless=new",
+                    "--disable-gpu",
+                    "--no-sandbox",
                     "--disable-features=WebRtcHideLocalIpsWithMdns",
                 ],
             },

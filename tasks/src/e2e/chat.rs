@@ -227,7 +227,7 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
         return fail(&mut robot, None, "the terminal never claimed the beacon");
     }
 
-    let page = launch_page("cft").map_err(|Skip(reason)| reason)?;
+    let page = launch_page(args.page_browser()).map_err(|Skip(reason)| reason)?;
     page.navigate_watching_console(
         &format!(
             "{}/?topic={topic}&nick=browser&relay={}&log=fofoca=info",

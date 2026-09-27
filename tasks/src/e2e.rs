@@ -60,6 +60,8 @@ const FAILED_SCRIPT: &str =
 #[derive(ClapArgs)]
 pub(crate) struct Args {
     /// Only browsers whose name contains this (e.g. `cft`, `chrome`, `safari`).
+    /// The suites that drive one tab (`stream`, `chat`) take the first match,
+    /// so name one browser there: `chrome-ci`, `chrome-151`, `safari`.
     #[arg(long)]
     only: Option<String>,
     /// Only this build profile (`release`, `release-slow`). Each one is a
@@ -87,6 +89,13 @@ pub(crate) struct Args {
 }
 
 impl Args {
+    /// The one browser a suite that drives a single tab opens: `--only`, or
+    /// Chrome for Testing.
+    #[cfg(feature = "mesh")]
+    fn page_browser(&self) -> &str {
+        self.only.as_deref().unwrap_or("cft")
+    }
+
     fn profiles(&self) -> Vec<Profile> {
         if self.quick {
             return vec![Profile::Release];
@@ -203,6 +212,15 @@ fn browsers() -> Vec<Browser> {
             // matter"; "does pressure break it" is already `chrome-cft`'s p8
             // cell on the same engine two versions apart. Asking it twice cost
             // ~110 s and has never yet answered differently.
+            pressures: &[0],
+        },
+        // Any Chrome, driven through chromedriver: what a CI runner has, where
+        // there is no `agent-browse` and so no Chrome for Testing over CDP.
+        // `CHROME_BIN` and `CHROMEDRIVER` name the two binaries.
+        Browser {
+            name: "chrome-ci",
+            backend: Backend::WebDriver,
+            binary: std::env::var("CHROME_BIN").unwrap_or_default(),
             pressures: &[0],
         },
         Browser {

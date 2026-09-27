@@ -128,7 +128,8 @@ jobs:
       # included, on purpose: they are the only CI proof of the stream's
       # direct-path gate, and each stands up a local relay rather than the
       # engine's multi-peer rounds that `Check (relay-policy tests compile)`
-      # keeps out of CI.
+      # keeps out of CI. It also runs the binaries-only end to end
+      # (fofoca-stream-cli/tests/binary.rs); the browser one is e2e.yml.
       - name: Test
         run: cargo test --workspace
 
