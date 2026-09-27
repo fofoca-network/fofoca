@@ -263,6 +263,10 @@ async fn a_late_joiner_backfills_on_meeting_its_only_peer() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "fails ~1 run in 20 under load: no direct link when the joiner has the lowest id, and orphaned frames; remove when both are fixed"]
 async fn a_late_joiner_backfills_on_meeting_a_meshed_pair() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_test_writer()
+        .try_init();
     pin_antientropy_tick();
     let topic = format!("late-joiner-trio-{}", rand::random::<u64>());
     let (alice, _) = spawn(&topic, "alice").await;
