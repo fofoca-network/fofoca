@@ -18,7 +18,7 @@ use crate::lifecycle;
 use crate::lookup::add_peer_addr;
 use crate::protocol::identity;
 use crate::protocol::message::MessageBody;
-use crate::protocol::{Channel, Message, MessageKind, Nickname};
+use crate::protocol::{Channel, Message, MessageKind, Nickname, PresenceSubtype};
 use crate::util::clock::Instant;
 // The timer-driver clock the ping round's deadlines are kept in — distinct from
 // `clock::Instant` off wasm32. See `daemon::state`.
@@ -388,6 +388,20 @@ pub(crate) async fn ingest(
     // peer sends first depends on its version and its links.
     if observed.update.joined_new {
         antientropy::broadcast_state_digests(state, ctx.sender, ctx.mesh, ctx.author).await;
+        // Our address too, for the same reason: a newcomer behind the
+        // rendezvous learns it only from this flood, and if it has the lower
+        // endpoint id we wait for it to dial. A first frame that is its
+        // `joined` floods in `handle_presence` instead.
+        if !matches!(
+            message.kind,
+            MessageKind::Presence {
+                subtype: PresenceSubtype::Joined
+            }
+        ) {
+            tracing::debug!(target: "fofoca::gossip", author = %message.author, "flooded our address on a new peer's first frame");
+            broadcast_peer_info(state, ctx).await;
+            state.last_sent_at = Instant::now();
+        }
     }
 
     // A shard of a split body never surfaces as a raw slice — see
@@ -1307,7 +1321,7 @@ fn is_loggable(kind: &MessageKind) -> bool {
     !matches!(
         kind,
         MessageKind::Presence {
-            subtype: crate::protocol::PresenceSubtype::Alive
+            subtype: PresenceSubtype::Alive
         } | MessageKind::PeerInfo
             | MessageKind::Digest | MessageKind::StateDigest | MessageKind::MetaDigest
             | MessageKind::Ping
@@ -1656,18 +1670,19 @@ mod evicted_orphan_tests {
 }
 
 #[cfg(test)]
-mod first_link_digest_tests {
+mod first_contact_tests {
     use iroh::endpoint::presets;
     use iroh_gossip::api::Event;
     use iroh_gossip::net::Gossip;
 
-    use super::handle_gossip_event;
+    use super::{handle_gossip_event, ingest};
     use crate::daemon::ctx::HandlerCtx;
     use crate::daemon::state::EventLoopState;
     use crate::gossip::app::{AppClass, InboundApp, NodeApp};
     use crate::gossip::event::SilentSink;
     use crate::protocol::identity::{Identity, encode_pubkey};
-    use crate::protocol::{MeshId, Message};
+    use crate::protocol::message::MessageBody;
+    use crate::protocol::{Channel, MeshId, Message, Nickname};
     use crate::testing::{endpoint_id, fresh_state, nick};
     use crate::transport::MeshSender;
 
@@ -1695,6 +1710,60 @@ mod first_link_digest_tests {
         }
     }
 
+    /// One node on a peerless topic, with everything a `HandlerCtx` borrows.
+    struct Node {
+        endpoint: iroh::Endpoint,
+        _gossip: Gossip,
+        sender: MeshSender,
+        mesh: MeshId,
+        identity: Identity,
+        our_pubkey: String,
+        author: Nickname,
+        sink: SilentSink,
+    }
+
+    impl Node {
+        async fn spawn() -> Self {
+            let endpoint = iroh::Endpoint::builder(presets::Minimal)
+                .bind()
+                .await
+                .expect("bind a local endpoint");
+            let gossip = Gossip::builder().spawn(endpoint.clone());
+            let topic = gossip
+                .subscribe(iroh_gossip::proto::TopicId::from_bytes([4u8; 32]), vec![])
+                .await
+                .expect("subscribe to a peerless topic");
+            let (gossip_sender, _receiver) = topic.split();
+            let identity = Identity::generate();
+            let our_pubkey = encode_pubkey(&identity.public());
+            Self {
+                endpoint,
+                _gossip: gossip,
+                sender: MeshSender::new(gossip_sender),
+                mesh: MeshId::from("test"),
+                identity,
+                our_pubkey,
+                author: nick("holder"),
+                sink: SilentSink,
+            }
+        }
+
+        fn ctx(&self) -> HandlerCtx<'_> {
+            HandlerCtx {
+                sender: &self.sender,
+                endpoint: &self.endpoint,
+                mesh: &self.mesh,
+                author: &self.author,
+                identity: &self.identity,
+                our_pubkey: &self.our_pubkey,
+                max_peers: 16,
+                rendezvous_id: endpoint_id(9),
+                external_msg_tx: None,
+                sink: &self.sink,
+            }
+        }
+    }
+
     /// A node whose first digests went out over the rendezvous alone can have
     /// every answer dropped on the way: each hop already saw those frames, and
     /// iroh-gossip drops a message id it has seen. So it asks again on its
@@ -1703,35 +1772,8 @@ mod first_link_digest_tests {
     /// cannot record frames, so the count stands in for the two digests.
     #[tokio::test]
     async fn only_the_first_real_peer_link_asks_for_state_again() {
-        let endpoint = iroh::Endpoint::builder(presets::Minimal)
-            .bind()
-            .await
-            .expect("bind a local endpoint");
-        let gossip = Gossip::builder().spawn(endpoint.clone());
-        let topic = gossip
-            .subscribe(iroh_gossip::proto::TopicId::from_bytes([4u8; 32]), vec![])
-            .await
-            .expect("subscribe to a peerless topic");
-        let (gossip_sender, _receiver) = topic.split();
-        let sender = MeshSender::new(gossip_sender);
-        let mesh = MeshId::from("test");
-        let identity = Identity::generate();
-        let our_pubkey = encode_pubkey(&identity.public());
-        let author = nick("late");
-        let sink = SilentSink;
-        let rendezvous = endpoint_id(9);
-        let ctx = HandlerCtx {
-            sender: &sender,
-            endpoint: &endpoint,
-            mesh: &mesh,
-            author: &author,
-            identity: &identity,
-            our_pubkey: &our_pubkey,
-            max_peers: 16,
-            rendezvous_id: rendezvous,
-            external_msg_tx: None,
-            sink: &sink,
-        };
+        let node = Node::spawn().await;
+        let ctx = node.ctx();
         let mut state = fresh_state();
         let mut app = Inert;
 
@@ -1748,7 +1790,7 @@ mod first_link_digest_tests {
         };
 
         assert_eq!(
-            digests_on_link_up(rendezvous).await,
+            digests_on_link_up(ctx.rendezvous_id).await,
             0,
             "the rendezvous link"
         );
@@ -1762,6 +1804,43 @@ mod first_link_digest_tests {
             0,
             "a second real-peer link"
         );
-        endpoint.close().await;
+        node.endpoint.close().await;
+    }
+
+    /// A newcomer behind the rendezvous learns our address only from our
+    /// `PeerInfo` flood, and the lower endpoint id is the one that dials. Its
+    /// first frame to reach us is not always its `joined`: under load its
+    /// digest can overtake it. So the flood follows the first frame from a
+    /// new peer, whatever its kind. A `State` frame does not mark a peer
+    /// present, so it floods nothing. A `joined` first frame floods in
+    /// `handle_presence`, which this test does not cover.
+    #[tokio::test]
+    async fn a_new_peers_first_frame_floods_our_address_when_it_is_not_its_joined() {
+        let node = Node::spawn().await;
+        let ctx = node.ctx();
+        let mut app = Inert;
+        let newcomer = Identity::generate();
+        let wire = |frame: &Message| bytes::Bytes::from(frame.serialize().expect("serialize"));
+        let heads = || MessageBody::new(r#"{"heads":[]}"#.to_owned()).expect("a JSON body");
+
+        let mut digest_first = fresh_state();
+        let digest =
+            Message::new_channel_digest(&node.mesh, &nick("late"), heads(), Channel::State)
+                .signed(&newcomer);
+        ingest(wire(&digest), &mut digest_first, &mut app, &ctx).await;
+        assert!(
+            digest_first.peerinfo_flooded_at.is_some(),
+            "a newcomer's digest arrived first, and we never told it our address"
+        );
+
+        let mut change_first = fresh_state();
+        let change = Message::new_channel_event(&node.mesh, &nick("late"), heads(), Channel::State)
+            .signed(&newcomer);
+        ingest(wire(&change), &mut change_first, &mut app, &ctx).await;
+        assert!(
+            change_first.peerinfo_flooded_at.is_none(),
+            "a state frame does not mark its author present"
+        );
+        node.endpoint.close().await;
     }
 }
