@@ -751,7 +751,7 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
         &format!("relay {relay_url} · harness {}", harness.url),
     );
 
-    let only = args.only.clone().unwrap_or_else(|| "cft".to_owned());
+    let only = args.page_browser().to_owned();
     // `MESH_CELL=<substring>` narrows the sweep to matching cell labels —
     // for iterating on one failing cell without paying for the rest.
     let cell_filter = std::env::var("MESH_CELL").ok();

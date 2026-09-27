@@ -83,10 +83,13 @@ impl Driver {
                 command.arg(format!("--port={port}"));
                 command
             }
-            "safari" => {
-                let driver = PathBuf::from("/usr/bin/safaridriver");
+            "safari" | "safari-tp" => {
+                let driver = PathBuf::from(safaridriver(browser));
                 if !driver.is_file() {
-                    return Err(Skip("safaridriver is missing".to_owned()));
+                    return Err(Skip(format!(
+                        "safaridriver is missing at {}",
+                        driver.display()
+                    )));
                 }
                 let mut command = Command::new(driver);
                 command.args(["-p", &port.to_string()]);
@@ -320,15 +323,26 @@ impl Session {
     }
 }
 
-/// A refusal and a hang want different fixes, so they get different messages —
-/// and Safari's is neither a driver bug nor something a script can resolve.
-fn session_refused(browser: &str, detail: &str) -> Skip {
+/// Each Safari app has its own driver, and its own Remote Automation toggle
+/// that only that driver sets.
+fn safaridriver(browser: &str) -> &'static str {
     if browser == "safari" {
-        return Skip(
-            "safaridriver would not start a session — Safari needs Develop ▸ Allow Remote \
-             Automation, a one-time GUI toggle no script can set"
-                .to_owned(),
-        );
+        "/usr/bin/safaridriver"
+    } else {
+        "/Applications/Safari Technology Preview.app/Contents/MacOS/safaridriver"
+    }
+}
+
+/// A refusal and a hang want different fixes, so they get different messages.
+/// Safari's needs a one-time `--enable` under sudo, per Safari app, and a
+/// running copy that hangs the handshake quit.
+fn session_refused(browser: &str, detail: &str) -> Skip {
+    if browser.starts_with("safari") {
+        return Skip(format!(
+            "safaridriver would not start a session ({detail}) — run `sudo \"{}\" --enable` \
+             once, and quit a running copy that hangs the handshake",
+            safaridriver(browser)
+        ));
     }
     Skip(format!("no session from the {browser} driver: {detail}"))
 }

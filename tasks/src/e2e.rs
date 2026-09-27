@@ -60,8 +60,9 @@ const FAILED_SCRIPT: &str =
 #[derive(ClapArgs)]
 pub(crate) struct Args {
     /// Only browsers whose name contains this (e.g. `cft`, `chrome`, `safari`).
-    /// The suites that drive one tab (`stream`, `chat`) take the first match,
-    /// so name one browser there: `chrome-ci`, `chrome-151`, `safari`.
+    /// The suites that drive one tab (`stream`, `chat`, `mesh`) take the first
+    /// match, so name one browser there: `cft`, `chrome-ci`, `chrome-151`,
+    /// `safari`, `safari-tp`. Without it they open `safari-tp`.
     #[arg(long)]
     only: Option<String>,
     /// Only this build profile (`release`, `release-slow`). Each one is a
@@ -90,10 +91,11 @@ pub(crate) struct Args {
 
 impl Args {
     /// The one browser a suite that drives a single tab opens: `--only`, or
-    /// Chrome for Testing.
+    /// Safari Technology Preview, the next `WebKit`, where a browser-only
+    /// regression shows first.
     #[cfg(feature = "mesh")]
     fn page_browser(&self) -> &str {
-        self.only.as_deref().unwrap_or("cft")
+        self.only.as_deref().unwrap_or("safari-tp")
     }
 
     fn profiles(&self) -> Vec<Profile> {
@@ -227,6 +229,14 @@ fn browsers() -> Vec<Browser> {
             name: "safari",
             backend: Backend::WebDriver,
             binary: "/Applications/Safari.app/Contents/MacOS/Safari".to_owned(),
+            pressures: &[0],
+        },
+        // The next WebKit, driven by its own safaridriver, which needs its own
+        // `sudo … safaridriver --enable` once.
+        Browser {
+            name: "safari-tp",
+            backend: Backend::WebDriver,
+            binary: "/Applications/Safari Technology Preview.app/Contents/MacOS/Safari Technology Preview".to_owned(),
             pressures: &[0],
         },
     ]
