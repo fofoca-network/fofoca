@@ -148,6 +148,12 @@ jobs:
       - name: Test (webrtc, native backend)
         run: cargo test -p fofoca-iroh-webrtc-transport --features native
 
+      # Not covered by `--workspace` above: the runner's page helpers, and
+      # their tests, are behind the `mesh` and `bench` features, and `bench`
+      # is the lighter of the two.
+      - name: Test (tasks, bench)
+        run: cargo test -p tasks --features bench
+
       # `iroh-test-utils` is off by default, and no step above reaches a test
       # target with it on: `--all-features` here has no `--all-targets`, and
       # `--all-targets` elsewhere runs with default features. That left the

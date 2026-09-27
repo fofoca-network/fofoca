@@ -263,6 +263,14 @@ pub(crate) const STEPS: &[Step] = &[
         scope: Scope::Crate("fofoca-iroh-webrtc-transport"),
         args: &["--features", "native"],
     },
+    // Not covered by the workspace row: the runner's page helpers, and their
+    // tests, are behind the `mesh` and `bench` features, and `bench` is the
+    // lighter of the two.
+    Step {
+        kind: Kind::Test,
+        scope: Scope::Crate("tasks"),
+        args: &["--features", "bench"],
+    },
     // `iroh-test-utils` is off by default and no row above reaches a test target
     // with it on, so the relay-policy proofs — `tests/relay_lookup_only_*.rs`
     // and the webrtc graft tests — were never even compiled. `--no-run`: they

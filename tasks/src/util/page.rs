@@ -34,7 +34,10 @@ pub(crate) fn start_call(
     );
     let started = page.evaluate(&expression);
     if started != "started" {
-        return Err(format!("{object} call {call} did not start: {started:?}"));
+        return Err(format!(
+            "{object} call {} did not start: {started:?}",
+            shown(call)
+        ));
     }
     Ok(Started(token))
 }
@@ -67,7 +70,18 @@ pub(crate) fn call_page_within(
     timeout: Duration,
 ) -> Result<String, String> {
     let started = start_call(page, object, call)?;
-    await_call(page, &started, timeout).map_err(|error| format!("{object} call {call}: {error}"))
+    await_call(page, &started, timeout)
+        .map_err(|error| format!("{object} call {}: {error}", shown(call)))
+}
+
+/// A call as an error message shows it: whole when short, or only its method
+/// when the arguments are long (a JSEP call carries a full SDP).
+fn shown(call: &str) -> String {
+    const LONGEST: usize = 60;
+    match call.split_once('(') {
+        Some((method, _)) if call.len() > LONGEST => format!("{method}(…)"),
+        _ => call.to_owned(),
+    }
 }
 
 /// Wait for the page's `#ready` or a non-empty `#failed`, handing back the
@@ -92,4 +106,46 @@ pub(crate) fn rand_token() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|since| since.subsec_nanos().into())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::{Evaluate, call_page_within, shown};
+
+    /// A page whose every call starts, then fails with `boom`.
+    struct Failing;
+
+    impl Evaluate for Failing {
+        fn evaluate(&self, expression: &str) -> String {
+            if expression.ends_with("'started'") {
+                "started".to_owned()
+            } else {
+                "error: boom".to_owned()
+            }
+        }
+    }
+
+    #[test]
+    fn a_failed_call_names_the_method_not_its_arguments() {
+        let sdp = "x".repeat(2000);
+        let error = call_page_within(
+            &Failing,
+            "bench",
+            &format!("complete(\"{sdp}\")"),
+            Duration::from_secs(1),
+        )
+        .expect_err("the page fails the call");
+        assert!(error.contains("complete(…)"), "{error}");
+        assert!(error.contains("boom"), "{error}");
+        assert!(error.len() < 200, "{} bytes: {error}", error.len());
+    }
+
+    #[test]
+    fn a_short_call_or_one_without_arguments_stays_whole() {
+        assert_eq!(shown("offer()"), "offer()");
+        let bare = "x".repeat(100);
+        assert_eq!(shown(&bare), bare);
+    }
 }
