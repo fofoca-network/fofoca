@@ -35,3 +35,9 @@ tracing-subscriber.workspace = true
 # One `sigaction` read: whether SIGHUP was inherited as ignored (`nohup`).
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
+
+# The binary end to end in `tests/`: an in-process relay for the two
+# processes to meet on, with no network of the machine's own. Only `cargo
+# test` builds with these features; a `cargo build` or `install` does not.
+[dev-dependencies]
+fofoca = { path = "../fofoca", default-features = false, features = ["host", "iroh-test-utils"] }
