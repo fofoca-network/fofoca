@@ -38,10 +38,11 @@ Append to the file (`echo hello >> app.log`) and the line reaches the reader.
 
 There are two ways to stop:
 
-- Ctrl-C stops `fofoca-stream` too, so the reader gets an error: "the
-  producer abandoned the stream".
+- Ctrl-C reaches `fofoca-stream` too, so the reader usually gets an error:
+  "the producer abandoned the stream".
 - `kill <pid of tail.sh>` stops `tail` only. The input ends, and the reader
-  gets the end of the stream.
+  gets the end of the stream. With no reader attached yet, the script stops
+  `fofoca-stream` too after 10 s, and exits 143.
 
 ## Tested
 

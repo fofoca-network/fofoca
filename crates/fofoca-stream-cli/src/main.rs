@@ -83,9 +83,10 @@ async fn until_stopped(work: impl Future<Output = Result<()>>) -> Result<Result<
 
 /// Resolves at Ctrl-C, SIGTERM or SIGHUP (a closed terminal, or `kill -HUP`),
 /// with the exit code a shell gives each: 128 plus the signal number. SIGHUP
-/// is left alone when the process inherited it ignored, as under `nohup`. A
-/// handler that cannot be installed never fires, as the default action then
-/// still applies.
+/// is left alone when the process inherited it ignored, as under `nohup`;
+/// Ctrl-C is not, even when inherited ignored as in a background job, and
+/// `examples/tail/tail.sh` relies on that. A handler that cannot be installed
+/// never fires, as the default action then still applies.
 async fn stop_signal() -> i32 {
     let interrupt = async {
         match tokio::signal::ctrl_c().await {
