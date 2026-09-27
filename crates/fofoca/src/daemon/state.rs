@@ -272,7 +272,7 @@ pub struct EventLoopState {
     /// on wasm). The local half of every `WebRTC` lane decision — read from
     /// here, not from the endpoint address, which is empty whenever the relay
     /// link is down.
-    pub(crate) local_ip_transport: bool,
+    pub(crate) local_udp_transport: bool,
     /// Set once we've broadcast our arrival (`joined` + `PeerInfo`).
     /// The announce is deferred to the first `NeighborUp` so it isn't
     /// lost into an unconnected overlay; subsequent neighbors only get
@@ -627,7 +627,7 @@ impl EventLoopState {
             rendezvous_offer_fallback: false,
             rendezvous_probe_read_free: false,
             rendezvous_graft_needs_session: false,
-            local_ip_transport: true,
+            local_udp_transport: true,
             announced: false,
             meshed: false,
             unicast_pool: crate::transport::UnicastPool::disconnected(),

@@ -58,7 +58,7 @@ typedef struct {
   const char *name;       /* mesh name on create; NULL falls back to "fofoca" */
   const char *lookup;     /* "mdns,dht,relay", any subset; NULL = none, a
                              loopback mesh reachable from this machine only */
-  const char *transport;  /* "p2p" or "p2p,relay"; NULL = "p2p", so every byte
+  const char *transport;  /* "udp" or "udp,relay"; NULL = "udp", so every byte
                              of data goes peer to peer. "relay" needs "relay" in
                              `lookup` */
   const char *relay_urls; /* comma-separated custom relay ladder; NULL = the
@@ -159,7 +159,7 @@ typedef struct fofoca_reader fofoca_reader;
  * without the mesh selectors. Zero-initialize for a loopback node. */
 typedef struct {
   const char *lookup;     /* "mdns,dht,relay", any subset; NULL = loopback */
-  const char *transport;  /* "p2p" or "p2p,relay"; NULL = "p2p" */
+  const char *transport;  /* "udp" or "udp,relay"; NULL = "udp" */
   const char *relay_urls; /* comma-separated custom relay ladder; NULL = default */
   int disable_ip;
   int disable_webrtc;

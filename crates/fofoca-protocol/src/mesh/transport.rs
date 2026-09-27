@@ -18,22 +18,22 @@ use super::ChoiceError;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Transport {
-    /// Direct paths only: hole-punched IP or a `WebRTC` session. Always on; a
-    /// list that leaves it out is an error, because the engine has no
-    /// relay-only mode.
-    P2p,
+    /// Direct paths only: QUIC on a hole-punched UDP socket, or a `WebRTC`
+    /// session. Always on; a list that leaves it out is an error, because the
+    /// engine has no relay-only mode.
+    Udp,
     /// Let payload also fall back to the relay when no direct path exists.
     Relay,
 }
 
 impl Transport {
-    const NAMES: &[&str] = &["p2p", "relay"];
+    const NAMES: &[&str] = &["udp", "relay"];
 
     /// The name the list spells this transport by.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::P2p => "p2p",
+            Self::Udp => "udp",
             Self::Relay => "relay",
         }
     }
@@ -44,7 +44,7 @@ impl FromStr for Transport {
 
     fn from_str(text: &str) -> Result<Self, Self::Err> {
         match text {
-            "p2p" => Ok(Self::P2p),
+            "udp" => Ok(Self::Udp),
             "relay" => Ok(Self::Relay),
             other => Err(ChoiceError::new("transport", other, Self::NAMES)),
         }
@@ -80,13 +80,13 @@ impl TransportPolicy {
     /// only.
     ///
     /// # Errors
-    /// The list is non-empty and leaves `p2p` out.
+    /// The list is non-empty and leaves `udp` out.
     pub fn from_transports(transports: &[Transport]) -> Result<Self> {
         if transports.is_empty() {
             return Ok(Self::default());
         }
-        if !transports.contains(&Transport::P2p) {
-            bail!("transport `p2p` cannot be disabled: name `p2p` or `p2p,relay`");
+        if !transports.contains(&Transport::Udp) {
+            bail!("transport `udp` cannot be disabled: name `udp` or `udp,relay`");
         }
         Ok(Self {
             relay_transport: transports.contains(&Transport::Relay),

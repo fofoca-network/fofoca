@@ -192,9 +192,9 @@ describe('wire opts', () => {
   })
 
   test('relay ladder, transport policy and path switches', () => {
-    expect(joinWire({ topic: 't', transport: ['p2p', 'relay'], relayUrls: ['http://a/', 'http://b/'] })).toMatchObject({
+    expect(joinWire({ topic: 't', transport: ['udp', 'relay'], relayUrls: ['http://a/', 'http://b/'] })).toMatchObject({
       lookup: null,
-      transport: 'p2p,relay',
+      transport: 'udp,relay',
       relayUrls: 'http://a/,http://b/',
     })
     expect(createWire({ relayUrls: [], transport: [] })).toMatchObject({ relayUrls: null, transport: null })

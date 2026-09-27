@@ -198,7 +198,7 @@ async fn run_peer(
     println!("nick    {author}");
     println!(
         "transport {}",
-        if transports.ip { "all" } else { "webrtc-only" }
+        if transports.udp { "all" } else { "webrtc-only" }
     );
 
     // `handle_signals: false` — registering tokio's signal handlers suppresses

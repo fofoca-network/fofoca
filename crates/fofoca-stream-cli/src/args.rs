@@ -15,7 +15,7 @@ pub(crate) struct Args {
     /// none is named. Ignored when reading: the hash carries its own.
     #[arg(long, value_delimiter = ',')]
     pub lookup: Vec<Lookup>,
-    /// What may carry the bytes: `p2p`, or `p2p,relay` to let them fall back
+    /// What may carry the bytes: `udp`, or `udp,relay` to let them fall back
     /// to the relay. Ignored when reading: the hash carries it.
     #[arg(long, value_delimiter = ',')]
     pub transport: Vec<Transport>,
@@ -79,8 +79,8 @@ mod tests {
     #[test]
     fn transport_is_a_comma_list_of_known_names() {
         assert_eq!(
-            parse(&["--transport", "p2p,relay"]).opts().transport,
-            vec![Transport::P2p, Transport::Relay]
+            parse(&["--transport", "udp,relay"]).opts().transport,
+            vec![Transport::Udp, Transport::Relay]
         );
         assert!(Args::try_parse_from(["fofoca-stream", "--lookup", "public"]).is_err());
     }

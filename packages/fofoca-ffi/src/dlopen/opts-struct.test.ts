@@ -77,7 +77,7 @@ describe('encodeOpts', () => {
   test('the three lists land at their offsets as comma strings', () => {
     const pointers = fakePointers()
     const { struct, keepAlive } = encodeOpts(
-      { ...BASE, lookup: 'mdns,relay', transport: 'p2p,relay', relayUrls: 'http://a/,http://b/' },
+      { ...BASE, lookup: 'mdns,relay', transport: 'udp,relay', relayUrls: 'http://a/,http://b/' },
       pointers.pointerOf,
     )
     const view = new DataView(struct.buffer)

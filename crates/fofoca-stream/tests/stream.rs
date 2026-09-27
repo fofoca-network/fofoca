@@ -295,7 +295,7 @@ async fn on_relay(url: &str, transport: Vec<Transport>, paths: PathFlags) -> Str
 async fn a_relay_transport_stream_admits_a_relay_only_consumer() {
     let (url, _relay) = test_relay::spawn_plain().await.expect("relay");
     let url = url.to_string();
-    let both = vec![Transport::P2p, Transport::Relay];
+    let both = vec![Transport::Udp, Transport::Relay];
     let producer_node = on_relay(&url, both.clone(), PathFlags::default()).await;
     let relay_only = PathFlags {
         ip: false,
@@ -323,12 +323,12 @@ async fn a_relay_transport_stream_admits_a_relay_only_consumer() {
 async fn a_webrtc_only_consumer_reads_over_the_data_channel() {
     let (url, _relay) = test_relay::spawn_plain().await.expect("relay");
     let url = url.to_string();
-    let producer_node = on_relay(&url, vec![Transport::P2p], PathFlags::default()).await;
+    let producer_node = on_relay(&url, vec![Transport::Udp], PathFlags::default()).await;
     let webrtc_only = PathFlags {
         ip: false,
         webrtc: true,
     };
-    let consumer_node = on_relay(&url, vec![Transport::P2p], webrtc_only).await;
+    let consumer_node = on_relay(&url, vec![Transport::Udp], webrtc_only).await;
     let producer = producer_node.create().await;
     assert!(!producer.hash().relay_transport);
     let hash = producer.hash().clone();
@@ -357,12 +357,12 @@ async fn a_consumer_with_no_lane_to_a_webrtc_only_producer_fails_fast() {
         ip: false,
         webrtc: true,
     };
-    let producer_node = on_relay(&url, vec![Transport::P2p], webrtc_only).await;
+    let producer_node = on_relay(&url, vec![Transport::Udp], webrtc_only).await;
     let no_webrtc = PathFlags {
         ip: true,
         webrtc: false,
     };
-    let consumer_node = on_relay(&url, vec![Transport::P2p], no_webrtc).await;
+    let consumer_node = on_relay(&url, vec![Transport::Udp], no_webrtc).await;
     let producer = producer_node.create().await;
     let hash = producer.hash().clone();
     let started = Instant::now();
@@ -378,7 +378,7 @@ async fn a_consumer_with_no_lane_to_a_webrtc_only_producer_fails_fast() {
 async fn a_hash_minted_by_a_bind_for_node_carries_its_relay() {
     let (url, _relay) = test_relay::spawn_plain().await.expect("relay");
     let url = url.to_string();
-    let first = on_relay(&url, vec![Transport::P2p], PathFlags::default()).await;
+    let first = on_relay(&url, vec![Transport::Udp], PathFlags::default()).await;
     let given = first.create().await.hash().clone();
     let node = StreamNode::bind_for(&given).await.expect("bind for");
     let minted = node.create().await.hash().clone();

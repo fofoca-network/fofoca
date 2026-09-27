@@ -46,7 +46,7 @@ pub struct Opts {
     /// any uses only those; naming none is a loopback mesh. Ignored with a
     /// `topic` (always all three) or a `mesh` id (which carries its own).
     pub lookup: Vec<Lookup>,
-    /// What may carry payload: `p2p`, and `relay` if named. Empty ⇒ `p2p`
+    /// What may carry payload: `udp`, and `relay` if named. Empty ⇒ `udp`
     /// alone, so all data is peer to peer and the relay serves lookup only.
     /// `relay` needs `relay` in `lookup`. Part of the mesh id, so a joiner
     /// inherits it; ignored when joining by id.
@@ -318,12 +318,12 @@ mod tests {
     #[test]
     fn the_json_shape_is_the_three_choices_and_the_paths() {
         let parsed: Opts = serde_json::from_str(
-            r#"{"lookup":["mdns","relay"],"transport":["p2p","relay"],
+            r#"{"lookup":["mdns","relay"],"transport":["udp","relay"],
                 "relayUrls":["http://127.0.0.1:3340/"],"paths":{"webrtc":false}}"#,
         )
         .expect("the documented shape parses");
         assert_eq!(parsed.lookup, vec![Lookup::Mdns, Lookup::Relay]);
-        assert_eq!(parsed.transport, vec![Transport::P2p, Transport::Relay]);
+        assert_eq!(parsed.transport, vec![Transport::Udp, Transport::Relay]);
         assert_eq!(parsed.relay_urls, vec!["http://127.0.0.1:3340/".to_owned()]);
         assert!(parsed.paths.ip && !parsed.paths.webrtc);
         for stale in [
@@ -405,7 +405,7 @@ mod tests {
 
         let relayed = create_config(&Opts {
             lookup: vec![Lookup::Relay],
-            transport: vec![Transport::P2p, Transport::Relay],
+            transport: vec![Transport::Udp, Transport::Relay],
             ..opts()
         });
         assert!(relayed.transport.relay_transport);
@@ -413,7 +413,7 @@ mod tests {
         assert!(
             resolve_kind(
                 &Opts {
-                    transport: vec![Transport::P2p, Transport::Relay],
+                    transport: vec![Transport::Udp, Transport::Relay],
                     ..opts()
                 },
                 None,
@@ -430,7 +430,7 @@ mod tests {
     fn the_relay_can_serve_lookup_alone() {
         let create = create_config(&Opts {
             lookup: vec![Lookup::Relay],
-            transport: vec![Transport::P2p],
+            transport: vec![Transport::Udp],
             ..opts()
         });
         assert_eq!(create.lookups.relay_lookup, RelayChoice::Pinned);
@@ -439,7 +439,7 @@ mod tests {
         let (topic, _) = resolve_kind(
             &Opts {
                 topic: Some("standup".to_owned()),
-                transport: vec![Transport::P2p],
+                transport: vec![Transport::Udp],
                 relay_urls: vec!["http://127.0.0.1:3340/".to_owned()],
                 ..opts()
             },
@@ -454,7 +454,7 @@ mod tests {
     }
 
     #[test]
-    fn p2p_cannot_be_left_out_of_the_transports() {
+    fn udp_cannot_be_left_out_of_the_transports() {
         let error = resolve_kind(
             &Opts {
                 lookup: vec![Lookup::Relay],
@@ -464,7 +464,7 @@ mod tests {
             None,
         )
         .expect_err("relay alone is not a mode the engine has");
-        assert!(format!("{error:#}").contains("p2p"), "{error:#}");
+        assert!(format!("{error:#}").contains("udp"), "{error:#}");
     }
 
     /// `relayUrls` swaps the default ladder for the caller's, on both the
@@ -582,7 +582,7 @@ mod tests {
         let (relayed, _) = resolve_kind(
             &Opts {
                 topic: Some("standup".to_owned()),
-                transport: vec![Transport::P2p, Transport::Relay],
+                transport: vec![Transport::Udp, Transport::Relay],
                 ..opts()
             },
             None,

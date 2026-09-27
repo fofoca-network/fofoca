@@ -593,23 +593,23 @@ pub(crate) fn needs_webrtc_lane(addr: &EndpointAddr) -> bool {
 /// snapshot — that snapshot is empty while the relay link is down, and empty
 /// reads as "unknown" for a remote but must not for ourselves. A wasm node
 /// never has IP transports whatever the flags say.
-pub(crate) fn local_needs_webrtc_lane(has_ip_transport: bool) -> bool {
-    cfg!(target_arch = "wasm32") || !has_ip_transport
+pub(crate) fn local_needs_webrtc_lane(has_udp_transport: bool) -> bool {
+    cfg!(target_arch = "wasm32") || !has_udp_transport
 }
 
 /// Whether a pair needs the lane: **either** end lacking IP is enough. The
 /// remote is judged by its advertised address, this node by what it knows
 /// about itself.
 #[must_use]
-pub fn pair_needs_lane(remote: &EndpointAddr, local_has_ip_transport: bool) -> bool {
-    needs_webrtc_lane(remote) || local_needs_webrtc_lane(local_has_ip_transport)
+pub fn pair_needs_lane(remote: &EndpointAddr, local_has_udp_transport: bool) -> bool {
+    needs_webrtc_lane(remote) || local_needs_webrtc_lane(local_has_udp_transport)
 }
 
 /// Whether *this* node's rendezvous graft must wait for a data-channel
 /// session: a lane-needing node on a lookup-only mesh. With the relay allowed
 /// as a transport nothing needs holding.
-pub(crate) fn node_graft_needs_session(relay_transport: bool, has_ip_transport: bool) -> bool {
-    !relay_transport && local_needs_webrtc_lane(has_ip_transport)
+pub(crate) fn node_graft_needs_session(relay_transport: bool, has_udp_transport: bool) -> bool {
+    !relay_transport && local_needs_webrtc_lane(has_udp_transport)
 }
 
 pub(crate) fn negotiate_session(
@@ -636,7 +636,7 @@ pub(crate) fn negotiate_session(
     // browser that evaluates this. It would see the native peer's IP, skip,
     // and the native — waiting to be dialled — would never offer. The pair
     // would silently never get a channel.
-    if !pair_needs_lane(&addr, state.local_ip_transport) {
+    if !pair_needs_lane(&addr, state.local_udp_transport) {
         tracing::debug!(
             target: LOG_TARGET,
             %peer,
@@ -752,7 +752,7 @@ pub(crate) fn negotiate_rendezvous_session(
     let Some(handle) = state.webrtc.clone() else {
         return;
     };
-    if !local_needs_webrtc_lane(state.local_ip_transport) && !state.rendezvous_offer_fallback {
+    if !local_needs_webrtc_lane(state.local_udp_transport) && !state.rendezvous_offer_fallback {
         // An IP-capable peer normally reaches the rendezvous by punching
         // inside the bootstrap connection — the data channel would be a
         // worse path — so the punch gets the first heal tick. But IP
@@ -819,7 +819,7 @@ pub(crate) fn offer_rendezvous_at_start(
     state: &mut crate::daemon::state::EventLoopState,
     ctx: &crate::daemon::ctx::HandlerCtx<'_>,
 ) {
-    if local_needs_webrtc_lane(state.local_ip_transport) {
+    if local_needs_webrtc_lane(state.local_udp_transport) {
         negotiate_rendezvous_session(state, ctx);
     }
 }

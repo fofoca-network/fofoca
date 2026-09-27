@@ -319,7 +319,7 @@ impl MeshConfig {
     ///
     /// # Errors
     /// `relay_urls` is given without [`Lookup::Relay`], `transports` leaves
-    /// [`Transport::P2p`] out, or `transports` names [`Transport::Relay`]
+    /// [`Transport::Udp`] out, or `transports` names [`Transport::Relay`]
     /// while no relay lookup is on.
     pub fn resolve(
         lookups: &[Lookup],
@@ -1047,7 +1047,7 @@ mod choice_tests {
         assert_eq!("mdns".parse::<Lookup>().unwrap(), Lookup::Mdns);
         assert_eq!("dht".parse::<Lookup>().unwrap(), Lookup::Dht);
         assert_eq!("relay".parse::<Lookup>().unwrap(), Lookup::Relay);
-        assert_eq!("p2p".parse::<Transport>().unwrap(), Transport::P2p);
+        assert_eq!("udp".parse::<Transport>().unwrap(), Transport::Udp);
         assert_eq!("relay".parse::<Transport>().unwrap(), Transport::Relay);
         for (name, lookup) in [
             ("mdns", Lookup::Mdns),
@@ -1056,7 +1056,14 @@ mod choice_tests {
         ] {
             assert_eq!(lookup.to_string(), name);
         }
-        assert_eq!(Transport::P2p.to_string(), "p2p");
+        assert_eq!(Transport::Udp.to_string(), "udp");
+    }
+
+    #[test]
+    fn the_direct_transport_is_named_udp_not_p2p() {
+        let udp = "udp".parse::<Transport>().unwrap();
+        assert_eq!(udp.to_string(), "udp");
+        assert!("p2p".parse::<Transport>().is_err());
     }
 
     #[test]
@@ -1068,7 +1075,7 @@ mod choice_tests {
         );
         let transport_error = "webrtc".parse::<Transport>().unwrap_err().to_string();
         assert!(
-            transport_error.contains("webrtc") && transport_error.contains("p2p, relay"),
+            transport_error.contains("webrtc") && transport_error.contains("udp, relay"),
             "{transport_error}"
         );
     }
@@ -1077,8 +1084,8 @@ mod choice_tests {
     fn the_lists_deserialize_from_json_names() {
         let lookups: Vec<Lookup> = serde_json::from_str(r#"["mdns","relay"]"#).unwrap();
         assert_eq!(lookups, vec![Lookup::Mdns, Lookup::Relay]);
-        let transports: Vec<Transport> = serde_json::from_str(r#"["p2p","relay"]"#).unwrap();
-        assert_eq!(transports, vec![Transport::P2p, Transport::Relay]);
+        let transports: Vec<Transport> = serde_json::from_str(r#"["udp","relay"]"#).unwrap();
+        assert_eq!(transports, vec![Transport::Udp, Transport::Relay]);
         assert!(serde_json::from_str::<Vec<Lookup>>(r#"["public"]"#).is_err());
     }
 
@@ -1111,35 +1118,35 @@ mod choice_tests {
     }
 
     #[test]
-    fn an_empty_transport_list_and_p2p_alone_keep_the_relay_off_payload() {
+    fn an_empty_transport_list_and_udp_alone_keep_the_relay_off_payload() {
         assert_eq!(
             TransportPolicy::from_transports(&[]).unwrap(),
             TransportPolicy::default()
         );
         assert!(
-            !TransportPolicy::from_transports(&[Transport::P2p])
+            !TransportPolicy::from_transports(&[Transport::Udp])
                 .unwrap()
                 .relay_transport
         );
         assert!(
-            TransportPolicy::from_transports(&[Transport::P2p, Transport::Relay])
+            TransportPolicy::from_transports(&[Transport::Udp, Transport::Relay])
                 .unwrap()
                 .relay_transport
         );
     }
 
     #[test]
-    fn p2p_cannot_be_disabled() {
+    fn udp_cannot_be_disabled() {
         let error = TransportPolicy::from_transports(&[Transport::Relay])
             .unwrap_err()
             .to_string();
-        assert!(error.contains("p2p"), "{error}");
+        assert!(error.contains("udp"), "{error}");
     }
 
     #[test]
     fn a_config_resolves_from_the_three_choices() {
         let config =
-            MeshConfig::resolve(&[Lookup::Relay], None, &[Transport::P2p, Transport::Relay])
+            MeshConfig::resolve(&[Lookup::Relay], None, &[Transport::Udp, Transport::Relay])
                 .unwrap();
         assert!(config.transport.relay_transport);
         assert_eq!(config.lookups.relay_lookup, RelayChoice::Pinned);
@@ -1155,7 +1162,7 @@ mod choice_tests {
     /// and carries no payload. That is also what an empty `transport` means.
     #[test]
     fn relay_can_be_a_lookup_and_nothing_more() {
-        for transports in [&[][..], &[Transport::P2p][..]] {
+        for transports in [&[][..], &[Transport::Udp][..]] {
             let config = MeshConfig::resolve(&[Lookup::Relay], None, transports).unwrap();
             assert_eq!(config.lookups.relay_lookup, RelayChoice::Pinned);
             assert!(!config.transport.relay_transport, "{transports:?}");
@@ -1165,7 +1172,7 @@ mod choice_tests {
 
     #[test]
     fn relay_transport_needs_the_relay_lookup() {
-        let error = MeshConfig::resolve(&[Lookup::Mdns], None, &[Transport::P2p, Transport::Relay])
+        let error = MeshConfig::resolve(&[Lookup::Mdns], None, &[Transport::Udp, Transport::Relay])
             .unwrap_err()
             .to_string();
         assert!(error.contains("relay"), "{error}");

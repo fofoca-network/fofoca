@@ -6,8 +6,8 @@
 /** One way a mesh's members find each other. */
 export type Lookup = 'mdns' | 'dht' | 'relay'
 
-/** One path a mesh's payload may ride. `p2p` is always on. */
-export type Transport = 'p2p' | 'relay'
+/** One path a mesh's payload may ride. `udp` is always on. */
+export type Transport = 'udp' | 'relay'
 
 export interface JoinOpts {
   /**
@@ -26,8 +26,8 @@ export interface JoinOpts {
   /** Defaults to a random `word-word` nickname. */
   nick?: string
   /**
-   * Topic only: what payload may ride, `['p2p']` (the default) or
-   * `['p2p', 'relay']`. Mixed into the derived id, so every member must pass
+   * Topic only: what payload may ride, `['udp']` (the default) or
+   * `['udp', 'relay']`. Mixed into the derived id, so every member must pass
    * the same list. Ignored when joining by id (the id carries it).
    */
   transport?: Transport[]
@@ -51,8 +51,8 @@ export interface CreateOpts {
    */
   lookup?: Lookup[]
   /**
-   * What payload may ride: `['p2p']` (the default), so all data is peer to
-   * peer and the relay is a meeting point only, or `['p2p', 'relay']` to let
+   * What payload may ride: `['udp']` (the default), so all data is peer to
+   * peer and the relay is a meeting point only, or `['udp', 'relay']` to let
    * payload fall back to the relay. `'relay'` needs `'relay'` in `lookup`.
    * Baked into the mesh id, so joiners inherit it.
    */

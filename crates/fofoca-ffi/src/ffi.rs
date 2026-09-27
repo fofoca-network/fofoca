@@ -44,7 +44,7 @@ pub struct FofocaOpts {
     /// Comma-separated lookups, any of `mdns`, `dht`, `relay`; NULL ⇒ none
     /// (a loopback mesh on create).
     pub lookup: *const c_char,
-    /// Comma-separated transports, `p2p` or `p2p,relay`; NULL ⇒ `p2p`, so
+    /// Comma-separated transports, `udp` or `udp,relay`; NULL ⇒ `udp`, so
     /// all data stays peer to peer.
     pub transport: *const c_char,
     /// Comma-separated custom relay ladder; NULL ⇒ the default ladder.

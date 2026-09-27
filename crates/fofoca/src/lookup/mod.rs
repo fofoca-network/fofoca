@@ -137,15 +137,15 @@ impl TransportHandles {
     reason = "one independent on/off per transport; a bitflags type would read worse"
 )]
 pub struct TransportOpts {
-    /// Direct UDP and hole-punched paths, plus the address lookups that find
-    /// them. Cleared by a WebRTC-only instance.
-    pub ip: bool,
+    /// QUIC on direct and hole-punched UDP paths, plus the address lookups
+    /// that find them. Cleared by a WebRTC-only instance.
+    pub udp: bool,
     /// The relay. **Never cleared by `webrtc`-only**, because the relay is the
     /// rendezvous: it carries the bootstrap dial and the JSEP exchange. Clearing
     /// it would sever the very thing that lets a `WebRTC` session be negotiated.
     ///
     /// Not the mesh policy: this says whether *this node* registers a relay
-    /// transport at all, the way `ip` and `webrtc` do. Whether the relay may
+    /// transport at all, the way `udp` and `webrtc` do. Whether the relay may
     /// carry payload is mesh-wide and lives in the id, as
     /// `protocol::TransportPolicy::relay_transport`.
     pub relay: bool,
@@ -160,7 +160,7 @@ pub struct TransportOpts {
 impl Default for TransportOpts {
     fn default() -> Self {
         Self {
-            ip: true,
+            udp: true,
             relay: true,
             webrtc: true,
             multihop: false,
@@ -200,7 +200,7 @@ impl TransportOpts {
     #[must_use]
     pub fn webrtc_only() -> Self {
         Self {
-            ip: false,
+            udp: false,
             relay: true,
             webrtc: true,
             multihop: false,
@@ -234,7 +234,7 @@ impl Default for PathFlags {
 impl From<PathFlags> for TransportOpts {
     fn from(paths: PathFlags) -> Self {
         Self {
-            ip: paths.ip,
+            udp: paths.ip,
             webrtc: paths.webrtc,
             ..Self::default()
         }
@@ -345,7 +345,7 @@ pub async fn build_endpoint(
     // does not *exist* on a wasm build of iroh, because a browser has no IP
     // transports to clear. The flag is already satisfied there by construction.
     #[cfg(not(target_arch = "wasm32"))]
-    if !transports.opts.ip {
+    if !transports.opts.udp {
         // `clear_ip_transports` only — deliberately **not**
         // `clear_address_lookup`. That was the first attempt and it silently
         // broke everything: `add_peer_addr` registers a `MemoryLookup` on the
@@ -383,11 +383,11 @@ pub async fn build_endpoint(
     // that need the bound endpoint's id), so `clear_address_lookup` above does
     // not reach them — they have to be skipped here as well. Both exist to find
     // IP paths, so an instance with IP off has no use for either.
-    if lookups.mdns && transports.opts.ip {
+    if lookups.mdns && transports.opts.udp {
         #[cfg(all(feature = "host", feature = "mdns"))]
         mdns::wire(&endpoint)?;
     }
-    if lookups.dht && transports.opts.ip {
+    if lookups.dht && transports.opts.udp {
         #[cfg(all(feature = "host", feature = "dht"))]
         dht::wire(&endpoint)?;
     }

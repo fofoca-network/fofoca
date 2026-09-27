@@ -19,7 +19,7 @@ the other.
   code instead of unwinding across `extern "C"`.
 - `fofoca_opts` takes three comma-separated lists, one concept each:
   `lookup` (`"mdns,dht,relay"`, any subset) is how members find each other,
-  `transport` (`"p2p"` or `"p2p,relay"`) is what payload may ride, and
+  `transport` (`"udp"` or `"udp,relay"`) is what payload may ride, and
   `relay_urls` is which relay (NULL for the default ladder). Leave
   `transport` NULL and every byte of data goes peer to peer.
   `disable_ip` / `disable_webrtc` switch this node's own paths off.

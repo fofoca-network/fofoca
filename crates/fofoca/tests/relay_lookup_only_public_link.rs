@@ -204,7 +204,7 @@ async fn two_ip_peers_link_through_the_gated_rendezvous() {
     let alice_saw = Arc::new(Joined::default());
     let bob_saw = Arc::new(Joined::default());
     let ip_only = TransportOpts {
-        ip: true,
+        udp: true,
         relay: true,
         webrtc: false,
         multihop: false,
@@ -250,7 +250,7 @@ async fn a_webrtc_only_peer_links_through_the_beacon_lane() {
         &relay,
         Arc::clone(&alice_saw),
         TransportOpts {
-            ip: true,
+            udp: true,
             relay: true,
             webrtc: true,
             multihop: false,
@@ -267,7 +267,7 @@ async fn a_webrtc_only_peer_links_through_the_beacon_lane() {
         &relay,
         Arc::clone(&bob_saw),
         TransportOpts {
-            ip: false,
+            udp: false,
             relay: true,
             webrtc: true,
             multihop: false,

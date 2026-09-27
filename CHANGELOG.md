@@ -82,8 +82,8 @@ published to a registry; pin it with
   assert in `fofoca-ffi` and by `packages/fofoca-ffi`'s encoder test.
 - **Breaking:** every create surface names three mesh-wide choices apart,
   one concept each. `lookup` (`lookup: ['mdns', 'dht', 'relay']`, any
-  subset) is how members find each other. `transport` (`['p2p']` or
-  `['p2p', 'relay']`) is what payload may ride. `relay_urls` is which relay.
+  subset) is how members find each other. `transport` (`['udp']` or
+  `['udp', 'relay']`) is what payload may ride. `relay_urls` is which relay.
   The `public`, `mdns`, `dht`, `relay_lookup` and `relay_transport` booleans
   are gone; `public: true` is spelled `lookup: ['mdns', 'dht', 'relay']`, and
   naming no lookup is a loopback mesh. A ladder no longer implies the relay

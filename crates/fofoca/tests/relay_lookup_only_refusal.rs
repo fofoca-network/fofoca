@@ -133,7 +133,7 @@ async fn spawn(
             endpoint: None,
             protocols: Vec::new(),
             transports: TransportOpts {
-                ip: false,
+                udp: false,
                 relay: true,
                 webrtc: false,
                 multihop: false,

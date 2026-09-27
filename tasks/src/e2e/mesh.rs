@@ -502,8 +502,8 @@ fn native_opts(cell: &Cell, relay_url: &str, selector: NativeSelector<'_>) -> me
     opts.nick = Some("native".to_owned());
     opts.relay_urls = vec![relay_url.to_owned()];
     opts.transport = match cell.policy {
-        Policy::RelayTransport => vec![Transport::P2p, Transport::Relay],
-        Policy::LookupOnly => vec![Transport::P2p],
+        Policy::RelayTransport => vec![Transport::Udp, Transport::Relay],
+        Policy::LookupOnly => vec![Transport::Udp],
     };
     opts.paths = match cell.native {
         NativeTransports::Default => PathFlags {
@@ -533,8 +533,8 @@ fn page_url(base: &str, cell: &Cell, relay_url: &str, selector: &str) -> String 
         "{base}/?{selector}&nick=browser&relay={}&transport={}&log=fofoca=debug,iroh_gossip=debug",
         urlencode(relay_url),
         match cell.policy {
-            Policy::RelayTransport => "p2p,relay",
-            Policy::LookupOnly => "p2p",
+            Policy::RelayTransport => "udp,relay",
+            Policy::LookupOnly => "udp",
         },
     )
 }

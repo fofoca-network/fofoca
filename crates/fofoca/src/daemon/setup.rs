@@ -576,7 +576,7 @@ pub async fn setup_mesh(kind: SetupKind, params: SetupParams) -> Result<EventLoo
         multihop: multihop_handle,
         webrtc,
         webrtc_enabled: transports.webrtc,
-        local_ip_transport: !cfg!(target_arch = "wasm32") && transports.ip,
+        local_udp_transport: !cfg!(target_arch = "wasm32") && transports.udp,
         webrtc_admission,
         webrtc_ice,
         unicast_rx,
@@ -820,7 +820,7 @@ async fn setup_join(build: &SetupBuild<'_>, kind: SetupKind) -> Result<Assembled
     // it is attached.
     let needs_session = crate::transport::webrtc::node_graft_needs_session(
         build.relay_transport,
-        build.transports.ip,
+        build.transports.udp,
     );
     let bootstrap = if needs_session { vec![] } else { vec![rdv.id] };
     let topic = gossip.subscribe(topic_id, bootstrap).await?;

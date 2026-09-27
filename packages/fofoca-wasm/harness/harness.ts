@@ -9,8 +9,8 @@
  * - `nick` — this peer's nickname.
  * - `relay` — a custom relay URL (repeatable); with `topic` it is part of
  *   the derived id, so the native side must pass the same.
- * - `transport` — what payload may ride, `p2p` (the default) or
- *   `p2p,relay` (id-changing, same rule).
+ * - `transport` — what payload may ride, `udp` (the default) or
+ *   `udp,relay` (id-changing, same rule).
  * - `log` — an `EnvFilter` for the engine's tracing, to the console.
  *
  * DOM contract (what a driver asserts on):

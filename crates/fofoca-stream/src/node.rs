@@ -37,7 +37,7 @@ pub struct StreamOpts {
     /// How peers find each other: any of `mdns`, `dht`, `relay`. None is a
     /// loopback node.
     pub lookup: Vec<Lookup>,
-    /// What may carry bytes: `p2p`, and `relay` if named.
+    /// What may carry bytes: `udp`, and `relay` if named.
     pub transport: Vec<Transport>,
     /// A custom relay ladder, first preferred. Empty is the default ladder.
     pub relay_urls: Vec<String>,
