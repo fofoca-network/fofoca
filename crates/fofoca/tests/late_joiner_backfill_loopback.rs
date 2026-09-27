@@ -254,14 +254,13 @@ async fn a_late_joiner_backfills_on_meeting_its_only_peer() {
 /// load it still missed when the joiner met both peers over the rendezvous
 /// before its first real-peer link: both answers re-sent frames the
 /// rendezvous had just carried in alice's flush, iroh-gossip dropped them as
-/// seen, and with the tick pinned nothing asked again. The joiner now asks
-/// again on its first real-peer link. It can still fail two ways, under load:
-/// the joiner gets no direct link when it has the lowest endpoint id and its
-/// first frame at a peer is not its `joined` (no `PeerInfo` re-flood reaches
-/// it, and both peers defer the first dial to it); or frames reach it with no
-/// parent and stay orphans.
+/// seen, and with the tick pinned nothing asked again. It also missed when the
+/// joiner had the lowest endpoint id and its first frame at a peer was not its
+/// `joined`: no `PeerInfo` re-flood reached it, and both peers deferred the
+/// first dial to it. The joiner now asks again on its first real-peer link,
+/// and a new peer's first frame of any kind floods our address. The test waits
+/// for the first answer only; it does not show that all 160 changes arrive.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "fails ~1 run in 20 under load: no direct link when the joiner has the lowest id, and orphaned frames; remove when both are fixed"]
 async fn a_late_joiner_backfills_on_meeting_a_meshed_pair() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
