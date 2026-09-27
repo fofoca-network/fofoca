@@ -12,10 +12,15 @@ shift
 
 # Not a pipeline: `tail -f` never ends by itself, and a pipeline waits for it
 # after fofoca-stream has exited. Through a FIFO, the trap stops it instead.
-fifo=$(mktemp -u "${TMPDIR:-/tmp}/tail-stream.XXXXXX")
-mkfifo "$fifo"
+# The FIFO carries the file's bytes, so only this user may open it: a
+# private directory (mktemp -d is 0700) and a 0600 FIFO inside it. The mode
+# repeats what the directory already ensures, on purpose: it still holds if
+# the FIFO ever moves out.
+dir=$(mktemp -d "${TMPDIR:-/tmp}/tail-stream.XXXXXX")
+fifo="$dir/input"
+mkfifo -m 600 "$fifo"
 tail_pid=
-trap 'rm -f "$fifo"; [ -n "$tail_pid" ] && kill "$tail_pid" 2>/dev/null; true' EXIT
+trap 'rm -rf "${dir:?}"; [ -n "$tail_pid" ] && kill "$tail_pid" 2>/dev/null; true' EXIT
 tail -f "$file" > "$fifo" &
 tail_pid=$!
 "${FOFOCA_STREAM:-fofoca-stream}" "$@" < "$fifo"
