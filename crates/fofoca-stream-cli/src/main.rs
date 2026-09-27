@@ -150,8 +150,18 @@ async fn read(args: &Args, node: &StreamNode, hash: &StreamHash) -> Result<()> {
     note(args, "reading");
     let mut stdout = std::io::stdout().lock();
     while let Some(chunk) = reader.read().await? {
-        stdout.write_all(&chunk).context("writing to stdout")?;
-        stdout.flush().context("flushing stdout")?;
+        let written = stdout.write_all(&chunk).and_then(|()| stdout.flush());
+        // Whoever reads our stdout stopped (`| head`). Rust ignores SIGPIPE,
+        // so the EPIPE lands here instead of killing us, and the read ends
+        // with exit 0 (ripgrep's choice, not the 141 a killed `cat` gets).
+        // The producer then sees its reader leave.
+        if let Err(error) = &written
+            && error.kind() == std::io::ErrorKind::BrokenPipe
+        {
+            note(args, "stdout closed; leaving the stream");
+            return Ok(());
+        }
+        written.context("writing to stdout")?;
     }
     drop(stdout);
     note(args, "end of stream");
