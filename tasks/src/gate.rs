@@ -254,9 +254,9 @@ pub(crate) const STEPS: &[Step] = &[
     },
     // `iroh-test-utils` is off by default and no row above reaches a test target
     // with it on, so the relay-policy proofs — `tests/relay_lookup_only_*.rs`
-    // and the webrtc graft tests — were never even compiled. `--no-run`: two of
-    // them are red on the pinned iroh revs (issue #2) and the rest want a
-    // network of their own, so compiling is the part that belongs in a gate.
+    // and the webrtc graft tests — were never even compiled. `--no-run`: they
+    // want a network of their own, so compiling is the part that belongs in a
+    // gate.
     Step {
         kind: Kind::Test,
         scope: Scope::Crate("fofoca"),

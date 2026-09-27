@@ -5,6 +5,10 @@
  * port somebody asked for, or on the one the e2e harness polls, is a silent
  * wrong answer. Only the default climbs, so a stale server left on it costs a
  * different URL in the startup log instead of a crash.
+ *
+ * Three identical copies: `scripts/`, and `scripts/` under the light-cycles
+ * and chat-webrtc web examples, which are Bun workspaces of their own and
+ * cannot import across. Change all three together.
  */
 
 const RUNGS = 10
