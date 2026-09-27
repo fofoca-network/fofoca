@@ -347,6 +347,39 @@ impl std::fmt::Debug for SetupParams {
     }
 }
 
+/// Why a browser refuses a mesh: one string, so a test can match the refusal
+/// without copying its text.
+pub const BROWSER_HAS_NO_PATH: &str = "a browser cannot carry payload in this mesh: its transport list has neither `webrtc` nor `relay`";
+
+/// The paths this member runs: the mesh's transport list decides which direct
+/// paths exist, and a node can only have fewer.
+///
+/// # Errors
+/// On a browser, which has no UDP, a list that leaves both the data channel
+/// and relay payload out: nothing could carry its payload. Refused here rather
+/// than left as a member that links to nobody and says nothing. A native node
+/// never refuses: every list `validate` accepts names `udp` or `webrtc`, and
+/// a native node can run either.
+#[cfg_attr(
+    not(target_arch = "wasm32"),
+    expect(
+        clippy::unnecessary_wraps,
+        reason = "only a browser can refuse; the signature is one for both targets"
+    )
+)]
+fn member_transports(
+    transports: crate::lookup::TransportOpts,
+    policy: crate::protocol::TransportPolicy,
+) -> Result<crate::lookup::TransportOpts> {
+    let transports = transports.within(&policy);
+    #[cfg(target_arch = "wasm32")]
+    anyhow::ensure!(
+        transports.webrtc || policy.relay_transport,
+        BROWSER_HAS_NO_PATH
+    );
+    Ok(transports)
+}
+
 /// The kind-independent build inputs threaded into [`setup_create`] /
 /// [`setup_join`]: the loop-shared refs both attach paths need to stand up
 /// the endpoint, gossip overlay and rendezvous.
@@ -471,6 +504,7 @@ pub async fn setup_mesh(kind: SetupKind, params: SetupParams) -> Result<EventLoo
     mesh_config.validate()?;
     let lookups = mesh_config.lookups.clone();
     let relay_transport = mesh_config.transport.relay_transport;
+    let transports = member_transports(transports, mesh_config.transport)?;
 
     // The off-loop rung channel: the backgrounded startup probe and the
     // beacon's liveness self-monitor publish a chosen rung here; the
@@ -624,6 +658,7 @@ fn build_overlay(
             .then(|| (webrtc.clone(), admission.clone(), ice)),
         build.take_protocols(),
         build.relay_transport,
+        crate::transport::webrtc::local_needs_webrtc_lane(build.transports.udp),
     );
     (gossip, router, admission, ice)
 }

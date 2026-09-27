@@ -117,7 +117,10 @@ async fn spawn(
             },
             password: None,
             issuer_pubkey: None,
-            transport: TransportPolicy { relay_transport },
+            transport: TransportPolicy {
+                relay_transport,
+                ..TransportPolicy::default()
+            },
         },
     )
     .expect("derive a relay-only mesh");

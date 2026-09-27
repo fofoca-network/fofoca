@@ -445,7 +445,7 @@ An id minted before the policy existed keeps its bytes and topic and reads as lo
 
 Every create surface names three mesh-wide choices apart, because they are three concepts.
 `lookup` (`--lookup mdns,dht,relay` on a CLI, `lookup: ['relay']` in JSON and TypeScript) says how members find each other.
-`transport` (`--transport udp,relay`, `transport: ['udp', 'relay']`) says what payload may ride; `udp` is always on.
+`transport` (`--transport udp,webrtc,relay`, `transport: ['udp', 'webrtc', 'relay']`) says what payload may ride; it needs `udp` or `webrtc`, and `udp,webrtc` is the default.
 `relay_urls` (`--relay-url`, `relayUrls`) says which relay, and nothing about its role.
 `fofoca_protocol::Lookup` and `Transport` are the entries of the first two lists, and `MeshConfig::resolve` is the one place that knows all three.
 The two rules that need two of them live there and nowhere else: a ladder needs `relay` among the lookups, and so does letting the relay carry payload.
@@ -518,7 +518,7 @@ The reverse route derives from the forward route, so a reply needs no fresh look
 `fofoca-stream` carries bytes from one producer to one consumer.
 It uses no gossip: the bytes ride the `fofoca/stream/1` ALPN.
 By default they ride a direct path: QUIC over IP, or a WebRTC data channel when one end is a browser.
-A stream created with `transport: ['udp', 'relay']` lets them fall back to the relay when no direct path exists; the node must then also name `relay` among its lookups, which a browser always does.
+A stream created with `transport: ['udp', 'webrtc', 'relay']` lets them fall back to the relay when no direct path exists; the node must then also name `relay` among its lookups, which a browser always does.
 
 A producer creates a stream and gets a hash.
 The hash holds a random 16-byte id, a 32-byte secret, the lookups, the relay policy, and the address of the producer.

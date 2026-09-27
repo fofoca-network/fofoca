@@ -13,7 +13,9 @@ pub use crate::daemon::params::{
     CreateParams, JoinParams, Resolved, TopicParams, derive_topic_mesh, derive_topic_mesh_config,
     derive_topic_mesh_with,
 };
-pub use crate::daemon::setup::{InjectedEndpoint, SetupKind, SetupParams, setup_mesh};
+pub use crate::daemon::setup::{
+    BROWSER_HAS_NO_PATH, InjectedEndpoint, SetupKind, SetupParams, setup_mesh,
+};
 
 /// The session state file the daemon writes for external readers — its sole
 /// writer. Daemon-session state, not a generic filesystem helper.

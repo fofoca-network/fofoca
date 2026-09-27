@@ -164,6 +164,7 @@ async fn spawn_with(
             issuer_pubkey: None,
             transport: TransportPolicy {
                 relay_transport: false,
+                ..TransportPolicy::default()
             },
         },
     )

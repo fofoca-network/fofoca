@@ -7,13 +7,15 @@ use anyhow::{Context, Result, bail};
 use fofoca::iroh::Endpoint;
 use fofoca::iroh::address_lookup::memory::MemoryLookup;
 use fofoca::iroh::protocol::Router;
+use fofoca::net::TransportOpts;
 use fofoca::net::direct::{
     IceProfile, MAX_DIRECT_PEERS, MESH_WEBRTC_SIGNAL_ALPN, PROBE_DEADLINE, SignalAdmission,
     WebRtcHandle, WebRtcSignalAcceptor, build_peer_webrtc, dial_signal, pair_needs_lane,
     wait_direct,
 };
-use fofoca::net::{PathFlags, TransportOpts};
-use fofoca::protocol::{Lookup, LookupOpts, MeshConfig, RelayChoice, RelayLadder, Transport};
+use fofoca::protocol::{
+    Lookup, LookupOpts, MeshConfig, RelayChoice, RelayLadder, Transport, TransportPolicy,
+};
 use rand::RngCore as _;
 use serde::Deserialize;
 
@@ -37,12 +39,11 @@ pub struct StreamOpts {
     /// How peers find each other: any of `mdns`, `dht`, `relay`. None is a
     /// loopback node.
     pub lookup: Vec<Lookup>,
-    /// What may carry bytes: `udp`, and `relay` if named.
+    /// What may carry bytes: any of `udp`, `webrtc`, `relay`, with `udp` or
+    /// `webrtc` among them. Empty ⇒ `udp,webrtc`.
     pub transport: Vec<Transport>,
     /// A custom relay ladder, first preferred. Empty is the default ladder.
     pub relay_urls: Vec<String>,
-    /// Which of this node's paths may carry bytes.
-    pub paths: PathFlags,
 }
 
 /// One endpoint serving and opening streams. It never joins a gossip mesh.
@@ -53,8 +54,8 @@ pub struct StreamNode {
     webrtc: WebRtcHandle,
     registry: Arc<Registry>,
     lookups: LookupOpts,
-    relay_transport: bool,
-    paths: PathFlags,
+    transport: TransportPolicy,
+    transports: TransportOpts,
     ice: IceProfile,
     /// The producers this node has opened, by address. One lookup for all of
     /// them, so a node that opens many streams does not grow its address book
@@ -74,27 +75,24 @@ impl StreamNode {
             relay_ladder(&opts.relay_urls)?,
             &opts.transport,
         )?;
-        Self::bind_with(config.lookups, config.transport.relay_transport, opts.paths).await
+        let transports = TransportOpts::default().within(&config.transport);
+        Self::bind_with(config.lookups, config.transport, transports).await
     }
 
     /// Stand up an endpoint that can reach the producer of `hash`: the hash's
-    /// own lookups and relay policy, and every path this target has.
+    /// own lookups and transport list, narrowed to what this target has.
     ///
     /// # Errors
     /// As [`bind`](Self::bind).
     pub async fn bind_for(hash: &StreamHash) -> Result<Self> {
-        Self::bind_with(
-            hash.lookups.clone(),
-            hash.relay_transport,
-            PathFlags::default(),
-        )
-        .await
+        let transports = TransportOpts::default().within(&hash.transport);
+        Self::bind_with(hash.lookups.clone(), hash.transport, transports).await
     }
 
     async fn bind_with(
         lookups: LookupOpts,
-        relay_transport: bool,
-        paths: PathFlags,
+        transport: TransportPolicy,
+        transports: TransportOpts,
     ) -> Result<Self> {
         // A browser has no UDP socket, so a loopback node there is one no peer
         // can ever reach, and it would fail silently.
@@ -103,7 +101,7 @@ impl StreamNode {
             !lookups.is_loopback(),
             "a browser cannot reach a loopback stream: name a lookup (`relay`)"
         );
-        let (endpoint, webrtc) = build_peer_webrtc(&lookups, TransportOpts::from(paths)).await?;
+        let (endpoint, webrtc) = build_peer_webrtc(&lookups, transports).await?;
         let registry = Arc::new(Registry::default());
         let ice = IceProfile {
             host_only: lookups.is_loopback(),
@@ -112,10 +110,10 @@ impl StreamNode {
             crate::STREAM_ALPN,
             StreamAcceptor {
                 registry: Arc::clone(&registry),
-                relay_transport,
+                relay_transport: transport.relay_transport,
             },
         );
-        if paths.webrtc {
+        if transports.webrtc {
             router = router.accept(
                 MESH_WEBRTC_SIGNAL_ALPN,
                 WebRtcSignalAcceptor::new(
@@ -136,8 +134,8 @@ impl StreamNode {
             webrtc,
             registry,
             lookups,
-            relay_transport,
-            paths,
+            transport,
+            transports,
             ice,
             producers,
         })
@@ -163,7 +161,7 @@ impl StreamNode {
             StreamHash {
                 addr: self.endpoint.addr(),
                 lookups: self.lookups.clone(),
-                relay_transport: self.relay_transport,
+                transport: self.transport,
                 id,
                 secret,
             },
@@ -177,23 +175,23 @@ impl StreamNode {
     /// The producer cannot be reached, the only path is a relay the stream
     /// refuses, or the producer refuses the hash (a [`Refused`]).
     pub async fn open(&self, hash: &StreamHash) -> Result<Reader> {
-        let needs_lane = pair_needs_lane(&hash.addr, self.paths.ip);
+        let needs_lane = pair_needs_lane(&hash.addr, self.transports.udp);
         // Only a data channel could carry the bytes, and this node has none:
         // what is left is the relay the stream refuses, so say so now rather
         // than after the direct-path probe.
-        if needs_lane && !self.paths.webrtc && !hash.relay_transport {
+        if needs_lane && !self.transports.webrtc && !hash.transport.relay_transport {
             bail!(Refused::RelayRefused);
         }
         self.producers.add_endpoint_info(hash.addr.clone());
         // The WebRTC lane first: iroh does not move a live connection onto a
         // transport attached after it, so a browser's connection must start on
         // the data channel.
-        if self.paths.webrtc
+        if self.transports.webrtc
             && needs_lane
             && !self.webrtc.has_session(&hash.addr.id)
             && let Err(error) =
                 dial_signal(&self.endpoint, hash.addr.clone(), &self.webrtc, self.ice).await
-            && !hash.relay_transport
+            && !hash.transport.relay_transport
         {
             return Err(error.context("opening a WebRTC lane to the producer"));
         }
@@ -202,7 +200,7 @@ impl StreamNode {
             .connect(hash.addr.clone(), crate::STREAM_ALPN)
             .await
             .context("connecting to the producer")?;
-        if !hash.relay_transport && !wait_direct(&conn, PROBE_DEADLINE).await {
+        if !hash.transport.relay_transport && !wait_direct(&conn, PROBE_DEADLINE).await {
             conn.close(code::RELAY_REFUSED.into(), b"relay path refused");
             bail!(Refused::RelayRefused);
         }
@@ -236,6 +234,25 @@ fn relay_ladder(urls: &[String]) -> Result<Option<RelayLadder>> {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
+
+    // A reader runs only the paths the producer runs: an offer to a producer
+    // with no data channel would fail only after its whole JSEP round.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reader_takes_the_producers_transport_list() {
+        let producer_node = StreamNode::bind(&StreamOpts {
+            transport: vec![Transport::Udp],
+            ..StreamOpts::default()
+        })
+        .await
+        .expect("bind");
+        let hash = producer_node.create().await.hash().clone();
+        let reader_node = StreamNode::bind_for(&hash).await.expect("bind for");
+        assert!(reader_node.transports.udp);
+        assert!(
+            !reader_node.transports.webrtc,
+            "no data channel to offer to"
+        );
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn opening_many_streams_adds_one_address_lookup() {

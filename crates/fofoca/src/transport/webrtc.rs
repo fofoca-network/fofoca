@@ -709,11 +709,12 @@ fn spawn_offer_round(
 ///
 /// A webrtc-shaped node on a lookup-only mesh must never graft on a timer:
 /// the beacon's accept gate holds a relay-only connection and closes it
-/// after its deadline, and iroh-gossip's actor never redials a peer whose
-/// accepted connection died before the gossip handshake — one doomed dial
-/// wedges the link for the life of the process. `has_session` is no defence
-/// either: the rival re-check rebuilds the rendezvous endpoint, leaving a
-/// session that is locally held but dead on the other end. The only safe
+/// after its deadline, so a timer graft costs a whole hold for nothing. (It
+/// no longer wedges the link: the pinned iroh-gossip drops a peer whose
+/// connection died before the handshake and redials on the next send.)
+/// `has_session` is no defence either: the rival re-check rebuilds the
+/// rendezvous endpoint, leaving a session that is locally held but dead on
+/// the other end. The only safe
 /// trigger is the **attach event itself** — a JSEP round that just completed
 /// is the liveness proof — so [`negotiate_rendezvous_session`] reports it
 /// through the loop's `DirectOutcome` channel and the graft fires there,
@@ -1583,7 +1584,7 @@ mod tests {
             )
             .accept(
                 GOSSIP_ALPN,
-                super::super::DirectOnlyGossip::new(server_gossip.clone(), false),
+                super::super::DirectOnlyGossip::new(server_gossip.clone(), false, None),
             )
             .spawn();
 
@@ -1701,7 +1702,7 @@ mod tests {
             )
             .accept(
                 GOSSIP_ALPN,
-                super::super::DirectOnlyGossip::new(server_gossip.clone(), false),
+                super::super::DirectOnlyGossip::new(server_gossip.clone(), false, None),
             )
             .spawn();
 
@@ -1912,7 +1913,7 @@ mod tests {
             )
             .accept(
                 GOSSIP_ALPN,
-                super::super::DirectOnlyGossip::new(server_gossip.clone(), false),
+                super::super::DirectOnlyGossip::new(server_gossip.clone(), false, None),
             )
             .spawn();
 

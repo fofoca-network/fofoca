@@ -39,10 +39,9 @@ published to a registry; pin it with
   streams as wasm-bindgen classes, and `packages/fofoca-wasm` as its JS
   backend (`join` for a mesh, `bindStreams` / `bindStreamsFor` for streams).
   `cargo task build-wasm` builds it.
-- A custom relay ladder (`relay_urls` / `relayUrls` / `--relay-url`) and the
-  per-node path switches (`paths.ip`, `paths.webrtc`; `disable_ip` /
-  `disable_webrtc` in C) on every create surface. The ladder is mixed into a
-  derived topic id, so every member must pass the same list.
+- A custom relay ladder (`relay_urls` / `relayUrls` / `--relay-url`) on every
+  create surface. The ladder is mixed into a derived topic id, so every
+  member must pass the same list.
 - `fofoca_protocol::Lookup` and `Transport`, the entries of the `lookup` and
   `transport` lists every create surface takes, with `LookupSet::from_lookups`,
   `TransportPolicy::from_transports` and `MeshConfig::resolve` behind them, so
@@ -72,25 +71,29 @@ published to a registry; pin it with
   `{ from, text, directed }`: `bytes` and `eof` are gone, and `text` is
   always set. The backend seam's `BackendFrame` is `BackendMsg`, and
   `BackendSink.frame` is `BackendSink.msg`.
-- **Breaking (C ABI):** `fofoca_opts` is now 72 bytes: the five discovery
+- **Breaking (C ABI):** `fofoca_opts` is now 64 bytes: the five discovery
   ints (`is_public`, `mdns`, `dht`, `relay_lookup`, `relay_transport`) are
   replaced by two comma-list strings, `lookup` and `transport`, ahead of
-  `relay_urls`, and `disable_ip` / `disable_webrtc` follow. A consumer
+  `relay_urls`. A consumer
   compiled against the old header keeps passing the old struct and the
   engine reads it wrong — there is no version field to catch that, so relink
   against the new `include/fofoca.h`. The layout is pinned by a compile-time
   assert in `fofoca-ffi` and by `packages/fofoca-ffi`'s encoder test.
 - **Breaking:** every create surface names three mesh-wide choices apart,
   one concept each. `lookup` (`lookup: ['mdns', 'dht', 'relay']`, any
-  subset) is how members find each other. `transport` (`['udp']` or
-  `['udp', 'relay']`) is what payload may ride. `relay_urls` is which relay.
+  subset) is how members find each other. `transport` (`['udp', 'webrtc',
+  'relay']`, any subset with `udp` or `webrtc`; `['udp', 'webrtc']` when
+  empty) is what payload may ride. `relay_urls` is which relay.
   The `public`, `mdns`, `dht`, `relay_lookup` and `relay_transport` booleans
   are gone; `public: true` is spelled `lookup: ['mdns', 'dht', 'relay']`, and
   naming no lookup is a loopback mesh. A ladder no longer implies the relay
   lookup: both it and `'relay'` in `transport` need `'relay'` in `lookup`,
-  and a config that breaks either rule is rejected before any network. The
-  per-node switches are `paths` (was `transports`), so "transport" means
-  only the mesh-wide policy. In the wasm JSON every old field is an error,
+  and a config that breaks either rule is rejected before any network. A
+  list without `'udp'` (a WebRTC-only mesh) needs `'relay'` in `lookup` as
+  well, because the relay is the only path its WebRTC offers can take. The
+  mesh id decides every path: there are no per-node path switches, and a
+  browser refuses a mesh whose list has neither `'webrtc'` nor `'relay'`.
+  In the wasm JSON every old field is an error,
   not a silent no-op. `fofoca_protocol::resolve_lookups` lost its `public`
   parameter. `TransportOpts.relay` keeps its name — it is per-node
   capability, not the mesh policy.

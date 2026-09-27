@@ -15,8 +15,9 @@ pub(crate) struct Args {
     /// none is named. Ignored when reading: the hash carries its own.
     #[arg(long, value_delimiter = ',')]
     pub lookup: Vec<Lookup>,
-    /// What may carry the bytes: `udp`, or `udp,relay` to let them fall back
-    /// to the relay. Ignored when reading: the hash carries it.
+    /// What may carry the bytes: `udp,webrtc` when none is named, and `relay`
+    /// if named to let them fall back to the relay. Ignored when reading: the
+    /// hash carries it.
     #[arg(long, value_delimiter = ',')]
     pub transport: Vec<Transport>,
     /// A custom relay ladder, first preferred. Ignored when reading.
@@ -44,7 +45,6 @@ impl Args {
             lookup,
             transport: self.transport.clone(),
             relay_urls: self.relay_urls.clone(),
-            ..StreamOpts::default()
         }
     }
 
