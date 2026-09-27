@@ -1685,6 +1685,7 @@ dependencies = [
  "clap",
  "fofoca",
  "fofoca-stream",
+ "libc",
  "serde_json",
  "tokio",
  "tracing-subscriber",

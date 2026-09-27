@@ -81,9 +81,11 @@ async fn until_stopped(work: impl Future<Output = Result<()>>) -> Result<Result<
     }
 }
 
-/// Resolves at Ctrl-C or SIGTERM, with the exit code a shell gives each:
-/// 128 plus the signal number. A handler that cannot be installed never
-/// fires, as the default action then still applies.
+/// Resolves at Ctrl-C, SIGTERM or SIGHUP (a closed terminal, or `kill -HUP`),
+/// with the exit code a shell gives each: 128 plus the signal number. SIGHUP
+/// is left alone when the process inherited it ignored, as under `nohup`. A
+/// handler that cannot be installed never fires, as the default action then
+/// still applies.
 async fn stop_signal() -> i32 {
     let interrupt = async {
         match tokio::signal::ctrl_c().await {
@@ -92,21 +94,53 @@ async fn stop_signal() -> i32 {
         }
     };
     #[cfg(unix)]
-    let terminate = async {
-        use tokio::signal::unix::{SignalKind, signal};
-        match signal(SignalKind::terminate()) {
-            Ok(mut term) => {
-                term.recv().await;
-                143
+    let others = async {
+        use tokio::signal::unix::SignalKind;
+        let hangup = async {
+            if hangup_ignored() {
+                std::future::pending().await
+            } else {
+                unix_signal(SignalKind::hangup(), 129).await
             }
-            Err(_) => std::future::pending().await,
+        };
+        tokio::select! {
+            code = unix_signal(SignalKind::terminate(), 143) => code,
+            code = hangup => code,
         }
     };
     #[cfg(not(unix))]
-    let terminate = std::future::pending::<i32>();
+    let others = std::future::pending::<i32>();
     tokio::select! {
         code = interrupt => code,
-        code = terminate => code,
+        code = others => code,
+    }
+}
+
+/// Whether this process started with SIGHUP ignored, as under `nohup`. Then
+/// a closed terminal must not stop it, so no handler is installed: tokio's
+/// would replace the inherited ignore.
+#[cfg(unix)]
+#[expect(
+    unsafe_code,
+    reason = "libc::sigaction read; std has no way to query a signal's disposition"
+)]
+fn hangup_ignored() -> bool {
+    // SAFETY: `sigaction` is plain data, and all-zero is a valid value of it.
+    let mut old: libc::sigaction = unsafe { std::mem::zeroed() };
+    // SAFETY: a null new action only reads the current one into `old`.
+    let read = unsafe { libc::sigaction(libc::SIGHUP, std::ptr::null(), &raw mut old) } == 0;
+    read && old.sa_sigaction == libc::SIG_IGN
+}
+
+/// Resolves with `code` at the first `kind` signal.
+#[cfg(unix)]
+async fn unix_signal(kind: tokio::signal::unix::SignalKind, code: i32) -> i32 {
+    match tokio::signal::unix::signal(kind) {
+        Ok(mut signals) => {
+            signals.recv().await;
+            code
+        }
+        Err(_) => std::future::pending().await,
     }
 }
 
@@ -178,26 +212,36 @@ fn report_ready(args: &Args, hash: &StreamHash) {
     let hash = hash.encode();
     let url = args.page_url(&hash);
     if args.robot {
-        eprintln!(
+        say(format_args!(
             "{}",
             serde_json::json!({ "kind": "ready", "hash": hash, "url": url })
-        );
+        ));
         return;
     }
-    eprintln!("hash {hash}");
+    say(format_args!("hash {hash}"));
     match url {
-        Some(url) => eprintln!("open {url}"),
-        None => eprintln!("read it with: fofoca-stream {hash}"),
+        Some(url) => say(format_args!("open {url}")),
+        None => say(format_args!("read it with: fofoca-stream {hash}")),
     }
-    eprintln!("* waiting for a reader");
+    say(format_args!("* waiting for a reader"));
 }
 
 fn note(args: &Args, text: &str) {
     if args.robot {
-        eprintln!("{}", serde_json::json!({ "kind": "note", "text": text }));
+        say(format_args!(
+            "{}",
+            serde_json::json!({ "kind": "note", "text": text })
+        ));
     } else {
-        eprintln!("* {text}");
+        say(format_args!("* {text}"));
     }
+}
+
+/// One line to stderr. Best effort: once the terminal is gone the write
+/// fails, and `eprintln!` would panic there, skipping the node close that
+/// tells the peer the stream was abandoned.
+fn say(line: std::fmt::Arguments<'_>) {
+    let _ = writeln!(std::io::stderr(), "{line}");
 }
 
 #[cfg(test)]
