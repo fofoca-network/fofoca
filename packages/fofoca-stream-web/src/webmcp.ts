@@ -137,9 +137,14 @@ export function streamTools(runtime: StreamRuntime): ToolDescriptor[] {
     {
       name: 'stream_status',
       description:
-        "This tab's end of the stream: whether it reads or produces, the stream's hash, whether the reader has attached, whether the stream ended (or why it stopped early), the bytes so far, and the read log's cursors.",
+        "This tab's end of the stream: whether it reads or produces, whether the reader has attached, whether the stream ended (or why it stopped early), the bytes so far, and the read log's cursors. A producing tab also gets the stream's hash. The hash is a secret: whoever presents it first becomes the stream's one reader, so give it only to the intended reader and never write it into a shared chat or log. Once `attached` is true the hash is spent and harmless.",
       inputSchema: { type: 'object', properties: {} },
-      execute: async () => ok(runtime.status()),
+      execute: async () => {
+        // A reader's hash is spent and has no use to its agent; it is not
+        // handed out where it could leak.
+        const { hash, ...status } = runtime.status()
+        return ok(status.role === 'producer' && hash !== undefined ? { ...status, hash } : status)
+      },
     },
   ]
 }

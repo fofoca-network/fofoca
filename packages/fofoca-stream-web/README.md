@@ -55,7 +55,7 @@ same functions are on `window.stream`.
 | `stream_write` | Write `text` to the stream this tab produces. It waits for the reader, then for room. |
 | `stream_close` | End that stream: the reader gets everything, then the end. With no reader yet, the stream is abandoned. |
 | `stream_read` | What has arrived on the stream this tab reads, in order, plus a `cursor` to continue from. Reading takes nothing away. When nothing waits, wait up to `waitMs` (at most 25000) for the first entry. `encoding: "base64"` returns bytes that are not text, exactly. |
-| `stream_status` | The role, the hash, whether the reader attached, whether the stream ended (or why it stopped), the bytes so far, and the read log's cursors. |
+| `stream_status` | The role, whether the reader attached, whether the stream ended (or why it stopped), the bytes so far, and the read log's cursors. A producing tab also gets the hash, a secret: whoever presents it first becomes the one reader. |
 
 WebMCP has no streaming: a tool is one promise. `stream_read` is the closest
 thing: an agent that wants to follow a stream calls it in a loop, passing back

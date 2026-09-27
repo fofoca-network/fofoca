@@ -84,6 +84,21 @@ describe('streamTools', () => {
     const tools = streamTools(StreamRuntime.producing(fakeSink('h').sink))
     expect(await call(tools, 'stream_status')).toMatchObject({ role: 'producer', hash: 'h', attached: false })
   })
+
+  // The hash is a bearer secret: whoever presents it first becomes the one
+  // reader. A producer's agent needs it to hand the stream on; a reader's
+  // has no use for it, so the tool does not hand it out.
+  test('stream_status keeps the hash out of a reading tab', async () => {
+    const tools = streamTools(StreamRuntime.reading(fakeSource().source, { hash: 'secret' }))
+    const status = (await call(tools, 'stream_status')) as Record<string, unknown>
+    expect(status['role']).toBe('reader')
+    expect(status).not.toHaveProperty('hash')
+  })
+
+  test('stream_status says the hash is a secret', () => {
+    const tools = streamTools(StreamRuntime.producing(fakeSink('h').sink))
+    expect(tool(tools, 'stream_status').description).toContain('secret')
+  })
 })
 
 describe('registerStreamTools', () => {
