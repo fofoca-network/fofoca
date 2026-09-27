@@ -760,7 +760,10 @@ pub(crate) fn negotiate_rendezvous_session(
         // rendezvous has no UDP to punch to, and without this fallback an
         // IP-capable native could never join a tab's mesh (observed in the
         // browser-first matrix cells). Still linkless next tick: offer.
-        state.rendezvous_offer_fallback = true;
+        // A private beacon binds a port and answers no offer, and a tab
+        // never holds one, so there the fallback must not arm: it would
+        // hold the timer graft for a session that can never attach.
+        state.rendezvous_offer_fallback = state.rendezvous_answers_jsep;
         return;
     }
     let rendezvous = ctx.rendezvous_id;
