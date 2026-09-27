@@ -114,6 +114,14 @@ pub(crate) async fn handle_gossip_event(
                     state.meshed = true;
                     state.degraded = false;
                     flush_pending(state, ctx, "first real-peer link up").await;
+                    // Our first digests may have gone out over the rendezvous
+                    // alone, and their answers re-send frames every hop there
+                    // already saw: iroh-gossip drops a message id it has seen,
+                    // so none of it reaches us. Ask again over a link that can
+                    // carry the answer.
+                    tracing::debug!(target: "fofoca::gossip", "asked for state again on the first real-peer link");
+                    antientropy::broadcast_state_digests(state, ctx.sender, ctx.mesh, ctx.author)
+                        .await;
                     // Re-publish anything whose value depends on being meshed
                     // (the app's card dial hint); see `NodeApp::on_meshed`.
                     app.on_meshed(state, ctx).await;
@@ -1642,6 +1650,117 @@ mod evicted_orphan_tests {
              the receive path dropped them as duplicates",
             frames.len(),
             missing.len()
+        );
+        endpoint.close().await;
+    }
+}
+
+#[cfg(test)]
+mod first_link_digest_tests {
+    use iroh::endpoint::presets;
+    use iroh_gossip::api::Event;
+    use iroh_gossip::net::Gossip;
+
+    use super::handle_gossip_event;
+    use crate::daemon::ctx::HandlerCtx;
+    use crate::daemon::state::EventLoopState;
+    use crate::gossip::app::{AppClass, InboundApp, NodeApp};
+    use crate::gossip::event::SilentSink;
+    use crate::protocol::identity::{Identity, encode_pubkey};
+    use crate::protocol::{MeshId, Message};
+    use crate::testing::{endpoint_id, fresh_state, nick};
+    use crate::transport::MeshSender;
+
+    struct Inert;
+
+    #[async_trait::async_trait]
+    impl NodeApp for Inert {
+        fn classify(&self, _message: &Message) -> AppClass {
+            AppClass {
+                loggable: false,
+                beat: true,
+                valid: true,
+                chained: false,
+                sealed: false,
+            }
+        }
+
+        async fn on_app_frame(
+            &mut self,
+            _frame: InboundApp<'_>,
+            _state: &mut EventLoopState,
+            _ctx: &HandlerCtx<'_>,
+        ) -> bool {
+            false
+        }
+    }
+
+    /// A node whose first digests went out over the rendezvous alone can have
+    /// every answer dropped on the way: each hop already saw those frames, and
+    /// iroh-gossip drops a message id it has seen. So it asks again on its
+    /// first real-peer link, and on no other link. `idle.broadcasts` counts
+    /// digest broadcasts and nothing else a link-up sends; the test sender
+    /// cannot record frames, so the count stands in for the two digests.
+    #[tokio::test]
+    async fn only_the_first_real_peer_link_asks_for_state_again() {
+        let endpoint = iroh::Endpoint::builder(presets::Minimal)
+            .bind()
+            .await
+            .expect("bind a local endpoint");
+        let gossip = Gossip::builder().spawn(endpoint.clone());
+        let topic = gossip
+            .subscribe(iroh_gossip::proto::TopicId::from_bytes([4u8; 32]), vec![])
+            .await
+            .expect("subscribe to a peerless topic");
+        let (gossip_sender, _receiver) = topic.split();
+        let sender = MeshSender::new(gossip_sender);
+        let mesh = MeshId::from("test");
+        let identity = Identity::generate();
+        let our_pubkey = encode_pubkey(&identity.public());
+        let author = nick("late");
+        let sink = SilentSink;
+        let rendezvous = endpoint_id(9);
+        let ctx = HandlerCtx {
+            sender: &sender,
+            endpoint: &endpoint,
+            mesh: &mesh,
+            author: &author,
+            identity: &identity,
+            our_pubkey: &our_pubkey,
+            max_peers: 16,
+            rendezvous_id: rendezvous,
+            external_msg_tx: None,
+            sink: &sink,
+        };
+        let mut state = fresh_state();
+        let mut app = Inert;
+
+        let mut digests_on_link_up = async |peer| {
+            let before = state.idle.broadcasts;
+            handle_gossip_event(
+                Some(Ok(Event::NeighborUp(peer))),
+                &mut state,
+                &mut app,
+                &ctx,
+            )
+            .await;
+            state.idle.broadcasts - before
+        };
+
+        assert_eq!(
+            digests_on_link_up(rendezvous).await,
+            0,
+            "the rendezvous link"
+        );
+        assert_eq!(
+            digests_on_link_up(endpoint_id(1)).await,
+            2,
+            "the first real-peer link: one state and one meta digest"
+        );
+        assert_eq!(
+            digests_on_link_up(endpoint_id(2)).await,
+            0,
+            "a second real-peer link"
         );
         endpoint.close().await;
     }
