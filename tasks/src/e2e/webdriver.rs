@@ -114,7 +114,7 @@ impl Driver {
             if matches!(driver.child.try_wait(), Ok(Some(_))) {
                 return Some(false);
             }
-            server::reachable(&status_url).then_some(true)
+            crate::util::reachable(&status_url).then_some(true)
         });
         match ready {
             Some(true) => Ok(driver),
@@ -239,7 +239,7 @@ pub(super) fn run(
 /// A live `WebDriver` session on one browser, for a suite that drives the page
 /// itself rather than harvesting a published table. The driver dies with the
 /// session (its `Drop` kills the process), which also closes the window.
-#[cfg(any(feature = "mesh", feature = "bench"))]
+#[cfg(feature = "mesh")]
 #[derive(Debug)]
 pub(crate) struct Session {
     driver: Driver,
@@ -247,12 +247,8 @@ pub(crate) struct Session {
     version: String,
 }
 
-#[cfg(any(feature = "mesh", feature = "bench"))]
+#[cfg(feature = "mesh")]
 impl Session {
-    #[cfg_attr(
-        not(feature = "mesh"),
-        expect(dead_code, reason = "the benchmark only ever opens a CDP browser")
-    )]
     pub(super) fn open(browser: &str, binary: &str) -> Result<Self, Skip> {
         let driver = Driver::start(browser)?;
         let created = driver

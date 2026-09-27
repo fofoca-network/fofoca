@@ -7,9 +7,10 @@ use std::time::Duration;
 use fofoca_iroh_webrtc_transport::bench;
 
 use crate::TaskOutcome;
-use crate::e2e::build;
+use crate::util::wasm;
 use crate::util::{output, repo_root};
 
+use super::web::Engine::{Chrome, Safari};
 use super::{Args, Cell, Direction, native, serve, wanted, web};
 
 impl Direction {
@@ -25,16 +26,20 @@ impl Direction {
 impl Cell {
     pub(crate) fn expected_path(self) -> &'static str {
         match self {
-            Self::FofocaWebWeb | Self::FofocaWebNative | Self::FofocaNativeNativeWebRtc => "webrtc",
+            Self::FofocaChromeChrome
+            | Self::FofocaChromeNative
+            | Self::FofocaSafariNative
+            | Self::FofocaSafariChrome
+            | Self::FofocaNativeNativeWebRtc => "webrtc",
             Self::FofocaNativeNative | Self::IrohNativeNative => "ip",
-            Self::RawWebWeb | Self::RawWebWebDatagram => "data-channel",
+            Self::RawChromeChrome | Self::RawChromeChromeDatagram => "data-channel",
         }
     }
 
     pub(crate) fn needs_browser(self) -> bool {
-        matches!(
+        !matches!(
             self,
-            Self::FofocaWebWeb | Self::FofocaWebNative | Self::RawWebWeb | Self::RawWebWebDatagram
+            Self::FofocaNativeNative | Self::FofocaNativeNativeWebRtc | Self::IrohNativeNative
         )
     }
 }
@@ -112,8 +117,8 @@ impl From<Result<Measured, String>> for Outcome {
     }
 }
 
-impl From<crate::e2e::Skip> for Outcome {
-    fn from(crate::e2e::Skip(reason): crate::e2e::Skip) -> Self {
+impl From<crate::util::Skip> for Outcome {
+    fn from(crate::util::Skip(reason): crate::util::Skip) -> Self {
         Self::Skipped(reason)
     }
 }
@@ -318,11 +323,11 @@ pub(crate) fn run(args: &Args) -> TaskOutcome {
     // The page is built and served once, and only when a browser cell is in
     // the run: `--only native` must not pay for a wasm build nobody loads.
     let server = if cells.iter().any(|cell| cell.needs_browser()) {
-        build::check_wasm_bindgen()?;
-        let env = build::wasm_env()?;
+        wasm::check_wasm_bindgen()?;
+        let env = wasm::wasm_env()?;
         output::status("Building", "the browser side (fofoca-bench-wasm)");
         let wasm_dir = repo_root().join("target/bench-wasm");
-        let glue = build::build_wasm_cdylib("fofoca-bench-wasm", &env, &wasm_dir)?;
+        let glue = wasm::build_wasm_cdylib("fofoca-bench-wasm", &env, &wasm_dir)?;
         output::detail(&format!("             {}", glue.display()));
         let www = repo_root().join("crates/fofoca-bench-wasm/www");
         let server = serve::Static::serve(www, wasm_dir)?;
@@ -361,13 +366,19 @@ pub(crate) fn run(args: &Args) -> TaskOutcome {
             args,
         };
         let outcome = match cell {
-            Cell::FofocaWebWeb => browser().web_web("index.html", None),
-            Cell::RawWebWeb | Cell::RawWebWebDatagram if args.direction != Direction::Down => {
+            Cell::FofocaChromeChrome => browser().web_web(Chrome, Chrome, "index.html", None),
+            Cell::FofocaSafariChrome => browser().web_web(Safari, Chrome, "index.html", None),
+            Cell::RawChromeChrome | Cell::RawChromeChromeDatagram
+                if args.direction != Direction::Down =>
+            {
                 Outcome::Skipped("the raw page only streams downloads".to_owned())
             }
-            Cell::RawWebWeb => browser().web_web("raw.html", None),
-            Cell::RawWebWebDatagram => browser().web_web("raw.html", Some(1200)),
-            Cell::FofocaWebNative => runtime.block_on(browser().web_native()),
+            Cell::RawChromeChrome => browser().web_web(Chrome, Chrome, "raw.html", None),
+            Cell::RawChromeChromeDatagram => {
+                browser().web_web(Chrome, Chrome, "raw.html", Some(1200))
+            }
+            Cell::FofocaChromeNative => runtime.block_on(browser().web_native(Chrome)),
+            Cell::FofocaSafariNative => runtime.block_on(browser().web_native(Safari)),
             Cell::FofocaNativeNative => runtime.block_on(native::fofoca_native_native(args)),
             Cell::FofocaNativeNativeWebRtc => {
                 runtime.block_on(native::fofoca_native_native_webrtc(args))

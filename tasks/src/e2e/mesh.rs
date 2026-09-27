@@ -22,10 +22,12 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use crate::TaskOutcome;
+use crate::util::cdp;
+use crate::util::page::{rand_token, wait_ready};
 use crate::util::{output, repo_root, wait_for};
 
-use super::page::{Page, call_page, rand_token, urlencode, wait_ready};
-use super::{Args, Skip, build, cdp, webdriver};
+use super::page::{Page, call_page, urlencode};
+use super::{Args, Skip, build, webdriver};
 
 /// A linked pair has to survive the beacon claim (~8 s), a WebRTC
 /// negotiation or a hole punch, and one alive-tick retry.
@@ -393,7 +395,7 @@ impl BunServer {
             url: format!("http://127.0.0.1:{port}"),
         };
         let up = wait_for(Duration::from_secs(30), Duration::from_millis(250), || {
-            super::server::reachable(&server.url).then_some(())
+            crate::util::reachable(&server.url).then_some(())
         });
         if up.is_none() {
             return Err(Skip(format!("the {what} server never came up")));

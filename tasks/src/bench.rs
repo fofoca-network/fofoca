@@ -25,11 +25,13 @@ mod run;
 #[cfg(feature = "bench")]
 mod serve;
 #[cfg(feature = "bench")]
+mod stp;
+#[cfg(feature = "bench")]
 mod web;
 
 #[derive(ClapArgs)]
 pub(crate) struct Args {
-    /// Only cells whose label contains this (e.g. `web`, `native`, `raw`).
+    /// Only cells whose label contains this (e.g. `chrome`, `safari`, `native`, `raw`).
     #[arg(long)]
     pub(crate) only: Option<String>,
     /// Bytes per transfer. Capped by the protocol's 64 `MiB` ceiling.
@@ -62,10 +64,15 @@ pub(crate) enum Direction {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Cell {
-    /// Two separate browser processes, iroh QUIC over the data channel.
-    FofocaWebWeb,
-    /// A browser client, a str0m server in this process.
-    FofocaWebNative,
+    /// Two separate Chrome processes, iroh QUIC over the data channel.
+    FofocaChromeChrome,
+    /// A Chrome client, a str0m server in this process.
+    FofocaChromeNative,
+    /// A Safari Technology Preview client, a str0m server in this process.
+    FofocaSafariNative,
+    /// A Safari Technology Preview client, a Chrome server: the two WebRTC
+    /// stacks against each other.
+    FofocaSafariChrome,
     /// Two native endpoints wired as the engine wires them: the WebRTC
     /// transport registered, direct UDP available and preferred. Expected on
     /// `ip`, so it reads as the engine-shaped twin of the iroh baseline.
@@ -75,36 +82,40 @@ pub(crate) enum Cell {
     FofocaNativeNativeWebRtc,
     /// Plain iroh on loopback UDP, no custom transport: the native ceiling.
     IrohNativeNative,
-    /// A bare `RTCDataChannel` between two browser processes, no wasm and no
+    /// A bare `RTCDataChannel` between two Chrome processes, no wasm and no
     /// QUIC, in 64 `KiB` messages: the browser ceiling.
-    RawWebWeb,
+    RawChromeChrome,
     /// The same channel in 1200-byte messages — one QUIC datagram's worth,
-    /// which is how the transport uses it. The gap to [`Self::RawWebWeb`] is
-    /// the channel's own per-message cost; the gap from here to
-    /// [`Self::FofocaWebWeb`] is the integration's.
-    RawWebWebDatagram,
+    /// which is how the transport uses it. The gap to [`Self::RawChromeChrome`]
+    /// is the channel's own per-message cost; the gap from here to
+    /// [`Self::FofocaChromeChrome`] is the integration's.
+    RawChromeChromeDatagram,
 }
 
-const CELLS: [Cell; 7] = [
-    Cell::FofocaWebWeb,
-    Cell::FofocaWebNative,
+const CELLS: [Cell; 9] = [
+    Cell::FofocaChromeChrome,
+    Cell::FofocaChromeNative,
+    Cell::FofocaSafariNative,
+    Cell::FofocaSafariChrome,
     Cell::FofocaNativeNative,
     Cell::FofocaNativeNativeWebRtc,
     Cell::IrohNativeNative,
-    Cell::RawWebWeb,
-    Cell::RawWebWebDatagram,
+    Cell::RawChromeChrome,
+    Cell::RawChromeChromeDatagram,
 ];
 
 impl Cell {
     pub(crate) fn label(self) -> &'static str {
         match self {
-            Self::FofocaWebWeb => "fofoca web-web",
-            Self::FofocaWebNative => "fofoca web-native",
+            Self::FofocaChromeChrome => "fofoca chrome-chrome",
+            Self::FofocaChromeNative => "fofoca chrome-native",
+            Self::FofocaSafariNative => "fofoca safari-native",
+            Self::FofocaSafariChrome => "fofoca safari-chrome",
             Self::FofocaNativeNative => "fofoca native-native",
             Self::FofocaNativeNativeWebRtc => "fofoca native-native (webrtc-only)",
             Self::IrohNativeNative => "iroh native-native",
-            Self::RawWebWeb => "webrtc web-web (raw, 64 KiB msgs)",
-            Self::RawWebWebDatagram => "webrtc web-web (raw, 1200 B msgs)",
+            Self::RawChromeChrome => "webrtc chrome-chrome (raw, 64 KiB msgs)",
+            Self::RawChromeChromeDatagram => "webrtc chrome-chrome (raw, 1200 B msgs)",
         }
     }
 }

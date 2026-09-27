@@ -12,8 +12,9 @@ Three jobs:
   preamble, and each step fails without naming its cause. The runner does
   the preamble and names the causes.
 - `cargo task benchmark`. Bulk throughput over the transports: fofoca over
-  WebRTC in every pairing (browser↔browser, browser↔native, native↔native)
-  against plain iroh and a bare data channel. Results and their reading are
+  WebRTC in every pairing (Chrome↔Chrome, Chrome↔native, Safari
+  Technology Preview↔native, STP↔Chrome, native↔native) against plain iroh
+  and a bare data channel. Results and their reading are
   in `docs/perf/benchmark.md`.
 
 If the gate and the workflow disagree, the workflow wins: CI is what

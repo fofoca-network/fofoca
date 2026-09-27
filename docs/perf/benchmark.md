@@ -27,15 +27,22 @@ does not set the throughput.
   timed separately (`JSEP ms`) and is not in the window.
 - Every cell asserts the path that carried it (`webrtc` / `ip` /
   `data-channel`), so a cell cannot quietly measure the wrong lane.
-- Browser cells run in two separate Chrome-for-Testing processes, driven
-  over CDP; this runner ferries the SDP between them. Host-only ICE, no
-  STUN.
+- Browser cells run each tab in its own browser process: Chrome for
+  Testing over CDP (`agent-browse`), and Safari Technology Preview over
+  `safaridriver --mcp`, which the runner starts and speaks JSON-RPC to. This
+  runner ferries the SDP between tabs. Host-only ICE, no STUN.
+- STP needs *Settings ▸ Developer ▸ Allow remote automation* and a one-time
+  `sudo safaridriver --enable` (the STP copy of the binary). Classic
+  `safaridriver` over W3C WebDriver does not get a session on macOS 27 (it
+  times out at "Request creation of a new automation session", for Safari
+  and STP alike), which is why the runner uses the MCP mode.
 - Protocol and pages: `fofoca_iroh_webrtc_transport::bench`,
   `crates/fofoca-bench-wasm`. Runner: `tasks/src/bench.rs`.
 
 ```sh
 cargo task benchmark                         # the matrix, 8 MiB × 5 rounds
 cargo task benchmark --only native --rounds 20 --json target/bench.json
+cargo task benchmark --only safari           # the two STP cells
 cargo task benchmark --direction up          # or `both`
 ```
 
@@ -47,13 +54,22 @@ second, the median of the rounds; the range is min–max across both runs.
 
 | cell | path | Mbit/s run 1 | Mbit/s run 2 | range | JSEP ms |
 |---|---|---|---|---|---|
-| fofoca web-web | webrtc | 266 | 249 | 209–277 | ~970 |
-| fofoca web-native | webrtc | 166 | 164 | 121–171 | ~620 |
+| fofoca chrome-chrome | webrtc | 266 | 249 | 209–277 | ~970 |
+| fofoca chrome-native | webrtc | 166 | 164 | 121–171 | ~620 |
 | fofoca native-native | ip | 2215 | 2186 | 1788–2389 | 0 |
 | fofoca native-native (webrtc-only) | webrtc | 76 | 79 | 64–104 | 5 |
 | iroh native-native (baseline) | ip | 1862 | 2392 | 1018–2404 | 0 |
-| webrtc web-web (raw, 64 KiB msgs) | data-channel | 466 | 463 | 364–478 | ~690 |
-| webrtc web-web (raw, 1200 B msgs) | data-channel | 258 | 255 | 249–273 | ~710 |
+| webrtc chrome-chrome (raw, 64 KiB msgs) | data-channel | 466 | 463 | 364–478 | ~690 |
+| webrtc chrome-chrome (raw, 1200 B msgs) | data-channel | 258 | 255 | 249–273 | ~710 |
+
+The Safari cells, one run of 2 timed rounds, measured while the machine was
+loaded (load average 20–30), so read them as a lower bound until a quiet
+rerun:
+
+| cell | path | Mbit/s | JSEP ms |
+|---|---|---|---|
+| fofoca safari-native | webrtc | 106 | ~600 |
+| fofoca safari-chrome | webrtc | 102 | ~950 |
 
 Until this revision every round opened a new connection, so every timed
 round paid the handshake and slow start. That hid one cell: on a new
@@ -116,7 +132,7 @@ DTLS) under 2%. The cost is one blocking
 is the lever there.
 
 **Browser CPU.** A 12 s Chrome sampling profile of the client tab during
-web-web (attached over one long-lived CDP session; `agent-browse cdp` is
+chrome-chrome (attached over one long-lived CDP session; `agent-browse cdp` is
 one-shot and cannot hold profiler state):
 
 | share of wall time | what |

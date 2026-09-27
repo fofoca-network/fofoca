@@ -14,19 +14,19 @@ use std::time::Duration;
 use clap::{Args as ClapArgs, ValueEnum};
 
 use crate::TaskOutcome;
-use crate::util::output;
+use crate::util::{Skip, json_to_string, output};
 
 pub(crate) mod build;
-pub(crate) mod cdp;
+mod cdp;
 #[cfg(feature = "mesh")]
 mod chat;
 mod loopback;
 #[cfg(feature = "mesh")]
 mod mesh;
-#[cfg(any(feature = "mesh", feature = "bench"))]
-pub(crate) mod page;
-pub(crate) mod server;
-pub(crate) mod webdriver;
+#[cfg(feature = "mesh")]
+mod page;
+mod server;
+mod webdriver;
 
 use server::Harness;
 
@@ -210,9 +210,6 @@ fn browsers() -> Vec<Browser> {
     ]
 }
 
-/// A cell that could not run at all, with a reason a reader can act on.
-pub(crate) struct Skip(pub(crate) String);
-
 /// What a cell's page published.
 struct Harvest {
     /// The rendered results table.
@@ -283,7 +280,7 @@ pub(crate) fn run(args: &Args) -> TaskOutcome {
     let env = if args.list {
         BTreeMap::new()
     } else {
-        build::wasm_env()?
+        crate::util::wasm::wasm_env()?
     };
     if !args.list {
         build::check_tooling()?;
@@ -477,12 +474,4 @@ fn summarise(rows: &[Row], listing: bool) {
 /// `data-failed` as a number, or `None` when the page never published one.
 fn normalise_failed(raw: &str) -> Option<u32> {
     raw.trim().parse().ok()
-}
-
-/// `Runtime.evaluate` and `execute/sync` both hand back a JSON value; a string
-/// result should read as its contents, not as a quoted literal.
-fn json_to_string(value: &serde_json::Value) -> String {
-    value
-        .as_str()
-        .map_or_else(|| value.to_string(), str::to_owned)
 }

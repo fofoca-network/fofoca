@@ -10,7 +10,7 @@ use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::e2e::server::reachable;
+use crate::util::reachable;
 use crate::util::wait_for;
 
 pub(crate) struct Static {

@@ -1,12 +1,12 @@
-//! The browser cells: real Chrome-for-Testing processes, one per tab, driven
-//! over CDP with the JSEP envelopes ferried between them by this runner.
+//! The browser cells: real browser processes, one per tab — Chrome for
+//! Testing over CDP, Safari Technology Preview over `safaridriver --mcp` —
+//! with the JSEP envelopes ferried between them by this runner.
 //!
 //! Two processes rather than two endpoints in one tab, because the one-tab
 //! case is the easiest that exists (one event loop, loopback ICE) and the
-//! number wanted is what two real browsers get. Each process is its own
-//! `agent-browse` folder; the runner reads the offer from one tab's
-//! `bench.offer()` and hands it to the other's `bench.answer()` as a string
-//! literal, so no signaling server is needed.
+//! number wanted is what two real browsers get. The runner reads the offer
+//! from one tab's `bench.offer()` and hands it to the other's
+//! `bench.answer()` as a string literal, so no signaling server is needed.
 
 use std::time::{Duration, Instant};
 
@@ -14,29 +14,69 @@ use fofoca_iroh_webrtc_transport::bench::{BENCH_ALPN, Bench};
 use fofoca_iroh_webrtc_transport::iroh::protocol::Router;
 use fofoca_iroh_webrtc_transport::{IceConfig, SignalEnvelope, answer_with};
 
-use crate::e2e::page::{Page, await_call, call_page_within, start_call, wait_ready};
-use crate::e2e::{Skip, cdp};
-use crate::util::output;
+use crate::util::page::{Evaluate, await_call, call_page_within, start_call, wait_ready};
+use crate::util::{Skip, cdp, output};
 
 use super::Args;
 use super::native::{JSEP_DEADLINE, WebRtcPeer};
 use super::run::{Measured, Outcome, Sample, TRANSFER_TIMEOUT};
 use super::serve::Static;
+use super::stp;
 
 /// The wasm page has to fetch and instantiate the module before `#ready`.
 const PAGE_TIMEOUT: Duration = Duration::from_mins(1);
 
+/// Which browser a tab runs in.
+#[derive(Clone, Copy)]
+pub(crate) enum Engine {
+    Chrome,
+    Safari,
+}
+
+/// The driver behind one tab.
+enum Driver {
+    Chrome(cdp::Browser),
+    Safari(stp::Browser),
+}
+
+impl Driver {
+    fn navigate(&self, url: &str) {
+        match self {
+            Self::Chrome(browser) => browser.navigate(url),
+            Self::Safari(browser) => browser.navigate(url),
+        }
+    }
+
+    fn version(&self) -> String {
+        match self {
+            Self::Chrome(browser) => browser.version(),
+            Self::Safari(browser) => browser.version(),
+        }
+    }
+}
+
+impl Evaluate for Driver {
+    fn evaluate(&self, expression: &str) -> String {
+        match self {
+            Self::Chrome(browser) => browser.evaluate(expression),
+            Self::Safari(browser) => browser.evaluate(expression),
+        }
+    }
+}
+
 /// One browser process on a benchmark page.
 struct Tab {
-    page: Page,
+    page: Driver,
     /// What the page reported as its endpoint id (`raw` for the bare page).
     id: String,
 }
 
 impl Tab {
-    fn open(server: &Static, page: &str) -> Result<Self, Skip> {
-        let browser = cdp::Browser::launch()?;
-        let page_obj = Page::Cdp(browser);
+    fn open(engine: Engine, server: &Static, page: &str) -> Result<Self, Skip> {
+        let page_obj = match engine {
+            Engine::Chrome => Driver::Chrome(cdp::Browser::launch()?),
+            Engine::Safari => Driver::Safari(stp::Browser::launch()?),
+        };
         page_obj.navigate(&format!("{}/{page}", server.url));
         wait_ready(&page_obj, PAGE_TIMEOUT, Duration::from_millis(250))
             .ok_or_else(|| Skip(format!("the {page} page never became ready")))?
@@ -107,17 +147,28 @@ pub(crate) struct Browser<'a> {
 
 impl Browser<'_> {
     /// Browser↔browser, on `page` (`index.html` for fofoca, `raw.html` for
-    /// the bare channel, with `message` as its message size). The second tab
-    /// serves, the first downloads.
-    pub(crate) fn web_web(&self, page: &str, message: Option<usize>) -> Outcome {
+    /// the bare channel, with `message` as its message size). The `server`
+    /// tab serves, the `client` tab downloads.
+    pub(crate) fn web_web(
+        &self,
+        client_engine: Engine,
+        server_engine: Engine,
+        page: &str,
+        message: Option<usize>,
+    ) -> Outcome {
         let args = self.args;
-        let tabs = Tab::open(self.server, page)
-            .and_then(|client| Tab::open(self.server, page).map(|server| (client, server)));
+        let tabs = Tab::open(client_engine, self.server, page).and_then(|client| {
+            Tab::open(server_engine, self.server, page).map(|server| (client, server))
+        });
         let (client, server_tab) = match tabs {
             Ok(tabs) => tabs,
             Err(skip) => return skip.into(),
         };
-        output::detail(&format!("             {}", client.page.version()));
+        output::detail(&format!(
+            "             {} ↔ {}",
+            client.page.version(),
+            server_tab.page.version()
+        ));
 
         let run = || -> Result<Measured, String> {
             let negotiate_ms = negotiate(&client, &server_tab)?;
@@ -130,9 +181,9 @@ impl Browser<'_> {
 
     /// Browser↔native: the tab offers and downloads, a str0m endpoint in
     /// this process answers and serves — the lane a real deployment uses.
-    pub(crate) async fn web_native(&self) -> Outcome {
+    pub(crate) async fn web_native(&self, engine: Engine) -> Outcome {
         let args = self.args;
-        let client = match Tab::open(self.server, "index.html") {
+        let client = match Tab::open(engine, self.server, "index.html") {
             Ok(tab) => tab,
             Err(skip) => return skip.into(),
         };
