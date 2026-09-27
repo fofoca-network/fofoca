@@ -9,33 +9,35 @@
  * - `nick` — this peer's nickname.
  * - `relay` — a custom relay URL (repeatable); with `topic` it is part of
  *   the derived id, so the native side must pass the same.
- * - `relayTransport=1` — let payload fall back to the relay (id-changing,
- *   same rule).
+ * - `transport` — what payload may ride, `p2p` (the default) or
+ *   `p2p,relay` (id-changing, same rule).
  * - `log` — an `EnvFilter` for the engine's tracing, to the console.
  *
  * DOM contract (what a driver asserts on):
  * - `#ready` appears once the mesh is open, with `data-id`/`data-nick`/`data-name`.
  * - `#failed` appears instead if open threw; its text is the error.
  * - `#peers` holds the roster JSON, `data-count` the peer count (self excluded).
- * - `#frames` gets one `<li data-from data-directed data-eof>` per frame,
- *   text decoded as UTF-8.
+ * - `#messages` gets one `<li data-from data-directed>` per message, its
+ *   text as the item's text.
  * - `#events` gets one `<li data-kind>` per surfaced event.
  * - `#state` holds the shared state JSON.
- * - `window.harness = { send, sendEof, stateMerge, close }`, all
+ * - `window.harness = { send, stateMerge, close }`, all
  *   promise-returning.
+ * - `window.harnessLog` holds every mirrored console line, timestamped in
+ *   UTC. `#log` keeps only the tail, and a failure needs the start.
  */
 
 import { join } from '../src/index.ts'
-import type { Mesh } from '../src/index.ts'
+import type { Mesh, Transport } from '../src/index.ts'
 
 declare global {
   interface Window {
     harness?: {
       send(to: string | null, text: string): Promise<void>
-      sendEof(to: string | null): Promise<void>
       stateMerge(json: string): Promise<void>
       close(): Promise<void>
     }
+    harnessLog?: string[]
   }
 }
 
@@ -74,6 +76,8 @@ function mirrorConsole(): void {
   target.style.display = 'none'
   document.body.append(target)
   const original = console.log.bind(console)
+  const full: string[] = []
+  window.harnessLog = full
   // Buffered and flushed on a timer: rebuilding a 20KB text node per line
   // was itself enough main-thread work to starve the mesh at debug volume.
   let pending: string[] = []
@@ -99,7 +103,10 @@ function mirrorConsole(): void {
     ) {
       return
     }
-    pending.push(line)
+    // The time of day as the native log spells it, so the two line up.
+    const stamped = `${new Date().toISOString().slice(11, 23)}Z ${line}`
+    full.push(stamped)
+    pending.push(stamped)
   }
 }
 
@@ -110,6 +117,9 @@ async function main(): Promise<void> {
   const id = params.get('mesh')
   const nick = params.get('nick')
   const relayUrls = params.getAll('relay')
+  // Passed through as typed: a name that is not a transport is the engine's
+  // error to raise, and it names the choices.
+  const transport = params.get('transport')?.split(',') as Transport[] | undefined
 
   let mesh: Mesh
   try {
@@ -117,7 +127,7 @@ async function main(): Promise<void> {
       ...(topic === null ? {} : { topic }),
       ...(id === null ? {} : { id }),
       ...(nick === null ? {} : { nick }),
-      relayTransport: params.get('relayTransport') === '1',
+      ...(transport === undefined ? {} : { transport }),
       relayUrls,
       log: params.get('log') ?? 'info',
     })
@@ -143,7 +153,6 @@ async function main(): Promise<void> {
 
   window.harness = {
     send: (to, text) => mesh.send(text, to === null ? {} : { to }),
-    sendEof: (to) => mesh.sendEof(to === null ? {} : { to }),
     stateMerge: async (json) => {
       await mesh.state.merge(JSON.parse(json) as Record<string, unknown>)
     },
@@ -152,15 +161,7 @@ async function main(): Promise<void> {
 
   void (async () => {
     for await (const message of mesh.messages()) {
-      appendItem(
-        'frames',
-        {
-          from: message.from,
-          directed: String(message.directed),
-          eof: String(message.eof),
-        },
-        message.text ?? `[${message.bytes.length} bytes]`,
-      )
+      appendItem('messages', { from: message.from, directed: String(message.directed) }, message.text)
     }
   })()
 

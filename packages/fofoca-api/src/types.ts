@@ -3,6 +3,12 @@
  * moves between a browser tab and a terminal by changing one import.
  */
 
+/** One way a mesh's members find each other. */
+export type Lookup = 'mdns' | 'dht' | 'relay'
+
+/** One path a mesh's payload may ride. `p2p` is always on. */
+export type Transport = 'p2p' | 'relay'
+
 export interface JoinOpts {
   /**
    * Derive a mesh from a shared string. Everyone who passes the same string
@@ -20,14 +26,14 @@ export interface JoinOpts {
   /** Defaults to a random `word-word` nickname. */
   nick?: string
   /**
-   * Topic only: let payload fall back to the relay. Mixed into the derived
-   * id, so every member must pass the same value. Ignored when joining by id
-   * (the id carries it).
+   * Topic only: what payload may ride, `['p2p']` (the default) or
+   * `['p2p', 'relay']`. Mixed into the derived id, so every member must pass
+   * the same list. Ignored when joining by id (the id carries it).
    */
-  relayTransport?: boolean
+  transport?: Transport[]
   /**
    * Topic only: a custom relay ladder replacing the default. Mixed into the
-   * derived id like `relayTransport`. Ignored when joining by id.
+   * derived id like `transport`. Ignored when joining by id.
    */
   relayUrls?: string[]
   /** Active-view cap. Omit for the engine default. */
@@ -38,33 +44,29 @@ export interface CreateOpts {
   name?: string
   nick?: string
   /**
-   * The all-on discovery preset (mDNS + DHT + relay).
-   *
-   * Naming no discovery option at all is not "the default one" — it is a
-   * loopback mesh, reachable only from this machine. That is useful for tests
-   * and surprising everywhere else.
+   * How members find each other. Naming any uses only those; naming none
+   * is not "the default set" — it is a loopback mesh, reachable only from
+   * this machine, which is useful for tests and surprising everywhere else.
+   * `['mdns', 'dht', 'relay']` is the all-on set a topic uses.
    */
-  public?: boolean
-  mdns?: boolean
-  dht?: boolean
-  /** The relay as a lookup: peers find each other through it. */
-  relayLookup?: boolean
+  lookup?: Lookup[]
   /**
-   * The relay as a transport: payload may fall back to it. Off by default,
-   * so all data is peer to peer and the relay is a meeting point only. Needs
-   * `relayLookup` (or `public`). Baked into the mesh id, so joiners inherit it.
+   * What payload may ride: `['p2p']` (the default), so all data is peer to
+   * peer and the relay is a meeting point only, or `['p2p', 'relay']` to let
+   * payload fall back to the relay. `'relay'` needs `'relay'` in `lookup`.
+   * Baked into the mesh id, so joiners inherit it.
    */
-  relayTransport?: boolean
+  transport?: Transport[]
   /**
-   * A custom relay ladder (ordered URLs, first preferred), replacing the
-   * default. Implies the relay lookup, and is part of the mesh id.
+   * Which relay: an ordered ladder (first preferred) replacing the default.
+   * Needs `'relay'` in `lookup`, and is part of the mesh id.
    */
   relayUrls?: string[]
   /**
-   * This node's transport switches. Per node, not part of the id; everything
-   * the target has is on by default.
+   * This node's own paths. Per node, not part of the id; everything the
+   * target has is on by default.
    */
-  transports?: { ip?: boolean; webrtc?: boolean }
+  paths?: { ip?: boolean; webrtc?: boolean }
   maxPeers?: number
 }
 
@@ -93,21 +95,14 @@ export interface Peer {
 }
 
 /**
- * One inbound frame.
- *
- * A frame, not a message: `send` splits a body larger than `MAX_CHUNK` and the
- * receiver sees one of these per chunk, with nothing to rejoin them by. A
- * consumer that needs whole messages frames them itself.
+ * One inbound message: a whole text, as it was sent. Bulk bytes do not ride
+ * the mesh; they take a stream.
  */
 export interface Message {
   from: string
-  bytes: Uint8Array
-  /** Set when `bytes` decode as UTF-8. */
-  text?: string
-  /** True when the frame was addressed to us alone. */
+  text: string
+  /** True when the message was addressed to us alone. */
   directed: boolean
-  /** An end-of-stream marker. `bytes` is empty. */
-  eof: boolean
 }
 
 export type MeshEvent =
@@ -139,22 +134,20 @@ export interface Mesh extends AsyncDisposable {
   readonly peers: Peer[]
   readonly state: StateDoc
   /**
-   * The largest payload one frame carries. `send` splits on it for you; a
-   * caller that would rather refuse an over-long body than have it arrive in
-   * pieces checks against this first.
+   * The longest message in bytes that always fits one frame. Most text fits
+   * well past it; a message that does not fit is refused by `send`, not split.
    *
    * On the mesh rather than a module constant because the FFI backend learns it
-   * from `fofoca_max_chunk()`, and a module constant would mean loading the
+   * from `fofoca_max_msg()`, and a module constant would mean loading the
    * native library at import time.
    */
-  readonly maxChunk: number
+  readonly maxMsg: number
 
-  send(body: string | Uint8Array, opts?: { to?: string }): Promise<void>
-  sendEof(opts?: { to?: string }): Promise<void>
+  send(text: string, opts?: { to?: string }): Promise<void>
 
   /**
-   * Every frame from the moment this iterator was created. Each call gets its
-   * own buffer, so two consumers never split one queue.
+   * Every message from the moment this iterator was created. Each call gets
+   * its own buffer, so two consumers never split one queue.
    */
   messages(signal?: AbortSignal): AsyncIterable<Message>
   events(signal?: AbortSignal): AsyncIterable<MeshEvent>

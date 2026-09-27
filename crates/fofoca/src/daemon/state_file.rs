@@ -66,6 +66,7 @@ pub struct StateFile {
     /// (see [`Self::set_discovery`]). Opaque to the engine, and the reason every
     /// write is 0o600: an app may put a bearer token in here.
     discovery: std::sync::Mutex<serde_json::Map<String, serde_json::Value>>,
+    write_failing: std::sync::atomic::AtomicBool,
 }
 
 impl StateFile {
@@ -78,6 +79,7 @@ impl StateFile {
             nickname: nickname.as_str().to_string(),
             topic: None,
             discovery: std::sync::Mutex::new(serde_json::Map::new()),
+            write_failing: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -129,8 +131,23 @@ impl StateFile {
     /// logged but not propagated — the statusline going stale must not
     /// crash the daemon.
     pub(crate) fn write(&self, peer_count: usize, ready: bool) {
-        if let Err(error) = self.try_write(peer_count, ready) {
-            eprintln!("state_file: write failed: {error}");
+        use std::sync::atomic::Ordering;
+
+        match self.try_write(peer_count, ready) {
+            Ok(()) => self.write_failing.store(false, Ordering::Relaxed),
+            Err(error) => {
+                let _ = std::fs::remove_file(tmp_sibling(&self.path));
+                // Warn once per failing streak: the heartbeat retries every
+                // few seconds, and a full disk fails every one of them.
+                if !self.write_failing.swap(true, Ordering::Relaxed) {
+                    tracing::warn!(
+                        target: "fofoca::lifecycle",
+                        path = %self.path.display(),
+                        %error,
+                        "state file write failed"
+                    );
+                }
+            }
         }
     }
 
@@ -364,6 +381,61 @@ mod tests {
             std::process::id(),
             clock::unix_nanos(),
         ))
+    }
+
+    #[test]
+    fn failed_write_removes_temp_file() {
+        let path = unique_path("failed");
+        // A non-empty directory at the target makes the final rename fail
+        // after the temp file is fully written.
+        std::fs::create_dir_all(path.join("occupied")).unwrap();
+        let state_file = StateFile::new(
+            path.clone(),
+            &MeshId::from("abcd"),
+            &Nickname::from("treat-empire"),
+            &name("cool-team"),
+        );
+        let logged = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(CapturedLog(std::sync::Arc::clone(&logged)))
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            state_file.write(1, true);
+            state_file.write(1, true);
+        });
+        let tmp = super::tmp_sibling(&path);
+        let leftover = tmp.exists();
+        let _ = std::fs::remove_file(&tmp);
+        std::fs::remove_dir_all(&path).unwrap();
+        assert!(!leftover, "a failed write must not leave {}", tmp.display());
+        let logged = String::from_utf8(logged.lock().unwrap().clone()).unwrap();
+        assert_eq!(
+            logged.matches("state file write failed").count(),
+            1,
+            "two failed writes must warn once, got: {logged}"
+        );
+    }
+
+    #[derive(Clone)]
+    struct CapturedLog(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturedLog {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for CapturedLog {
+        type Writer = Self;
+        fn make_writer(&'writer self) -> Self::Writer {
+            self.clone()
+        }
     }
 
     #[test]

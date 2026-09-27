@@ -150,6 +150,9 @@ pub struct EventLoopConfig {
     /// a change the loop re-registers the rendezvous and re-homes the
     /// beacon, so the ladder walk never runs on the sole loop.
     pub(crate) rung_rx: watch::Receiver<Option<iroh::RelayUrl>>,
+    /// The backgrounded startup probe behind `rung_rx`, released on the way
+    /// out with the rendezvous. `None` for an empty ladder.
+    pub(crate) rung_probe: Option<crate::lookup::StoppableTask>,
     /// When this member may serve the rendezvous (beacon role).
     pub(crate) cohost: CoHostPolicy,
     /// The consumer's per-user runtime base — the root the control socket, the
@@ -177,8 +180,9 @@ pub struct EventLoopConfig {
     /// `TransportOpts::webrtc`: off, the handle above is detached — not on
     /// the endpoint, answering nothing — and the loop negotiates no session.
     pub(crate) webrtc_enabled: bool,
-    /// See `EventLoopState::rendezvous_graft_needs_session`.
-    pub(crate) rendezvous_graft_needs_session: bool,
+    /// See `EventLoopState::local_ip_transport`. With `relay_transport` it
+    /// also decides `EventLoopState::rendezvous_graft_needs_session`.
+    pub(crate) local_ip_transport: bool,
     /// The negotiation-slot table this peer's Router acceptor was built with.
     /// `run()` moves it into `EventLoopState::webrtc_admission`, so the dialing
     /// side and the answering side share one direct-peer ceiling.

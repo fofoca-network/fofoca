@@ -42,3 +42,54 @@ pub(crate) fn nick(name: &str) -> Nickname {
 pub(crate) fn endpoint_id(seed: u8) -> EndpointId {
     SecretKey::from_bytes(&[seed; 32]).public()
 }
+
+/// A relay url for a loopback listener that never accepts: the relay
+/// handshake hangs, as it does on a rung that is slow to answer. Keep the
+/// listener alive for as long as the url is in use.
+#[cfg(feature = "host")]
+pub(crate) fn silent_relay_rung() -> (std::net::TcpListener, iroh::RelayUrl) {
+    let silent = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .expect("a silent loopback listener");
+    let rung = format!("http://{}", silent.local_addr().expect("its address"))
+        .parse()
+        .expect("a relay url");
+    (silent, rung)
+}
+
+/// Run `body` on a fresh current-thread runtime, drop the runtime as
+/// returning from `main` does, and return every ERROR logged meanwhile. That
+/// drop is where iroh logs `Endpoint dropped without calling` for an endpoint
+/// a task still held open.
+#[cfg(feature = "host")]
+pub(crate) fn errors_through_runtime_drop(body: impl Future<Output = ()>) -> String {
+    #[derive(Clone, Default)]
+    struct Captured(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Captured {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("log buffer").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let logs = Captured::default();
+    let writer = logs.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(move || writer.clone())
+        .with_ansi(false)
+        .with_max_level(tracing::Level::ERROR)
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a runtime");
+    runtime.block_on(body);
+    drop(runtime);
+    let logs = logs.0.lock().expect("log buffer");
+    String::from_utf8_lossy(&logs).into_owned()
+}

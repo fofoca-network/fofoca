@@ -28,7 +28,7 @@ function koffiType(type: CType): string {
       return 'size_t'
     case 'ptr':
       return 'void *'
-    // In and out both: `fofoca_recv` writes the payload and the frame struct
+    // In and out both: `fofoca_msg_recv` writes the text and the message struct
     // into caller buffers, and koffi only copies back what is marked out.
     case 'buf':
       return '_Inout_ uint8_t *'
@@ -67,11 +67,8 @@ export async function loadWithKoffi(path: string): Promise<NativeLibrary> {
       topic: 'const char *',
       nick: 'const char *',
       name: 'const char *',
-      is_public: 'int',
-      mdns: 'int',
-      dht: 'int',
-      relay_lookup: 'int',
-      relay_transport: 'int',
+      lookup: 'const char *',
+      transport: 'const char *',
       relay_urls: 'const char *',
       disable_ip: 'int',
       disable_webrtc: 'int',
@@ -82,8 +79,8 @@ export async function loadWithKoffi(path: string): Promise<NativeLibrary> {
 
   const functions = new Map<SymbolName, (...args: unknown[]) => unknown>()
   for (const [name, signature] of Object.entries(ABI)) {
-    // `fofoca_open` is bound with the real struct type below, not as `void *`.
-    if (name === 'fofoca_open') {
+    // `fofoca_mesh_open` is bound with the real struct type below, not as `void *`.
+    if (name === 'fofoca_mesh_open') {
       continue
     }
     functions.set(
@@ -91,7 +88,7 @@ export async function loadWithKoffi(path: string): Promise<NativeLibrary> {
       library.func(name, koffiType(signature.returns), signature.args.map(koffiType)),
     )
   }
-  const openFn = library.func('fofoca_open', 'void *', ['const fofoca_opts *'])
+  const openFn = library.func('fofoca_mesh_open', 'void *', ['const fofoca_opts *'])
 
   const call = (name: SymbolName, ...args: NativeValue[]): number | bigint | NativePointer => {
     const symbol = functions.get(name)
@@ -133,11 +130,8 @@ export async function loadWithKoffi(path: string): Promise<NativeLibrary> {
         topic: opts.topic,
         nick: opts.nick,
         name: opts.name,
-        is_public: opts.isPublic ? 1 : 0,
-        mdns: opts.mdns ? 1 : 0,
-        dht: opts.dht ? 1 : 0,
-        relay_lookup: opts.relayLookup ? 1 : 0,
-        relay_transport: opts.relayTransport ? 1 : 0,
+        lookup: opts.lookup,
+        transport: opts.transport,
         relay_urls: opts.relayUrls,
         disable_ip: opts.disableIp ? 1 : 0,
         disable_webrtc: opts.disableWebrtc ? 1 : 0,

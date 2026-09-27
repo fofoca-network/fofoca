@@ -23,6 +23,9 @@ pub mod ops;
 // whatsoever to run a node, which made the wasm CI leg a compile check of code
 // nobody could call.
 pub mod runtime;
+// One embedded membership of a mesh, over `runtime`: what the C ABI, the
+// browser peer and the chat example share, so they resolve a mesh one way.
+pub mod membership;
 
 pub(crate) mod beacon;
 // The blob-offload side-channel, re-exported through [`ops::blob`]. Its own
@@ -38,7 +41,7 @@ pub(crate) mod lookup;
 // Extracted leaf crates. Each owns one dependency the engine would otherwise
 // carry unconditionally — automerge, tracing-subscriber — and each depends only
 // on `fofoca-protocol`/`-util`, never back on this crate. Aliased so
-// engine code keeps its `crate::doc::…` paths. See docs/mesh-slimming.md.
+// engine code keeps its `crate::doc::…` paths.
 pub(crate) use fofoca_doc as doc;
 pub(crate) use fofoca_logging as logging;
 
@@ -53,15 +56,15 @@ pub mod protocol {
     // is how a surface nobody chose ends up needing a cross-repo grep to
     // shrink. Adding a name below is now a deliberate line.
     pub use fofoca_protocol::{
-        AdvertiseRequiresReachable, AppFrameParams, AppTag, BodyError, Channel, CorrId,
-        DEFAULT_DIRECTORY, DirectorySelection, IdError, Identity, InviteTicket, JoinTarget,
-        JoinTargetError, LookupOpts, LookupSet, Mesh, MeshConfig, MeshId, MeshIdError, MeshName,
-        Message, MessageBody, MessageId, MessageKind, NameError, Nickname, NicknameError, OptFlag,
-        Password, PresenceSubtype, RelayChoice, RelayLadder, RelayLadderError, RelaySelection,
-        Shard, ShardGroup, TicketAuth, TopicId, TransportPolicy, base58check, crypto, ct_eq,
-        directory, encode_pubkey, identity, invite, iroh_base, mesh, message, nickname, peer_addr,
-        reassembly, resolve_lookups, resolver, seal, seal_to_body, sole_addressee,
-        validate_advertise,
+        AdvertiseRequiresReachable, AppFrameParams, AppTag, BodyError, Channel, ChoiceError,
+        CorrId, DEFAULT_DIRECTORY, DirectorySelection, IdError, Identity, InviteTicket, JoinTarget,
+        JoinTargetError, Lookup, LookupOpts, LookupSet, Mesh, MeshConfig, MeshId, MeshIdError,
+        MeshName, Message, MessageBody, MessageId, MessageKind, NameError, Nickname, NicknameError,
+        OptFlag, Password, PresenceSubtype, RelayChoice, RelayLadder, RelayLadderError,
+        RelaySelection, Shard, ShardGroup, TicketAuth, TopicId, Transport, TransportPolicy,
+        base58check, crypto, ct_eq, directory, encode_pubkey, identity, invite, iroh_base, mesh,
+        message, nickname, peer_addr, reassembly, resolve_lookups, resolver, seal, seal_to_body,
+        sole_addressee, validate_advertise,
     };
     #[cfg(any(test, feature = "test-fixtures"))]
     pub use fofoca_protocol::{BuildMsgParams, ChainCtx, build_msg_bytes};

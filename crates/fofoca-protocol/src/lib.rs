@@ -48,9 +48,10 @@ pub use iroh_base;
 pub use crypto::{Password, TicketAuth, ct_eq};
 pub use identity::{Identity, encode_pubkey};
 pub use mesh::{
-    AdvertiseRequiresReachable, DEFAULT_DIRECTORY, DirectorySelection, LookupOpts, LookupSet, Mesh,
-    MeshConfig, MeshId, MeshIdError, MeshName, NameError, OptFlag, RelayChoice, RelayLadder,
-    RelayLadderError, RelaySelection, TransportPolicy, resolve_lookups, validate_advertise,
+    AdvertiseRequiresReachable, ChoiceError, DEFAULT_DIRECTORY, DirectorySelection, Lookup,
+    LookupOpts, LookupSet, Mesh, MeshConfig, MeshId, MeshIdError, MeshName, NameError, OptFlag,
+    RelayChoice, RelayLadder, RelayLadderError, RelaySelection, Transport, TransportPolicy,
+    resolve_lookups, validate_advertise,
 };
 pub use message::{
     AppFrameParams, AppTag, BodyError, Channel, CorrId, IdError, Message, MessageBody, MessageId,

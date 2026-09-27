@@ -86,6 +86,7 @@ pub async fn run<A: NodeDriver>(
         max_peers,
         rendezvous_params,
         rung_rx,
+        rung_probe,
         cohost,
         runtime_base,
         state_file,
@@ -93,7 +94,7 @@ pub async fn run<A: NodeDriver>(
         multihop,
         webrtc,
         webrtc_enabled,
-        rendezvous_graft_needs_session,
+        local_ip_transport,
         webrtc_admission,
         webrtc_ice,
         unicast_rx,
@@ -182,7 +183,9 @@ pub async fn run<A: NodeDriver>(
     // Before the first write, so the initial advertisement carries a real count.
     state.live_count = live_count;
     state.relay_transport = relay_transport;
-    state.rendezvous_graft_needs_session = rendezvous_graft_needs_session;
+    state.rendezvous_graft_needs_session =
+        crate::transport::webrtc::node_graft_needs_session(relay_transport, local_ip_transport);
+    state.local_ip_transport = local_ip_transport;
     // Direct-path probes report here; the loop grafts on the verdict.
     let (direct_tx, direct_rx) = mpsc::unbounded_channel();
     state.direct_proven = direct_tx;
@@ -329,6 +332,7 @@ pub async fn run<A: NodeDriver>(
         rival_probe,
         rendezvous_params,
         rung_rx,
+        rung_probe,
         cohost,
         started,
         external_quit_rx,
@@ -474,6 +478,8 @@ struct EventLoop<A: NodeDriver> {
     /// Bootstrap rung chosen off-loop (startup probe + beacon
     /// self-monitor); the loop applies changes via the rung-update arm.
     rung_rx: watch::Receiver<Option<RelayUrl>>,
+    /// The startup probe behind `rung_rx`, released with the rendezvous.
+    rung_probe: Option<crate::lookup::StoppableTask>,
     /// When this member may serve the rendezvous (see [`CoHostPolicy`]).
     cohost: CoHostPolicy,
     /// Event-loop start, for the unmeshed-joiner co-host grace.
@@ -535,6 +541,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
         mut rival_probe,
         mut rendezvous_params,
         mut rung_rx,
+        mut rung_probe,
         cohost,
         started,
         mut external_quit_rx,
@@ -587,6 +594,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
     {
         let ctx = parts.ctx(&sender);
         app.on_startup(&mut state, &ctx).await;
+        crate::transport::webrtc::offer_rendezvous_at_start(&mut state, &ctx);
     }
 
     loop {
@@ -690,7 +698,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
                         &mut app,
                         GossipLink { sender: &mut sender, receiver: &mut receiver, attempts: &mut resubscribe_attempts },
                     ).await {
-                        release_rendezvous(&mut rendezvous, &mut rival_probe).await;
+                        release_rendezvous(&mut rendezvous, &mut rival_probe, &mut rung_probe).await;
                         return Err(error);
                     }
                     let ctx = parts.ctx(&sender);
@@ -802,7 +810,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
         app.drain_surfaced();
     }
 
-    release_rendezvous(&mut rendezvous, &mut rival_probe).await;
+    release_rendezvous(&mut rendezvous, &mut rival_probe, &mut rung_probe).await;
     Ok(())
 }
 

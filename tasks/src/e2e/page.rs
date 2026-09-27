@@ -26,6 +26,24 @@ impl Page {
         }
     }
 
+    /// [`Page::navigate`], recording the console for `window` where the
+    /// driver can. `WebDriver` has no console stream, so it only navigates.
+    pub(crate) fn navigate_watching_console(&self, url: &str, window: Duration) {
+        match self {
+            Self::Cdp(browser) => browser.navigate_watching_console(url, window),
+            Self::WebDriver(session) => session.navigate(url),
+        }
+    }
+
+    /// What [`Page::navigate_watching_console`] recorded; blocks until its
+    /// window is over.
+    pub(crate) fn console(&self) -> String {
+        match self {
+            Self::Cdp(browser) => browser.console(),
+            Self::WebDriver(_) => String::new(),
+        }
+    }
+
     /// Evaluate a JS expression (no `return`), reading its value as a string.
     pub(crate) fn evaluate(&self, expression: &str) -> String {
         match self {

@@ -4,7 +4,7 @@
 //! and with a short dial budget so a send to an unreachable peer fails fast
 //! rather than stalling the event loop.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -69,6 +69,11 @@ struct PoolInner {
     /// before dialing, and a warm hit inside never dials, but both mean the
     /// caller was willing to.
     dial_attempts: AtomicU64,
+    /// Endpoints with a background dial in flight, so that concurrent cold
+    /// sends to one peer share one dial instead of racing their own. Only
+    /// [`UnicastPool::dial_and_send_in_background`] reads it: an inline dial
+    /// through [`UnicastPool::warm_or_dial`] does not.
+    dialing: std::sync::Mutex<HashSet<EndpointId>>,
     /// `TransportPolicy::relay`. Off, a send on a connection whose selected
     /// path is the relay is refused; the connection stays pooled, since iroh
     /// may still punch a direct path on it.
@@ -96,6 +101,7 @@ impl UnicastPool {
                 conns: Mutex::new(HashMap::new()),
                 dial_failures: Mutex::new(Cooldown::new(DIAL_FAILURE_COOLDOWN)),
                 dial_attempts: AtomicU64::new(0),
+                dialing: std::sync::Mutex::new(HashSet::new()),
                 relay_transport,
             }),
         }
@@ -112,6 +118,7 @@ impl UnicastPool {
                 conns: Mutex::new(HashMap::new()),
                 dial_failures: Mutex::new(Cooldown::new(DIAL_FAILURE_COOLDOWN)),
                 dial_attempts: AtomicU64::new(0),
+                dialing: std::sync::Mutex::new(HashSet::new()),
                 relay_transport: false,
             }),
         }
@@ -163,6 +170,52 @@ impl UnicastPool {
     #[cfg(test)]
     pub(crate) fn dial_attempts(&self) -> u64 {
         self.inner.dial_attempts.load(Ordering::Relaxed)
+    }
+
+    /// Start a [`Self::dial_and_send`] to `eid` on a spawned task, and return
+    /// whether one was started. `false` when `eid` is on the dial-failure
+    /// cooldown, or when a background dial to it is already in flight; this
+    /// frame is then not sent, and the caller can try again later.
+    pub(crate) async fn dial_and_send_in_background(&self, eid: EndpointId, bytes: Bytes) -> bool {
+        if self
+            .inner
+            .dial_failures
+            .lock()
+            .await
+            .on_cooldown(&eid, Instant::now())
+        {
+            return false;
+        }
+        if !self
+            .inner
+            .dialing
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(eid)
+        {
+            return false;
+        }
+        let in_flight = InFlightDial {
+            pool: self.clone(),
+            eid,
+        };
+        n0_future::task::spawn(async move {
+            if let Err(error) = in_flight.pool.dial_and_send(eid, bytes).await {
+                tracing::debug!(target: LOG_TARGET, %eid, %error, "background send not delivered");
+            }
+            drop(in_flight);
+        });
+        true
+    }
+
+    /// Put `eid` on the dial-failure cooldown, as a failed dial does.
+    #[cfg(test)]
+    pub(crate) async fn note_dial_failure(&self, eid: EndpointId) {
+        self.inner
+            .dial_failures
+            .lock()
+            .await
+            .note(eid, Instant::now());
     }
 
     /// Ensure a connection to `eid` (reusing a warm one or dialing inline) and
@@ -244,6 +297,25 @@ impl UnicastPool {
     }
 }
 
+/// An endpoint's entry in the in-flight dial set, removed on drop: a dial that
+/// panics or is dropped with its runtime must not leave the peer marked in
+/// flight, which would refuse every later background send to it.
+struct InFlightDial {
+    pool: UnicastPool,
+    eid: EndpointId,
+}
+
+impl Drop for InFlightDial {
+    fn drop(&mut self) {
+        self.pool
+            .inner
+            .dialing
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.eid);
+    }
+}
+
 /// Dial `eid` on the unicast ALPN within [`DIAL_TIMEOUT`]. The endpoint already
 /// knows the peer's address (registered via `add_peer_addr`), so a bare-id
 /// `EndpointAddr` resolves through the endpoint's address book + lookups.
@@ -307,6 +379,51 @@ mod tests {
             failures.len(),
             1,
             "the stale entry is dropped, not retained"
+        );
+    }
+
+    /// A background dial that ends early — dropped with its runtime here, the
+    /// same unwinding a panic in the dial gives — must still clear its
+    /// in-flight entry, or every later cold send to that peer is refused.
+    #[test]
+    fn a_background_dial_dropped_mid_flight_clears_its_in_flight_entry() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        let silent = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind a silent socket");
+        let bob = iroh::SecretKey::generate().public();
+        let pool = runtime.block_on(async {
+            let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+                .relay_mode(iroh::RelayMode::Disabled)
+                .bind()
+                .await
+                .expect("bind a loopback endpoint");
+            let bob_addr = iroh::EndpointAddr::from_parts(
+                bob,
+                [iroh::TransportAddr::Ip(
+                    silent.local_addr().expect("silent addr"),
+                )],
+            );
+            crate::lookup::add_peer_addr(&endpoint, bob_addr).expect("register bob");
+            let pool = super::UnicastPool::new(endpoint, false);
+            assert!(
+                pool.dial_and_send_in_background(bob, bytes::Bytes::new())
+                    .await
+            );
+            tokio::task::yield_now().await;
+            pool
+        });
+
+        drop(runtime);
+
+        let still_in_flight = pool.inner.dialing.lock().expect("lock").contains(&bob);
+        let cleanup = tokio::runtime::Runtime::new().expect("a cleanup runtime");
+        let _entered = cleanup.enter();
+        drop(pool);
+        assert!(
+            !still_in_flight,
+            "the dropped dial left {bob} marked in flight"
         );
     }
 

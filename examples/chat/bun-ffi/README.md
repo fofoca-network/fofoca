@@ -12,13 +12,16 @@ cargo build --release -p fofoca-ffi   # once
 bun install                           # once, at the repo root
 
 bun run start --topic star-lake --nick ana     # join a public topic mesh
-bun run start --create --mdns --nick ana       # or create; share the printed id
+bun run start --create --lookup mdns --nick ana  # or create; share the printed id
 bun run start --id <base58> --nick bo          # and join it by id
 ```
 
-`--relay-url <url>` (repeatable) swaps in a custom relay ladder on `--topic`
-and `--create`. The ladder is part of the mesh id, so every member must pass
-the same list; the relay stays a lookup — payload never rides it.
+`--lookup mdns,dht,relay` (any subset, `--create` only) says how members find
+each other; none is a loopback mesh. `--relay-url <url>` (repeatable) swaps in
+a custom relay ladder on `--topic` and `--create`, and `--transport p2p,relay`
+lets payload fall back to the relay. Both are part of the mesh id, so every
+member must pass the same values; by default the relay stays a lookup and
+payload never rides it.
 
 Human mode: type to chat, `/who`, `/state`, `/merge {json}`, `/quit`.
 
@@ -55,7 +58,7 @@ the reported one.
 Example: create a mesh, hand the id to a second client:
 
 ```sh
-bun run start --create --mdns --json <<'EOF'
+bun run start --create --lookup mdns --json <<'EOF'
 {"cmd":"peers"}
 {"cmd":"leave"}
 EOF

@@ -11,8 +11,8 @@ roster and merge the shared document without writing any Rust.
 
 Two backends because the two hosts reach the engine differently: a tab has no
 UDP socket, a terminal has real ones. They meet on the mesh because both speak
-[`crates/fofoca-pipe`](../crates/fofoca-pipe)'s wire contract, which exists as
-one crate for exactly that reason.
+`fofoca::membership` (in [`crates/fofoca`](../crates/fofoca)), which exists as
+one module for exactly that reason.
 
 ```ts
 import { join } from 'fofoca-ffi' // or 'fofoca-wasm'
@@ -30,35 +30,71 @@ for await (const message of mesh.messages()) {
 **`join({ topic })` is always public.** A topic mesh is reached over mDNS, the
 mainline DHT and the relay ladder, and that is not a default you can change.
 The engine mixes the lookup set into the mesh id, so two peers reaching the
-same string over different discovery legs derive two different meshes and
-never meet. `JoinOpts` therefore carries almost no discovery flags — the two
-it does carry, `relayUrls` and `relayTransport`, are exactly the two that are
-mixed into the id, and every member must pass the same values.
+same string over different lookups derive two different meshes and never
+meet. `JoinOpts` therefore carries no `lookup` — the two choices it does
+carry, `transport` and `relayUrls`, are exactly the two that are mixed into
+the id, and every member must pass the same values.
 
-**`create({})` is machine-local.** Naming no discovery option is not "the
-default set" — it resolves to a loopback mesh nothing off this machine can
-reach. That is what makes the offline two-peer test possible, and it is
-surprising everywhere else. Pass `public: true`, or name the legs you want.
+**`create({})` is machine-local.** Naming no lookup is not "the default set"
+— it resolves to a loopback mesh nothing off this machine can reach. That is
+what makes the offline two-peer test possible, and it is surprising
+everywhere else. Name the lookups you want: `lookup: ['mdns', 'dht',
+'relay']` is the all-on set a topic uses.
 
-**The relay carries no data unless you say so.** `relayLookup` (and `public`) use
-the relay as a *lookup*: a meeting point where peers find each other. Payload
-then goes peer to peer, and a pair that cannot open a direct path stays
-unlinked for data. `relayTransport: true` lets payload fall back to the relay.
-It is part of the mesh id, so joiners inherit whatever the creator chose.
+**The relay carries no data unless you say so.** Three lists name three
+concepts. `lookup: ['relay']` uses the relay as a *lookup*: a meeting point
+where peers find each other. Payload then goes peer to peer, and a pair that
+cannot open a direct path stays unlinked for data. `transport: ['p2p',
+'relay']` lets payload fall back to the relay; it is part of the mesh id, so
+joiners inherit whatever the creator chose. `relayUrls` says *which* relay
+and nothing about its role.
+
+## Byte streams
+
+A mesh carries short text messages. To move bytes from one peer to one other,
+use a stream: it never rides the gossip. By default it rides a direct path (a
+WebRTC data channel from a tab), and with `transport: ['p2p', 'relay']` it can
+fall back to the relay (the node must also name `relay` among its lookups; a
+browser always does).
+
+A write waits for the reader to attach, so the two ends run in two places:
+here, two tabs.
+
+```ts
+// The producing tab.
+import { bindStreams } from 'fofoca-wasm'
+
+const producer = await (await bindStreams({ lookup: ['relay'] })).create()
+share(producer.hash) // whoever holds the hash can read the stream, once
+await producer.write('hello') // waits here until the reader attaches
+await producer.close()
+```
+
+```ts
+// The reading tab, given the hash.
+import { bindStreamsFor } from 'fofoca-wasm'
+
+const reader = await (await bindStreamsFor(hash)).open(hash)
+for await (const chunk of reader) { … }
+```
+
+[`fofoca-stream-web`](fofoca-stream-web) is a page built on this: it reads the
+stream in its URL fragment, or produces one. The `fofoca-stream` binary
+(`crates/fofoca-stream-cli`) is the terminal end.
 
 ## The harness page
 
 `fofoca-wasm` ships a driverless test page: build the wasm
-(`cargo task wasm-peer`), serve it
+(`cargo task build-wasm`), serve it
 (`bun run harness -- 3000`), and open
 
 ```
-http://127.0.0.1:3000/?topic=room&relayTransport=0&log=fofoca=info
+http://127.0.0.1:3000/?topic=room&transport=p2p&log=fofoca=info
 ```
 
-The page joins the mesh the query names and mirrors the roster, every frame,
+The page joins the mesh the query names and mirrors the roster, every message,
 every event and the shared state into the DOM; `window.harness` exposes
-`send`/`sendEof`/`stateMerge`/`close`. `cargo task e2e --suite mesh` drives
+`send`/`stateMerge`/`close`. `cargo task e2e --suite mesh` drives
 this page against a real native peer and a local relay — the native↔web
 matrix.
 

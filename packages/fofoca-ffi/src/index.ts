@@ -64,13 +64,8 @@ export function ffiOpener(wire: WireOpts, deps: OpenerDeps = {}): Opener {
           pending.delete(message.id)
           break
         }
-        case 'frame': {
-          sink.frame({
-            from: message.from,
-            directed: message.directed,
-            eof: message.eof,
-            bytes: new Uint8Array(message.bytes),
-          })
+        case 'msg': {
+          sink.msg({ from: message.from, directed: message.directed, text: message.text })
           break
         }
         case 'roster': {
@@ -123,17 +118,9 @@ export function ffiOpener(wire: WireOpts, deps: OpenerDeps = {}): Opener {
       id: reply.id,
       name: reply.name,
       nick: reply.nick,
-      maxChunk: reply.maxChunk,
-      send: async (to, bytes) => {
-        // Copy before transferring: the caller's view may outlive this call,
-        // and a transferred buffer is detached under it. A constructor copy,
-        // not `slice()`: a Node or Bun `Buffer` is a `Uint8Array` whose
-        // `slice` is `subarray`, a view over a shared pool.
-        const copy = new Uint8Array(bytes)
-        await request({ t: 'send', to, bytes: copy.buffer }, [copy.buffer])
-      },
-      sendEof: async (to) => {
-        await request({ t: 'sendEof', to })
+      maxMsg: reply.maxMsg,
+      send: async (to, text) => {
+        await request({ t: 'send', to, text })
       },
       stateMerge: async (json) => (await request({ t: 'stateMerge', json })) as string,
       close: async () => {
@@ -176,7 +163,7 @@ export function joinWire(opts: JoinOpts): WireOpts {
   const topic = opts.topic ?? null
   const mesh = opts.id ?? null
   if (topic === null && mesh === null) {
-    // `fofoca_open` with neither selector *creates* a mesh — join({}) would
+    // `fofoca_mesh_open` with neither selector *creates* a mesh — join({}) would
     // silently mint a loopback mesh of one and hear nobody, ever.
     throw new Error('join needs a topic or an id; to start a fresh mesh use create()')
   }
@@ -188,12 +175,9 @@ export function joinWire(opts: JoinOpts): WireOpts {
     topic,
     nick: opts.nick ?? null,
     name: null,
-    isPublic: false,
-    mdns: false,
-    dht: false,
-    relayLookup: false,
-    relayTransport: opts.relayTransport ?? false,
-    relayUrls: relayUrlsWire(opts.relayUrls),
+    lookup: null,
+    transport: listWire(opts.transport),
+    relayUrls: listWire(opts.relayUrls),
     disableIp: false,
     disableWebrtc: false,
     maxPeers: opts.maxPeers ?? 0,
@@ -206,24 +190,21 @@ export function createWire(opts: CreateOpts): WireOpts {
     topic: null,
     nick: opts.nick ?? null,
     name: opts.name ?? null,
-    isPublic: opts.public ?? false,
-    mdns: opts.mdns ?? false,
-    dht: opts.dht ?? false,
-    relayLookup: opts.relayLookup ?? false,
-    relayTransport: opts.relayTransport ?? false,
-    relayUrls: relayUrlsWire(opts.relayUrls),
-    disableIp: opts.transports?.ip === false,
-    disableWebrtc: opts.transports?.webrtc === false,
+    lookup: listWire(opts.lookup),
+    transport: listWire(opts.transport),
+    relayUrls: listWire(opts.relayUrls),
+    disableIp: opts.paths?.ip === false,
+    disableWebrtc: opts.paths?.webrtc === false,
     maxPeers: opts.maxPeers ?? 0,
   }
 }
 
-/** The C ABI takes the ladder as one comma-separated string, NULL for the default. */
-function relayUrlsWire(urls: string[] | undefined): string | null {
-  if (urls === undefined || urls.length === 0) {
+/** The C ABI takes each list as one comma-separated string, NULL for empty. */
+function listWire(items: readonly string[] | undefined): string | null {
+  if (items === undefined || items.length === 0) {
     return null
   }
-  return urls.join(',')
+  return items.join(',')
 }
 
 export async function join(opts: JoinOpts = {}): Promise<Mesh> {
@@ -239,10 +220,12 @@ export type {
   CreateOpts,
   JoinOpts,
   Lane,
+  Lookup,
   Mesh,
   MeshEvent,
   Message,
   Peer,
   Reach,
   StateDoc,
+  Transport,
 } from 'fofoca-api'
