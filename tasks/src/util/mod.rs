@@ -5,6 +5,7 @@ pub(crate) mod output;
 #[cfg(any(feature = "mesh", feature = "bench"))]
 pub(crate) mod page;
 pub(crate) mod wasm;
+pub(crate) mod webdriver;
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};

@@ -1,12 +1,11 @@
-//! One browser tab behind whichever driver reaches it, for the mesh and chat
-//! suites.
+//! One browser tab behind whichever driver reaches it, for the suites that
+//! drive a page themselves (mesh, chat, stream).
 
 use std::time::Duration;
 
 use crate::util::cdp;
 use crate::util::page::{Evaluate, call_page_within};
-
-use super::webdriver;
+use crate::util::webdriver;
 
 /// How long a page call may take to settle before it is reported as never
 /// having done so.

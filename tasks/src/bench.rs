@@ -25,8 +25,6 @@ mod run;
 #[cfg(feature = "bench")]
 mod serve;
 #[cfg(feature = "bench")]
-mod stp;
-#[cfg(feature = "bench")]
 mod web;
 
 #[derive(ClapArgs)]

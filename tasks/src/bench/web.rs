@@ -1,5 +1,5 @@
 //! The browser cells: real browser processes, one per tab — Chrome for
-//! Testing over CDP, Safari Technology Preview over `safaridriver --mcp` —
+//! Testing over CDP, Safari Technology Preview over `WebDriver` —
 //! with the JSEP envelopes ferried between them by this runner.
 //!
 //! Two processes rather than two endpoints in one tab, because the one-tab
@@ -15,13 +15,13 @@ use fofoca_iroh_webrtc_transport::iroh::protocol::Router;
 use fofoca_iroh_webrtc_transport::{IceConfig, SignalEnvelope, answer_with};
 
 use crate::util::page::{Evaluate, await_call, call_page_within, start_call, wait_ready};
+use crate::util::webdriver::{self, SAFARI_TP};
 use crate::util::{Skip, cdp, output};
 
 use super::Args;
 use super::native::{JSEP_DEADLINE, WebRtcPeer};
 use super::run::{Measured, Outcome, Sample, TRANSFER_TIMEOUT};
 use super::serve::Static;
-use super::stp;
 
 /// The wasm page has to fetch and instantiate the module before `#ready`.
 const PAGE_TIMEOUT: Duration = Duration::from_mins(1);
@@ -36,21 +36,21 @@ pub(crate) enum Engine {
 /// The driver behind one tab.
 enum Driver {
     Chrome(cdp::Browser),
-    Safari(stp::Browser),
+    Safari(webdriver::Session),
 }
 
 impl Driver {
     fn navigate(&self, url: &str) {
         match self {
             Self::Chrome(browser) => browser.navigate(url),
-            Self::Safari(browser) => browser.navigate(url),
+            Self::Safari(session) => session.navigate(url),
         }
     }
 
     fn version(&self) -> String {
         match self {
             Self::Chrome(browser) => browser.version(),
-            Self::Safari(browser) => browser.version(),
+            Self::Safari(session) => session.version(),
         }
     }
 }
@@ -59,7 +59,7 @@ impl Evaluate for Driver {
     fn evaluate(&self, expression: &str) -> String {
         match self {
             Self::Chrome(browser) => browser.evaluate(expression),
-            Self::Safari(browser) => browser.evaluate(expression),
+            Self::Safari(session) => session.execute(&format!("return ({expression});")),
         }
     }
 }
@@ -75,7 +75,7 @@ impl Tab {
     fn open(engine: Engine, server: &Static, page: &str) -> Result<Self, Skip> {
         let page_obj = match engine {
             Engine::Chrome => Driver::Chrome(cdp::Browser::launch()?),
-            Engine::Safari => Driver::Safari(stp::Browser::launch()?),
+            Engine::Safari => Driver::Safari(webdriver::Session::open("safari-tp", SAFARI_TP)?),
         };
         page_obj.navigate(&format!("{}/{page}", server.url));
         wait_ready(&page_obj, PAGE_TIMEOUT, Duration::from_millis(250))

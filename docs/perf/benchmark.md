@@ -29,13 +29,11 @@ does not set the throughput.
   `data-channel`), so a cell cannot quietly measure the wrong lane.
 - Browser cells run each tab in its own browser process: Chrome for
   Testing over CDP (`agent-browse`), and Safari Technology Preview over
-  `safaridriver --mcp`, which the runner starts and speaks JSON-RPC to. This
-  runner ferries the SDP between tabs. Host-only ICE, no STUN.
+  W3C WebDriver, the same client the e2e suites use. This runner ferries the
+  SDP between tabs. Host-only ICE, no STUN.
 - STP needs *Settings ▸ Developer ▸ Allow remote automation* and a one-time
-  `sudo safaridriver --enable` (the STP copy of the binary). Classic
-  `safaridriver` over W3C WebDriver does not get a session on macOS 27 (it
-  times out at "Request creation of a new automation session", for Safari
-  and STP alike), which is why the runner uses the MCP mode.
+  `sudo safaridriver --enable` (the STP copy of the binary). A running STP
+  copy can hang the session handshake; quit it and run again.
 - Protocol and pages: `fofoca_iroh_webrtc_transport::bench`,
   `crates/fofoca-bench-wasm`. Runner: `tasks/src/bench.rs`.
 
@@ -62,13 +60,14 @@ second, the median of the rounds; the range is min–max across both runs.
 | webrtc chrome-chrome (raw, 64 KiB msgs) | data-channel | 466 | 463 | 364–478 | ~690 |
 | webrtc chrome-chrome (raw, 1200 B msgs) | data-channel | 258 | 255 | 249–273 | ~710 |
 
-The Safari cells, one run of 2 timed rounds, measured while the machine was
-loaded (load average 20–30), so read them as a lower bound until a quiet
-rerun:
+The Safari cells, one run of 2 timed rounds each. safari-native is measured
+over WebDriver (range 81–123). safari-chrome is from the earlier
+`safaridriver --mcp` driver, on a machine loaded to a load average of 20–30,
+so read it as a lower bound until a rerun:
 
 | cell | path | Mbit/s | JSEP ms |
 |---|---|---|---|
-| fofoca safari-native | webrtc | 106 | ~600 |
+| fofoca safari-native | webrtc | 102 | ~610 |
 | fofoca safari-chrome | webrtc | 102 | ~950 |
 
 Until this revision every round opened a new connection, so every timed

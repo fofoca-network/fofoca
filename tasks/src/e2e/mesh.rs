@@ -24,6 +24,7 @@ use std::time::Duration;
 use crate::TaskOutcome;
 use crate::util::cdp;
 use crate::util::page::{rand_token, wait_ready};
+use crate::util::webdriver;
 use crate::util::{output, repo_root, wait_for};
 
 use fofoca::membership;
@@ -31,7 +32,7 @@ use fofoca::net::PathFlags;
 use fofoca::protocol::Transport;
 
 use super::page::{Page, call_page, urlencode};
-use super::{Args, Skip, build, webdriver};
+use super::{Args, Skip, build};
 
 /// A linked pair has to survive the beacon claim (~8 s), a WebRTC
 /// negotiation or a hole punch, and one alive-tick retry.
@@ -404,7 +405,7 @@ impl BunServer {
     }
 }
 
-pub(super) use super::webdriver::free_port;
+pub(super) use crate::util::webdriver::free_port;
 
 // ── one cell ────────────────────────────────────────────────────────────
 

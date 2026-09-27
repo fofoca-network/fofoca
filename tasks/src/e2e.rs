@@ -14,6 +14,7 @@ use std::time::Duration;
 use clap::{Args as ClapArgs, ValueEnum};
 
 use crate::TaskOutcome;
+use crate::util::webdriver::{Driver, SAFARI_TP};
 use crate::util::{Skip, json_to_string, output};
 
 pub(crate) mod build;
@@ -238,7 +239,7 @@ fn browsers() -> Vec<Browser> {
         Browser {
             name: "safari-tp",
             backend: Backend::WebDriver,
-            binary: "/Applications/Safari Technology Preview.app/Contents/MacOS/Safari Technology Preview".to_owned(),
+            binary: SAFARI_TP.to_owned(),
             pressures: &[0],
         },
     ]
@@ -416,7 +417,7 @@ fn run_cell(browser: &Browser, wasm: &Path, pressure: u32) -> Result<Harvest, Sk
     match browser.backend {
         Backend::Cdp => cdp::run(pressure, CELL_TIMEOUT),
         Backend::WebDriver => {
-            let driver = webdriver::Driver::start(browser.name)?;
+            let driver = Driver::start(browser.name)?;
             webdriver::run(
                 &driver,
                 browser.name,
