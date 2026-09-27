@@ -16,14 +16,16 @@ const CHUNK: usize = 64 * 1024;
 /// from a lost link.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refused {
-    /// No open stream has this hash: never created, closed, or abandoned.
+    /// No open stream has this hash: never created, closed, or abandoned
+    /// before this consumer was admitted.
     Unknown,
     /// Another consumer already holds the stream.
     Taken,
     /// The only path is the relay, and the stream's policy keeps the relay for
     /// finding peers only.
     RelayRefused,
-    /// The producer dropped the stream before closing it.
+    /// The producer dropped the stream before closing it, after this consumer
+    /// was admitted (while it read, or during the hand-off).
     Abandoned,
 }
 

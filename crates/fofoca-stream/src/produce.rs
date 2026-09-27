@@ -143,8 +143,11 @@ impl ProtocolHandler for StreamAcceptor {
                     })
                     .is_err()
                 {
-                    // The producer went away between the claim and now.
-                    conn.close(code::UNKNOWN.into(), b"unknown stream");
+                    // The producer went away between the claim and now: the
+                    // stream existed and this consumer was admitted, so
+                    // abandoned, not unknown. The same answer `Producer::drop`
+                    // gives when the link landed before it (its `try_recv`).
+                    conn.close(code::ABANDONED.into(), b"abandoned");
                     return Ok(());
                 }
                 // The producer owns the connection now; this task only keeps
