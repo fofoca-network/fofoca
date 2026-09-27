@@ -142,8 +142,9 @@ int fofoca_mesh_close(fofoca_mesh *handle);
  * Byte streams
  * ------------
  * A producer creates a stream and hands its hash to one consumer, which opens
- * it. The bytes ride one QUIC stream on a direct path (hole-punched UDP, or a
- * WebRTC data channel), never the mesh's gossip. A stream admits exactly one
+ * it. The bytes ride one QUIC stream on a direct path by default (hole-punched
+ * UDP, or a WebRTC data channel), on the relay only when the stream's
+ * `transport` names it, and never on the mesh's gossip. A stream admits exactly one
  * consumer; a second is refused. The hash is a bearer ticket: whoever holds it
  * can take that one slot.
  *

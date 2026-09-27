@@ -52,16 +52,27 @@ and nothing about its role.
 ## Byte streams
 
 A mesh carries short text messages. To move bytes from one peer to one other,
-use a stream: it rides a direct path (a WebRTC data channel from a tab), never
-the gossip.
+use a stream: it never rides the gossip. By default it rides a direct path (a
+WebRTC data channel from a tab), and with `transport: ['p2p', 'relay']` it can
+fall back to the relay (the node must also name `relay` among its lookups; a
+browser always does).
+
+A write waits for the reader to attach, so the two ends run in two places:
+here, two tabs.
 
 ```ts
-import { bindStreams, bindStreamsFor } from 'fofoca-wasm'
+// The producing tab.
+import { bindStreams } from 'fofoca-wasm'
 
 const producer = await (await bindStreams({ lookup: ['relay'] })).create()
 share(producer.hash) // whoever holds the hash can read the stream, once
-await producer.write('hello')
+await producer.write('hello') // waits here until the reader attaches
 await producer.close()
+```
+
+```ts
+// The reading tab, given the hash.
+import { bindStreamsFor } from 'fofoca-wasm'
 
 const reader = await (await bindStreamsFor(hash)).open(hash)
 for await (const chunk of reader) { … }

@@ -12,8 +12,8 @@
 //! With a hash it reads that stream to stdout and exits at its end. Without
 //! one, stdin must be a pipe or a file: it creates a stream, prints its hash,
 //! waits for the one reader, streams stdin to it, and ends the stream at EOF.
-//! The bytes ride a direct path, never gossip, and the reader paces the
-//! writer.
+//! The bytes ride a direct path by default (the relay only with
+//! `--transport p2p,relay`), never gossip, and the reader paces the writer.
 
 mod args;
 

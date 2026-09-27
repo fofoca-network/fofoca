@@ -2,8 +2,9 @@
 
 The stream's web app: one end of one byte stream in a tab. With a hash in the
 URL it reads that stream; without one it creates a stream, shows its hash, and
-writes what you type. The bytes ride a direct path (a WebRTC data channel from
-a tab), never gossip. The page exposes its runtime to whoever drives the tab:
+writes what you type. The bytes ride a direct path by default (a WebRTC data
+channel from a tab), the relay only with `?transport=p2p,relay`, and never
+gossip. The page exposes its runtime to whoever drives the tab:
 a person at the composer, a browser agent through WebMCP, or a script through
 `window.stream`.
 

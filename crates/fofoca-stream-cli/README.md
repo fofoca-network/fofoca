@@ -1,8 +1,9 @@
 # fofoca-stream (the binary)
 
 Stdin to one reader, or a stream's bytes to stdout. The bytes go over a
-direct path (hole-punched UDP, or a WebRTC data channel when a browser reads
-or writes), never through gossip.
+direct path by default (hole-punched UDP, or a WebRTC data channel when a
+browser reads or writes), over the relay only with `--transport p2p,relay`,
+and never through gossip.
 
 ```sh
 cat lorem.txt | fofoca-stream --web-url http://127.0.0.1:3020/

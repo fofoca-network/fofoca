@@ -2,7 +2,8 @@
 
 `tail -f` into `fofoca-stream`: one reader, in a terminal or a browser tab,
 gets the last lines of a file and then every line appended to it. The bytes go
-over a direct path from this machine to the reader, never through gossip.
+over a direct path from this machine to the reader by default, and never
+through gossip.
 
 A stream has one reader. The first reader to open the hash gets the stream,
 and a second one is refused. To give a file to two readers, run the script

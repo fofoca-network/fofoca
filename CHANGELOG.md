@@ -12,7 +12,8 @@ published to a registry; pin it with
 
 - `fofoca-stream`: 1-1 byte streams addressed by a hash. A producer creates a
   stream and hands its hash to one consumer. The bytes ride a direct QUIC path
-  or a WebRTC data channel, never gossip, and the consumer paces the producer.
+  or a WebRTC data channel by default, the relay only when the stream's
+  `transport` allows it, never gossip, and the consumer paces the producer.
   A second consumer is refused (`Refused::Taken`), and a producer dropped
   before it closes abandons the stream (`Refused::Abandoned`).
   `close_or_abandon` ends the stream if a consumer has claimed it and
@@ -136,7 +137,7 @@ published to a registry; pin it with
 ### Removed
 
 - **Breaking:** `fofoca-pipe`, the byte pipe over gossip. Byte streams are
-  `fofoca-stream`, over a direct path; the mesh embedding is
+  `fofoca-stream`, over a direct path by default; the mesh embedding is
   `fofoca::membership`. The v0.6.0 tag keeps the crate.
 - **Breaking:** the `fofoca-blobs` crate, and with it the workspace's only
   OPFS store backend. `fofoca-chunks` is the store: chunks prove content,

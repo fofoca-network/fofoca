@@ -1,6 +1,7 @@
 /**
- * Byte streams in the browser: 1-1, addressed by a hash, over a direct path
- * (a WebRTC data channel from a tab), never the mesh's gossip.
+ * Byte streams in the browser: 1-1, addressed by a hash, over a direct path by
+ * default (a WebRTC data channel from a tab), over the relay only when the
+ * stream's `transport` allows it, never over the mesh's gossip.
  *
  * ```ts
  * import { bindStreams, bindStreamsFor } from 'fofoca-wasm'

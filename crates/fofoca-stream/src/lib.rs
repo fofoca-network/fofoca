@@ -2,8 +2,9 @@
 //!
 //! A producer [`create`](StreamNode::create)s a stream and hands its
 //! [`StreamHash`] to one consumer, which [`open`](StreamNode::open)s it. The
-//! bytes ride one QUIC stream on a direct path — hole-punched UDP, or a WebRTC
-//! data channel when a browser is on either end — never through gossip. QUIC
+//! bytes ride one QUIC stream on a direct path by default — hole-punched UDP,
+//! or a WebRTC data channel when a browser is on either end — on the relay
+//! only when the stream's `transport` allows it, and never through gossip. QUIC
 //! keeps them in order and paces the producer to the consumer.
 //!
 //! A stream is 1-1: its hash admits exactly one consumer, and a second one is

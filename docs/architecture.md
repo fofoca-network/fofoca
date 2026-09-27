@@ -117,7 +117,7 @@ The engine depends on `fofoca-iroh-webrtc-transport` on both targets: the `nativ
 | `fofoca-logging` | Tracing sink and directive filter. |
 | `fofoca` | The engine. The only crate that names `iroh` and `iroh-gossip`. |
 | `fofoca-ffi` | A C-ABI shim, so a non-Rust process joins a mesh or opens byte streams in-process. |
-| `fofoca-stream` | 1-1 byte streams addressed by a hash, over a direct path and never gossip (§9.4). Reaches wasm32. |
+| `fofoca-stream` | 1-1 byte streams addressed by a hash, over a direct path by default (the relay only when the stream allows it), never gossip (§9.4). Reaches wasm32. |
 | `fofoca-stream-cli` | The `fofoca-stream` binary: stdin to one reader, or a stream to stdout. |
 | `fofoca-wasm` | The browser peer: `fofoca::membership` and `fofoca-stream` as wasm-bindgen classes. Runs only on wasm32. |
 | `fofoca-chunks` | Content-addressed chunk store: BLAKE3 leaf rows over data the crate does not own. Replaced `fofoca-blobs`. |
@@ -516,8 +516,9 @@ The reverse route derives from the forward route, so a reply needs no fresh look
 ### 9.4 Byte streams
 
 `fofoca-stream` carries bytes from one producer to one consumer.
-It uses no gossip: the bytes ride the `fofoca/stream/1` ALPN on a direct path.
-The direct path is QUIC over IP, or a WebRTC data channel when one end is a browser.
+It uses no gossip: the bytes ride the `fofoca/stream/1` ALPN.
+By default they ride a direct path: QUIC over IP, or a WebRTC data channel when one end is a browser.
+A stream created with `transport: ['p2p', 'relay']` lets them fall back to the relay when no direct path exists; the node must then also name `relay` among its lookups, which a browser always does.
 
 A producer creates a stream and gets a hash.
 The hash holds a random 16-byte id, a 32-byte secret, the lookups, the relay policy, and the address of the producer.
