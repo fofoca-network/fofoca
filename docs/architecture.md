@@ -612,6 +612,11 @@ Measured numbers from the `chat-webrtc` example workspace:
 - Native-to-native over the WebRTC data channel moves about 6 times less throughput, at 36 times the latency, than the hole-punched iroh path.
 - Browser-to-native transfers measured 4 to 19 MB/s.
 
+Measured with the `fofoca-stream` binary on one machine (2026-09-27), 1 GiB from `head -c 1G /dev/zero` into the producer, 2 runs each:
+
+- Native to native, release build, over a direct path: 99 to 101 MB/s.
+- Native to the stream page in Chrome, over its WebRTC data channel: 10.6 to 11.0 MB/s once the page has opened (the open took 1.6 to 2.1 s). The producer was the e2e suite's debug build, so this is a floor.
+
 Capacity ceilings:
 
 - The HyParView active view holds 64 links, raised from the iroh-gossip default of 5.
