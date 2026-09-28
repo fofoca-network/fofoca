@@ -373,6 +373,24 @@ async fn a_webrtc_only_consumer_of_a_producer_without_webrtc_fails_fast() {
     assert!(elapsed < Duration::from_secs(2), "took {elapsed:?}");
 }
 
+/// The consumer's list refuses relay payload even when the producer's allows
+/// it. A producer with no UDP and a consumer with no data channel share only
+/// the relay, so the open fails at once instead of streaming over it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_consumer_without_relay_payload_refuses_a_relay_only_pair() {
+    let (url, _relay) = test_relay::spawn_plain().await.expect("relay");
+    let url = url.to_string();
+    let producer_node = on_relay(&url, vec![Transport::WebRtc, Transport::Relay]).await;
+    let consumer_node = on_relay(&url, vec![Transport::Udp]).await;
+    let producer = producer_node.create().await;
+    let hash = producer.hash().clone();
+    let started = Instant::now();
+    let error = consumer_node.open(&hash).await.expect_err("relay only");
+    let elapsed = started.elapsed();
+    assert_eq!(refusal(&error), Some(Refused::RelayRefused), "{error:#}");
+    assert!(elapsed < Duration::from_secs(2), "took {elapsed:?}");
+}
+
 /// A node made to read a hash can produce as well, and the hash it mints must
 /// carry its home relay like one from `bind` does.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

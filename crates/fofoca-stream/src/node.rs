@@ -174,10 +174,13 @@ impl StreamNode {
         // A data channel needs `webrtc` on both ends: the producer's list is in
         // the hash, and a producer without it answers no offer.
         let can_lane = self.transports.webrtc && hash.transport.webrtc;
+        // The relay carries the bytes only if both lists allow it: the
+        // producer enforces its own, so this side enforces the consumer's.
+        let relay_ok = self.transport.relay_transport && hash.transport.relay_transport;
         // Only a data channel could carry the bytes, and the pair has none:
         // what is left is the relay the stream refuses, so say so now rather
         // than after the direct-path probe.
-        if needs_lane && !can_lane && !hash.transport.relay_transport {
+        if needs_lane && !can_lane && !relay_ok {
             bail!(Refused::RelayRefused);
         }
         self.producers.add_endpoint_info(hash.addr.clone());
@@ -189,7 +192,7 @@ impl StreamNode {
             && !self.webrtc.has_session(&hash.addr.id)
             && let Err(error) =
                 dial_signal(&self.endpoint, hash.addr.clone(), &self.webrtc, self.ice).await
-            && !hash.transport.relay_transport
+            && !relay_ok
         {
             return Err(error.context("opening a WebRTC lane to the producer"));
         }
@@ -198,7 +201,7 @@ impl StreamNode {
             .connect(hash.addr.clone(), crate::STREAM_ALPN)
             .await
             .context("connecting to the producer")?;
-        if !hash.transport.relay_transport && !wait_direct(&conn, PROBE_DEADLINE).await {
+        if !relay_ok && !wait_direct(&conn, PROBE_DEADLINE).await {
             conn.close(code::RELAY_REFUSED.into(), b"relay path refused");
             bail!(Refused::RelayRefused);
         }
