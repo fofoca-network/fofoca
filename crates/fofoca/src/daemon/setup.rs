@@ -349,8 +349,7 @@ impl std::fmt::Debug for SetupParams {
 
 /// Why a browser refuses a mesh with no relay lookup: one string, so a test
 /// can match the refusal without copying its text.
-pub const BROWSER_NEEDS_RELAY_LOOKUP: &str =
-    "a browser cannot reach a peer in this mesh: it has no UDP, so it needs `relay` in lookup";
+pub const BROWSER_NEEDS_RELAY_LOOKUP: &str = "a browser cannot reach a peer in this mesh: it has no UDP, so it needs the relay (`relay` in lookup, and a relay transport on this node)";
 
 /// Why a browser refuses a mesh whose list leaves it no payload path.
 pub const BROWSER_HAS_NO_PATH: &str = "a browser cannot carry payload in this mesh: its transport list has neither `webrtc` nor `relay`";
@@ -389,8 +388,9 @@ fn member_transports(
 /// (already narrowed to `policy`).
 ///
 /// # Errors
-/// No relay lookup: a browser reaches a peer only through the relay, and a
-/// data channel's handshake crosses the relay too. Or a list that leaves both
+/// No relay lookup, or no relay transport on this node: a browser reaches a
+/// peer only through the relay, and a data channel's handshake crosses the
+/// relay too. Or a list that leaves both
 /// the data channel and relay payload out: nothing could carry its payload.
 pub fn refuse_in_browser(
     lookups: &LookupOpts,
@@ -398,7 +398,7 @@ pub fn refuse_in_browser(
     transports: crate::lookup::TransportOpts,
 ) -> Result<()> {
     anyhow::ensure!(
-        lookups.relay_lookup != crate::protocol::mesh::RelayChoice::Disabled,
+        lookups.relay_lookup != crate::protocol::mesh::RelayChoice::Disabled && transports.relay,
         BROWSER_NEEDS_RELAY_LOOKUP
     );
     anyhow::ensure!(transports.carry_without_udp(&policy), BROWSER_HAS_NO_PATH);
@@ -951,6 +951,30 @@ mod tests {
             ..dht_only
         };
         super::refuse_in_browser(&relay, policy, transports).expect("the relay signals");
+    }
+
+    // The relay lookup names a relay, but only this node's relay transport
+    // can dial it: without one, a browser neither signals nor carries relay
+    // payload.
+    #[test]
+    fn a_browser_refuses_a_node_with_no_relay_transport() {
+        let lookups = LookupOpts {
+            mdns: false,
+            dht: false,
+            relay_lookup: RelayChoice::Pinned,
+        };
+        let no_relay = |policy: &TransportPolicy| crate::lookup::TransportOpts {
+            relay: false,
+            ..crate::lookup::TransportOpts::default().within(policy)
+        };
+        let webrtc =
+            TransportPolicy::from_transports(&[Transport::Udp, Transport::WebRtc]).expect("valid");
+        super::refuse_in_browser(&lookups, webrtc, no_relay(&webrtc))
+            .expect_err("no relay to signal on");
+        let relay_payload =
+            TransportPolicy::from_transports(&[Transport::Udp, Transport::Relay]).expect("valid");
+        super::refuse_in_browser(&lookups, relay_payload, no_relay(&relay_payload))
+            .expect_err("no relay to carry payload");
     }
 
     use tokio::sync::watch;
