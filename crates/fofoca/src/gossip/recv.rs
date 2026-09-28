@@ -118,8 +118,10 @@ pub(crate) async fn handle_gossip_event(
                     // alone, and their answers re-send frames every hop there
                     // already saw: iroh-gossip drops a message id it has seen,
                     // so none of it reaches us. Ask again over a link that can
-                    // carry the answer.
-                    tracing::debug!(target: "fofoca::gossip", "asked for state again on the first real-peer link");
+                    // carry the answer. The chat log asks too: a broadcast sent
+                    // before this link could not reach us, and the tick that
+                    // would ask for it can be an interval away.
+                    tracing::debug!(target: "fofoca::gossip", "asked for state and chat again on the first real-peer link");
                     antientropy::broadcast_state_digests(
                         state,
                         ctx.sender,
@@ -128,6 +130,7 @@ pub(crate) async fn handle_gossip_event(
                         antientropy::DigestTrigger::Event,
                     )
                     .await;
+                    antientropy::broadcast_digest(state, ctx.sender, ctx.mesh, ctx.author).await;
                     // Re-publish anything whose value depends on being meshed
                     // (the app's card dial hint); see `NodeApp::on_meshed`.
                     app.on_meshed(state, ctx).await;
@@ -1831,9 +1834,10 @@ mod first_contact_tests {
     /// A node whose first digests went out over the rendezvous alone can have
     /// every answer dropped on the way: each hop already saw those frames, and
     /// iroh-gossip drops a message id it has seen. So it asks again on its
-    /// first real-peer link, and on no other link. `idle.broadcasts` counts
-    /// digest broadcasts and nothing else a link-up sends; the test sender
-    /// cannot record frames, so the count stands in for the two digests.
+    /// first real-peer link, and on no other link; the chat log asks there too.
+    /// `idle.broadcasts` counts digest broadcasts and nothing else a link-up
+    /// sends; the test sender cannot record frames, so the count stands in for
+    /// the three digests.
     #[tokio::test]
     async fn only_the_first_real_peer_link_asks_for_state_again() {
         let node = Node::spawn().await;
@@ -1860,8 +1864,8 @@ mod first_contact_tests {
         );
         assert_eq!(
             digests_on_link_up(endpoint_id(1)).await,
-            2,
-            "the first real-peer link: one state and one meta digest"
+            3,
+            "the first real-peer link: one state, one meta and one chat digest"
         );
         assert_eq!(
             digests_on_link_up(endpoint_id(2)).await,
