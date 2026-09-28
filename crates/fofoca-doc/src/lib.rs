@@ -375,6 +375,14 @@ impl MeshDoc {
         let Ok(change) = Change::from_bytes(bytes) else {
             return Ingested::Ignored;
         };
+        if change.actor_id().to_hex_string() != frame.pubkey {
+            tracing::warn!(
+                target: LOG_TARGET,
+                author = %frame.author,
+                "dropping a channel change whose actor is not its signer's key"
+            );
+            return Ingested::Ignored;
+        }
         let hash = change.hash();
         if self.applied.contains(&hash) {
             return Ingested::Duplicate;
@@ -795,6 +803,7 @@ fn put_number(
 mod tests {
     use super::wire::change_body;
     use super::{DOC_PENDING_AUTHOR_MAX, DOC_PENDING_TOTAL_MAX, Ingested, MeshDoc, SelfWriteGate};
+    use automerge::Change;
     use fofoca_protocol::{Channel, MeshId, Message, Nickname};
     use serde_json::{Value, json};
     use std::collections::HashSet;
@@ -803,15 +812,19 @@ mod tests {
         Nickname::from(name)
     }
 
-    /// Wrap change bytes in a signed-frame stand-in (the doc layer reads only
-    /// `author` + `body`; a valid signature is `gossip::ingest`'s job).
+    /// Wrap change bytes in a signed-frame stand-in, signed by the change's
+    /// actor. The doc layer reads `author`, `pubkey` and `body`; a valid
+    /// signature is `gossip::ingest`'s job.
     fn frame(who: &Nickname, bytes: &[u8]) -> Message {
-        Message::new_channel_event(
+        let change = Change::from_bytes(bytes.to_vec()).expect("a change");
+        let mut frame = Message::new_channel_event(
             &MeshId::from("test"),
             who,
             change_body(bytes, None).expect("body"),
             Channel::State,
-        )
+        );
+        frame.pubkey = change.actor_id().to_hex_string();
+        frame
     }
 
     /// Author a merge on `doc` (build + ingest, as the daemon does) and return
@@ -1015,9 +1028,19 @@ mod tests {
         // One honest orphan parked first, from its own author.
         let honest_nick = nick("honest");
         let mut honest_source = MeshDoc::new_ungated();
-        let _honest_root = author(&mut honest_source, &honest_nick, &json!({"a": 1}));
-        let mut honest = author(&mut honest_source, &honest_nick, &json!({"b": 2}));
-        honest.pubkey = "11".repeat(32);
+        let honest_key = [0x11_u8; 32];
+        let _honest_root = author_as(
+            &mut honest_source,
+            &honest_nick,
+            &honest_key,
+            &json!({"a": 1}),
+        );
+        let honest = author_as(
+            &mut honest_source,
+            &honest_nick,
+            &honest_key,
+            &json!({"b": 2}),
+        );
         assert!(matches!(sink.ingest(&honest), Ingested::Buffered));
 
         // Sybil authors, each staying under the per-author ceiling, until the
@@ -1026,9 +1049,9 @@ mod tests {
         for who in 0..DOC_PENDING_TOTAL_MAX {
             let sybil = nick("sybil");
             let mut source = MeshDoc::new_ungated();
-            let _sybil_root = author(&mut source, &sybil, &json!({"a": who}));
-            let mut orphan = author(&mut source, &sybil, &json!({"b": who}));
-            orphan.pubkey = format!("{who:064x}");
+            let key = who.to_be_bytes();
+            let _sybil_root = author_as(&mut source, &sybil, &key, &json!({"a": who}));
+            let orphan = author_as(&mut source, &sybil, &key, &json!({"b": who}));
             if matches!(sink.ingest(&orphan), Ingested::Ignored) {
                 refused = true;
                 break;
@@ -1061,9 +1084,9 @@ mod tests {
         for who in 0..=DOC_PENDING_TOTAL_MAX {
             let sybil = nick("sybil");
             let mut source = MeshDoc::new_ungated();
-            let _root = author(&mut source, &sybil, &json!({"a": who}));
-            let mut orphan = author(&mut source, &sybil, &json!({"b": who}));
-            orphan.pubkey = format!("{who:064x}");
+            let key = who.to_be_bytes();
+            let _root = author_as(&mut source, &sybil, &key, &json!({"a": who}));
+            let orphan = author_as(&mut source, &sybil, &key, &json!({"b": who}));
             if matches!(sink.ingest(&orphan), Ingested::Ignored) {
                 refused = Some(orphan);
                 break;
@@ -1085,20 +1108,16 @@ mod tests {
         let mallory = nick("mallory");
 
         let mut alices = MeshDoc::new_ungated();
-        let alice_root = author(&mut alices, &alice, &json!({"a": 1}));
-        let mut alice_orphan = author(&mut alices, &alice, &json!({"b": 2}));
-        alice_orphan.pubkey = "aa".repeat(32);
+        let alice_key = [0xaa_u8; 32];
+        let alice_root = author_as(&mut alices, &alice, &alice_key, &json!({"a": 1}));
+        let alice_orphan = author_as(&mut alices, &alice, &alice_key, &json!({"b": 2}));
 
         let mut sink = MeshDoc::new_ungated();
         assert!(matches!(sink.ingest(&alice_orphan), Ingested::Buffered));
 
         let mut mallorys = MeshDoc::new_ungated();
         let flood: Vec<Message> = (0..DOC_PENDING_AUTHOR_MAX + 32)
-            .map(|step| {
-                let mut frame = author(&mut mallorys, &mallory, &json!({ "m": step }));
-                frame.pubkey = "bb".repeat(32);
-                frame
-            })
+            .map(|step| author_as(&mut mallorys, &mallory, &[0xbb; 32], &json!({ "m": step })))
             .collect();
         for frame in flood.iter().skip(1) {
             sink.ingest(frame);
@@ -1210,6 +1229,52 @@ mod tests {
         assert_eq!(sink.take_dropped(), vec![rival.dedup_key()]);
     }
 
+    /// automerge takes one change per `(actor, seq)`. A frame whose signer does
+    /// not own the change's actor could take an author's next seq, and the
+    /// author's real change would then be refused on every replica.
+    #[test]
+    fn a_change_signed_by_another_key_cannot_take_an_authors_next_seq() {
+        let (alice, mallory) = (nick("alice"), nick("mallory"));
+        let alice_key = [0xaa_u8; 32];
+
+        let mut source = MeshDoc::new_ungated();
+        let root = author_as(&mut source, &alice, &alice_key, &json!({"a": 1}));
+        let mut sink = MeshDoc::new_ungated();
+        assert!(matches!(sink.ingest(&root), Ingested::Applied { .. }));
+
+        let forged = sink
+            .build_change(&json!({"a": "forged"}), &alice_key)
+            .expect("merge applies")
+            .expect("merge is not a no-op");
+        let mut forged = frame(&mallory, &forged);
+        forged.pubkey = "bb".repeat(32);
+        assert!(matches!(sink.ingest(&forged), Ingested::Ignored));
+        assert_eq!(sink.pending_stats().0, 0);
+
+        let real = author_as(&mut source, &alice, &alice_key, &json!({"a": 2}));
+        assert!(matches!(sink.ingest(&real), Ingested::Applied { .. }));
+        assert_eq!(sink.to_json(), json!({"a": 2}));
+    }
+
+    /// A forged change whose parents are missing takes no place in the orphan
+    /// buffer of its signer.
+    #[test]
+    fn a_change_signed_by_another_key_is_not_buffered() {
+        let alice_key = [0xaa_u8; 32];
+        let mut source = MeshDoc::new_ungated();
+        let _root = author_as(&mut source, &nick("alice"), &alice_key, &json!({"a": 1}));
+        let orphan = source
+            .build_change(&json!({"a": "forged"}), &alice_key)
+            .expect("merge applies")
+            .expect("merge is not a no-op");
+        let mut forged = frame(&nick("mallory"), &orphan);
+        forged.pubkey = "bb".repeat(32);
+
+        let mut sink = MeshDoc::new_ungated();
+        assert!(matches!(sink.ingest(&forged), Ingested::Ignored));
+        assert_eq!(sink.pending_stats().0, 0);
+    }
+
     #[test]
     fn out_of_order_change_is_buffered_then_drains() {
         let alice = nick("alice");
@@ -1283,8 +1348,9 @@ mod tests {
         let (wire, _plain) = author_doc
             .compose_wire_body(&bytes, Some(&merge))
             .expect("compose");
-        let carrier =
+        let mut carrier =
             Message::new_channel_event(&MeshId::from("test"), &alice, wire, Channel::State);
+        carrier.pubkey = automerge::ActorId::from(alice.as_str().as_bytes()).to_hex_string();
         assert!(
             !carrier.body.as_str().contains("value"),
             "the plaintext value must not appear on the wire"
