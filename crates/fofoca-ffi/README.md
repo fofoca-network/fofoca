@@ -21,8 +21,11 @@ the other.
   `lookup` (`"mdns,dht,relay"`, any subset) is how members find each other,
   `transport` (`"udp,webrtc,relay"`, any subset with `udp` or `webrtc`) is
   what payload may ride, and `relay_urls` is which relay (NULL for the
-  default ladder). Leave `transport` NULL and every byte of data goes peer
-  to peer, over UDP or a WebRTC data channel.
+  default ladder). `relay` in `transport`, or a list without `udp`, needs
+  `relay` in `lookup`: the relay carries the payload in the first case and
+  the WebRTC handshake in the second. Leave
+  `transport` NULL and every byte of data goes peer to peer, over UDP or a
+  WebRTC data channel.
 
 Test with `cargo test -p fofoca-ffi`. CI builds the staticlib and makes
 sure that every function in the header is exported.
