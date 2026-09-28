@@ -317,6 +317,16 @@ impl MeshDoc {
             .collect()
     }
 
+    /// Whether this document holds every change in `heads`, Base58-encoded as
+    /// [`Self::heads`] gives them: a peer that advertises these heads is not
+    /// ahead of us. A head that does not decode counts as not held.
+    #[must_use]
+    pub fn holds_heads(&self, heads: &[String]) -> bool {
+        heads.iter().all(|encoded| {
+            decode_hash(encoded).is_some_and(|hash| self.doc.get_change_by_hash(&hash).is_some())
+        })
+    }
+
     /// The derived document as JSON — the shape a consumer's `state`/`meta` read returns.
     #[must_use]
     pub fn to_json(&self) -> Value {
@@ -1110,6 +1120,29 @@ mod tests {
         // The first change unblocks the buffered second in one ingest.
         assert!(matches!(sink.ingest(&first), Ingested::Applied { .. }));
         assert_eq!(sink.to_json(), json!({"a": 1, "b": 2}));
+    }
+
+    #[test]
+    fn a_doc_holds_its_own_and_earlier_heads_only() {
+        let alice = nick("alice");
+        let mut source = MeshDoc::new_ungated();
+        author(&mut source, &alice, &json!({"a": 1}));
+        let earlier = source.heads();
+        author(&mut source, &alice, &json!({"b": 2}));
+        let mut joiner = MeshDoc::new_ungated();
+
+        assert!(source.holds_heads(&source.heads()), "its own heads");
+        assert!(source.holds_heads(&earlier), "heads it has moved past");
+        assert!(source.holds_heads(&joiner.heads()), "a fresh doc's genesis");
+        assert!(!joiner.holds_heads(&source.heads()), "heads it never saw");
+        assert!(
+            !source.holds_heads(&["not-a-hash".to_owned()]),
+            "a head that does not decode"
+        );
+        for carrier in &source.changes_since(&joiner.heads(), 100) {
+            joiner.ingest(carrier);
+        }
+        assert!(joiner.holds_heads(&source.heads()), "after the backfill");
     }
 
     #[test]

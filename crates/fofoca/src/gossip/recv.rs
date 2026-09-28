@@ -120,8 +120,14 @@ pub(crate) async fn handle_gossip_event(
                     // so none of it reaches us. Ask again over a link that can
                     // carry the answer.
                     tracing::debug!(target: "fofoca::gossip", "asked for state again on the first real-peer link");
-                    antientropy::broadcast_state_digests(state, ctx.sender, ctx.mesh, ctx.author)
-                        .await;
+                    antientropy::broadcast_state_digests(
+                        state,
+                        ctx.sender,
+                        ctx.mesh,
+                        ctx.author,
+                        antientropy::DigestTrigger::Event,
+                    )
+                    .await;
                     // Re-publish anything whose value depends on being meshed
                     // (the app's card dial hint); see `NodeApp::on_meshed`.
                     app.on_meshed(state, ctx).await;
@@ -383,25 +389,8 @@ pub(crate) async fn ingest(
     crate::logging::messages::log_in(&message);
     let observed = lifecycle::observe(&message, state, ctx);
     let surfaceable = observed.surfaceable;
-    // Our heads go out on the first frame from any new peer, not only on its
-    // `joined`: a digest is how a newcomer gets backfilled, and which frame a
-    // peer sends first depends on its version and its links.
     if observed.update.joined_new {
-        antientropy::broadcast_state_digests(state, ctx.sender, ctx.mesh, ctx.author).await;
-        // Our address too, for the same reason: a newcomer behind the
-        // rendezvous learns it only from this flood, and if it has the lower
-        // endpoint id we wait for it to dial. A first frame that is its
-        // `joined` floods in `handle_presence` instead.
-        if !matches!(
-            message.kind,
-            MessageKind::Presence {
-                subtype: PresenceSubtype::Joined
-            }
-        ) {
-            tracing::debug!(target: "fofoca::gossip", author = %message.author, "flooded our address on a new peer's first frame");
-            broadcast_peer_info(state, ctx).await;
-            state.last_sent_at = Instant::now();
-        }
+        greet_new_peer(&message, state, ctx).await;
     }
 
     // A shard of a split body never surfaces as a raw slice — see
@@ -1195,6 +1184,33 @@ fn maybe_push_inbound(
     };
     if app_pushable {
         let _ = tx.send(message.clone());
+    }
+}
+
+/// Our heads and our address go out on the first frame from any new peer, not
+/// only on its `joined`: a digest is how a newcomer gets backfilled, a
+/// newcomer behind the rendezvous learns our address only from this flood,
+/// and which frame a peer sends first depends on its version and its links.
+/// If the newcomer has the lower endpoint id we wait for it to dial. A first
+/// frame that is its `joined` floods our address in `handle_presence` instead.
+async fn greet_new_peer(message: &Message, state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
+    antientropy::broadcast_state_digests(
+        state,
+        ctx.sender,
+        ctx.mesh,
+        ctx.author,
+        antientropy::DigestTrigger::Event,
+    )
+    .await;
+    if !matches!(
+        message.kind,
+        MessageKind::Presence {
+            subtype: PresenceSubtype::Joined
+        }
+    ) {
+        tracing::debug!(target: "fofoca::gossip", author = %message.author, "flooded our address on a new peer's first frame");
+        broadcast_peer_info(state, ctx).await;
+        state.last_sent_at = Instant::now();
     }
 }
 

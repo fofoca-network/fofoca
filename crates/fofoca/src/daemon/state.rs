@@ -180,11 +180,9 @@ pub struct EventLoopState {
     /// heads, and every holder hears each one; the plane is in the key so the
     /// asker's re-ask at its first real-peer link, answered point-to-point,
     /// is not refused by the gossip answer before it.
-    pub(crate) state_digest_serves: Cooldown<(
-        String,
-        crate::protocol::Channel,
-        crate::gossip::antientropy::Plane,
-    )>,
+    pub(crate) state_digest_serves: crate::gossip::antientropy::ServeBudget,
+    /// This node's own fast rounds of state digests while it backfills.
+    pub(crate) fast_rounds: crate::gossip::antientropy::FastRounds,
     /// Membership layer: the peer roster. Nickname-keyed set of
     /// other peers, feeding the state file's `peer_count`
     /// (`peers.len() + 1`). Excludes self. Driven by
@@ -622,9 +620,8 @@ impl EventLoopState {
             digest_serves: Cooldown::new(Duration::from_secs(
                 fofoca_util::tuning::ANTIENTROPY_SERVE_COOLDOWN_SECS,
             )),
-            state_digest_serves: Cooldown::new(Duration::from_secs(
-                fofoca_util::tuning::ANTIENTROPY_SERVE_COOLDOWN_SECS,
-            )),
+            state_digest_serves: crate::gossip::antientropy::ServeBudget::default(),
+            fast_rounds: crate::gossip::antientropy::FastRounds::default(),
             peers: HashSet::new(),
             last_seen: HashMap::new(),
             peer_endpoints: HashMap::new(),

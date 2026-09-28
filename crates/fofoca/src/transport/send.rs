@@ -1063,4 +1063,125 @@ mod tests {
             ]
         );
     }
+
+    /// Bob's side of a loopback link: the next `count` frames he reads.
+    fn read_frames(
+        bob_endpoint: iroh::Endpoint,
+        count: usize,
+    ) -> tokio::task::JoinHandle<(Vec<Vec<u8>>, iroh::Endpoint)> {
+        tokio::spawn(async move {
+            let conn = bob_endpoint
+                .accept()
+                .await
+                .expect("an incoming connection")
+                .await
+                .expect("accept the connection");
+            let mut got = Vec::new();
+            for _ in 0..count {
+                let mut stream = conn.accept_uni().await.expect("a uni stream");
+                got.push(stream.read_to_end(64 * 1024).await.expect("read the frame"));
+            }
+            (got, bob_endpoint)
+        })
+    }
+
+    /// A point-to-point answer ends with the holder's own heads, so the asker
+    /// can tell whether it is still behind and ask again.
+    #[tokio::test]
+    async fn a_point_to_point_answer_ends_with_the_holders_heads() {
+        use crate::protocol::{Channel, MessageKind};
+
+        let (bob_endpoint, _bob_sender) = loopback_node().await;
+        let (net, mut state, frames) = holder(bob_endpoint.addr(), 3).await;
+        state.linked_endpoints.insert(bob_endpoint.id());
+        let received = read_frames(bob_endpoint, 4);
+        let asker = crate::protocol::identity::Identity::generate();
+        let digest = digest(&net.mesh, Channel::State, &serde_json::json!([]), &asker);
+
+        crate::gossip::antientropy::handle_state_digest(
+            Channel::State,
+            &digest,
+            &mut state,
+            &net.ctx(),
+        )
+        .await;
+
+        let (got, _bob) = tokio::time::timeout(std::time::Duration::from_secs(5), received)
+            .await
+            .expect("bob reads the answer in time")
+            .expect("reader task");
+        let expected: Vec<Vec<u8>> = frames.iter().map(|bytes| bytes.to_vec()).collect();
+        assert_eq!(got[..3], expected[..], "the three frames first, in order");
+        let last = Message::parse(&got[3]).expect("the last frame parses");
+        assert_eq!(last.kind, MessageKind::StateDigest, "then a state digest");
+        assert_eq!(
+            last.body.as_str(),
+            serde_json::json!({ "heads": state.doc(Channel::State).heads() }).to_string(),
+            "carrying the holder's heads"
+        );
+    }
+
+    /// A linked neighbor's digest with heads we do not hold makes us ask that
+    /// neighbor directly; heads we hold, or a sender that is not linked, do
+    /// not.
+    #[tokio::test]
+    async fn a_digest_from_a_neighbor_that_is_ahead_is_asked_back_directly() {
+        use crate::protocol::{Channel, MessageKind};
+
+        let (other_endpoint, _other_sender) = loopback_node().await;
+        let (_other_net, ahead, _frames) = holder(other_endpoint.addr(), 3).await;
+        let ahead_heads = serde_json::json!(ahead.doc(Channel::State).heads());
+        let (bob_endpoint, _bob_sender) = loopback_node().await;
+        let (net, mut state, _none) = holder(bob_endpoint.addr(), 0).await;
+        let bob = crate::protocol::identity::Identity::generate();
+        let now = crate::util::clock::Instant::now();
+
+        let own = serde_json::json!(state.doc(Channel::State).heads());
+        let up_to_date = digest(&net.mesh, Channel::State, &own, &bob);
+        crate::gossip::antientropy::handle_state_digest(
+            Channel::State,
+            &up_to_date,
+            &mut state,
+            &net.ctx(),
+        )
+        .await;
+        assert!(
+            !state.fast_rounds.active(Channel::State, now),
+            "heads we hold"
+        );
+
+        let from_ahead = digest(&net.mesh, Channel::State, &ahead_heads, &bob);
+        crate::gossip::antientropy::handle_state_digest(
+            Channel::State,
+            &from_ahead,
+            &mut state,
+            &net.ctx(),
+        )
+        .await;
+        assert!(
+            !state.fast_rounds.active(Channel::State, now),
+            "bob is not linked"
+        );
+
+        state.linked_endpoints.insert(bob_endpoint.id());
+        let received = read_frames(bob_endpoint, 1);
+        crate::gossip::antientropy::handle_state_digest(
+            Channel::State,
+            &from_ahead,
+            &mut state,
+            &net.ctx(),
+        )
+        .await;
+        assert!(state.fast_rounds.active(Channel::State, now), "asked bob");
+        let (got, _bob) = tokio::time::timeout(std::time::Duration::from_secs(5), received)
+            .await
+            .expect("bob reads the ask in time")
+            .expect("reader task");
+        let ask = Message::parse(&got[0]).expect("the ask parses");
+        assert_eq!(ask.kind, MessageKind::StateDigest);
+        assert_eq!(
+            ask.body.as_str(),
+            serde_json::json!({ "heads": own }).to_string()
+        );
+    }
 }
