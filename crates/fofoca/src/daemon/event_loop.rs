@@ -651,7 +651,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
                 state.idle.external += 1;
                 let ctx = parts.ctx(&sender);
                 crate::transport::probe::on_outcome(outcome, &mut state, &ctx).await;
-                crate::transport::probe::ensure_watchers(&mut state, ctx.endpoint.id());
+                crate::transport::probe::ensure_watchers(&mut state, ctx.endpoint.id(), ctx.rendezvous_id);
             }
             Some(change) = path_rx.recv() => {
                 state.idle.external += 1;
@@ -686,7 +686,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
                 // holds grafts on: a peer whose punch missed the deadline, or
                 // whose session attached since, gets another look.
                 crate::transport::probe::retry_direct(&mut state, &ctx, false).await;
-                crate::transport::probe::ensure_watchers(&mut state, ctx.endpoint.id());
+                crate::transport::probe::ensure_watchers(&mut state, ctx.endpoint.id(), ctx.rendezvous_id);
                 crate::transport::probe::nudge_webrtc_riders(&state, &ctx);
             }
             _ = intervals.sweep.tick() => {

@@ -99,14 +99,20 @@ fn selected_kind(conn: &Connection) -> PathKind {
 /// as a close. Selection is per remote in iroh, so the pooled connection
 /// answers for the gossip link too; a peer with none gets one dialed, since a
 /// pair linked through gossip may never have sent unicast.
-pub(crate) fn ensure_watchers(state: &mut EventLoopState, local: EndpointId) {
+pub(crate) fn ensure_watchers(
+    state: &mut EventLoopState,
+    local: EndpointId,
+    rendezvous: EndpointId,
+) {
     if state.webrtc.is_none() || !state.local_udp_transport {
         return;
     }
     let peers: Vec<EndpointId> = state
         .peer_endpoints
         .values()
-        .filter(|addr| !needs_webrtc_lane(addr) && local < addr.id)
+        // The rendezvous serves no unicast, so it has no pooled connection
+        // to watch; `retry_candidates` skips it for the same reason.
+        .filter(|addr| addr.id != rendezvous && !needs_webrtc_lane(addr) && local < addr.id)
         .map(|addr| addr.id)
         .collect();
     for peer in peers {
@@ -499,6 +505,34 @@ mod tests {
         state.direct.insert(bob, DirectState::RelayOnly);
         assert!(!super::mark_proven(&mut state, bob), "nothing parked yet");
         assert_eq!(state.direct.get(&bob), Some(&DirectState::Direct));
+    }
+
+    // The rendezvous serves no unicast: a watcher's dial to it always failed,
+    // and each alive tick tried again.
+    #[tokio::test]
+    async fn the_rendezvous_is_not_watched() {
+        use fofoca_iroh_webrtc_transport::{WebRtcHandle, WebRtcTransport};
+        use iroh::TransportAddr;
+        let mut state = fresh_state();
+        // The watcher only follows higher ids: sort, so `local` is the lowest.
+        let mut ids = [endpoint_id(1), endpoint_id(2), endpoint_id(3)];
+        ids.sort_unstable();
+        let [local, rendezvous, bob] = ids;
+        state.webrtc = Some(WebRtcHandle::new(WebRtcTransport::new(local)));
+        state.local_udp_transport = true;
+        let with_udp = |id| {
+            EndpointAddr::from_parts(
+                id,
+                [TransportAddr::Ip("127.0.0.1:1".parse().expect("addr"))],
+            )
+        };
+        state
+            .peer_endpoints
+            .insert(nick("beacon"), with_udp(rendezvous));
+        state.peer_endpoints.insert(nick("bob"), with_udp(bob));
+        super::ensure_watchers(&mut state, local, rendezvous);
+        assert!(state.path_watchers.contains_key(&bob), "a peer is watched");
+        assert!(!state.path_watchers.contains_key(&rendezvous));
     }
 
     #[test]
