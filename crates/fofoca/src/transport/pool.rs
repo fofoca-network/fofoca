@@ -156,6 +156,28 @@ impl UnicastPool {
         WarmSend::Sent
     }
 
+    /// Whether UDP to `eid` is selected within [`PATH_SELECT_TIMEOUT`], on the
+    /// pooled connection, dialed if there is none. A gossip link can form with
+    /// no pooled connection at all, so the synchronous read below cannot
+    /// answer for a pair that linked through the rendezvous.
+    pub(crate) async fn udp_won(&self, eid: EndpointId) -> bool {
+        match self.warm_or_dial(eid).await {
+            Ok(conn) => super::path::wait_ip(&conn, PATH_SELECT_TIMEOUT).await,
+            Err(_) => false,
+        }
+    }
+
+    /// Whether the pooled connection to `eid` is on a selected UDP path.
+    /// Synchronous for the event loop's offer decisions: a contended lock, or
+    /// no pooled connection, reads as `false`, so the node offers.
+    pub(crate) fn selected_is_ip(&self, eid: EndpointId) -> bool {
+        self.inner.conns.try_lock().is_ok_and(|conns| {
+            conns.get(&eid).is_some_and(|conn| {
+                conn.close_reason().is_none() && super::path::selected_is_ip(conn)
+            })
+        })
+    }
+
     /// The pooled connection to `eid`, if one is open.
     async fn warm(&self, eid: EndpointId) -> Option<Connection> {
         let conns = self.inner.conns.lock().await;
@@ -380,6 +402,58 @@ mod tests {
             1,
             "the stale entry is dropped, not retained"
         );
+    }
+
+    /// The offer decision reads the pooled connection synchronously: a UDP
+    /// connection reads `true`, while a busy lock or an unknown peer reads
+    /// `false`, so the node offers rather than wrongly skipping the race.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_pooled_udp_connection_reads_as_udp_selected() {
+        use iroh::endpoint::Connection;
+        use iroh::protocol::{AcceptError, ProtocolHandler, Router};
+
+        #[derive(Debug, Clone)]
+        struct Hold;
+        impl ProtocolHandler for Hold {
+            async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
+                conn.closed().await;
+                Ok(())
+            }
+        }
+        let bind = || async {
+            iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+                .relay_mode(iroh::RelayMode::Disabled)
+                .bind()
+                .await
+                .expect("bind a loopback endpoint")
+        };
+        let server = bind().await;
+        let router = Router::builder(server.clone())
+            .accept(super::super::UNICAST_ALPN, Hold)
+            .spawn();
+        let client = bind().await;
+        crate::lookup::add_peer_addr(&client, server.addr()).expect("register the server");
+        let pool = super::UnicastPool::new(client.clone(), false);
+
+        assert!(!pool.selected_is_ip(server.id()), "nothing pooled yet");
+        pool.warm_or_dial(server.id()).await.expect("dial");
+        let started = Instant::now();
+        while !pool.selected_is_ip(server.id()) {
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "udp never selected"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let held = pool.inner.conns.lock().await;
+        assert!(
+            !pool.selected_is_ip(server.id()),
+            "a busy lock reads as not selected"
+        );
+        drop(held);
+
+        router.shutdown().await.expect("shutdown");
+        client.close().await;
     }
 
     /// A background dial that ends early — dropped with its runtime here, the

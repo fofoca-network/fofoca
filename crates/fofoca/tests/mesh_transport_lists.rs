@@ -306,3 +306,40 @@ async fn a_udp_only_mesh_never_opens_a_webrtc_session() {
         "a udp mesh opened a data channel"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_udp_and_webrtc_mesh_races_and_keeps_no_session_once_udp_wins() {
+    let _serial = serial().lock().await;
+    init_logging();
+    let (relay, _server) = fofoca::net::test_relay::spawn_plain()
+        .await
+        .expect("local relay");
+
+    let (mut alice, mut bob) = linked_pair(&relay, vec![Transport::Udp, Transport::WebRtc]).await;
+    every_lane_carries(&mut alice, &mut bob).await;
+    // The race is judged by the lower id alone, which offers. Wait for its
+    // round to end one way or the other.
+    let raced = eventually(Duration::from_secs(30), || {
+        let logs = logs();
+        logs.contains("udp already selected")
+            || logs.matches("webrtc session attached (offerer)").count()
+                == logs
+                    .matches("udp won the race; webrtc session detached")
+                    .count()
+                && logs.contains("webrtc session attached (offerer)")
+    })
+    .await;
+
+    let logs = logs();
+    let _ = alice.membership.node.leave().await;
+    let _ = bob.membership.node.leave().await;
+    assert!(
+        raced,
+        "no race ran, or a session outlived udp:\n{}",
+        link_trace()
+    );
+    assert!(
+        !logs.contains("both ends advertise IP"),
+        "the pair skipped the race"
+    );
+}

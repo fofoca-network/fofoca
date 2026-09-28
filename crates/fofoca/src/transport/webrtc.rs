@@ -605,6 +605,15 @@ pub fn pair_needs_lane(remote: &EndpointAddr, local_has_udp_transport: bool) -> 
     needs_webrtc_lane(remote) || local_needs_webrtc_lane(local_has_udp_transport)
 }
 
+/// Whether a pair runs a `WebRTC` round: a pair that needs the lane always
+/// does; a pair with UDP on both ends races the UDP punch, until UDP wins.
+/// A UDP pair already `proven` direct with no session has proved its UDP
+/// path, so a cold or idled-out pool (which reads as "UDP not selected")
+/// does not start the race again on every alive tick.
+pub(crate) fn wants_session(pair_needs_lane: bool, udp_selected: bool, proven: bool) -> bool {
+    pair_needs_lane || !(udp_selected || proven)
+}
+
 /// Whether *this* node's rendezvous graft must wait for a data-channel
 /// session: a lane-needing node on a lookup-only mesh. With the relay allowed
 /// as a transport nothing needs holding.
@@ -622,25 +631,26 @@ pub(crate) fn negotiate_session(
         // No transport registered: the beacon, or a multihop peer.
         return;
     };
-    // The browser lane, and only the browser lane.
+    // A pair where both ends run UDP races the punch: the data channel gives
+    // 6× less throughput at 36× the latency (docs/architecture.md §11), so it is worth a
+    // JSEP round only while UDP has not won. Once it has, nothing is offered,
+    // and a round that finishes after it is detached (`spawn_offer_round`).
     //
-    // Two peers that both advertise IP are reachable over plain iroh QUIC,
-    // which is strictly better: measured on identical request shape, the data
-    // channel gives 6× less throughput at 36× the latency, with an order of
-    // magnitude more variance (`docs/perf/`). Standing one up between two
-    // native peers spends a JSEP round trip and a DTLS stack to get a worse
-    // path, on the same endpoint and congestion domain as the file bytes.
-    //
-    // **Either** end lacking IP is enough, and testing only the remote is a
-    // bug: the lower id dials, so when a browser is the lower id it is the
-    // browser that evaluates this. It would see the native peer's IP, skip,
-    // and the native — waiting to be dialled — would never offer. The pair
-    // would silently never get a channel.
-    if !pair_needs_lane(&addr, state.local_udp_transport) {
+    // **Either** end lacking IP makes the lane the pair's only direct path,
+    // and testing only the remote is a bug: the lower id dials, so when a
+    // browser is the lower id it is the browser that evaluates this. It would
+    // see the native peer's IP, skip, and the native — waiting to be dialled —
+    // would never offer. The pair would silently never get a channel.
+    let needs_lane = pair_needs_lane(&addr, state.local_udp_transport);
+    if !wants_session(
+        needs_lane,
+        state.unicast_pool.selected_is_ip(peer),
+        state.direct.get(&peer) == Some(&crate::daemon::state::DirectState::Direct),
+    ) {
         tracing::debug!(
             target: LOG_TARGET,
             %peer,
-            "both ends advertise IP; leaving this pair on iroh's own transports"
+            "udp already selected; leaving this pair on iroh's own transports"
         );
         return;
     }
@@ -663,7 +673,27 @@ pub(crate) fn negotiate_session(
         }
     };
 
-    spawn_offer_round(state, ctx, peer, addr, handle, guard, None);
+    let offer = if needs_lane {
+        Offer::Lane
+    } else {
+        Offer::UdpRace
+    };
+    spawn_offer_round(state, ctx, peer, addr, handle, guard, offer);
+}
+
+/// What an offer is for, which decides what happens once its session attaches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Offer {
+    /// The rendezvous: graft at once, and say so.
+    Rendezvous,
+    /// A pair that needs the lane: graft at once.
+    Lane,
+    /// A pair with UDP on both ends: detach instead if UDP won. Only this kind
+    /// waits on that check, which dials the unicast lane: a lane pair's graft
+    /// has to fire inside the freshly proven window, and the rendezvous accepts
+    /// no unicast at all. The check holds the admission slot for up to 8 s
+    /// after the round (a 3 s dial, then 5 s for UDP to be selected).
+    UdpRace,
 }
 
 /// The shared tail of every offer: hold the admission slot in a spawned
@@ -682,12 +712,13 @@ fn spawn_offer_round(
     addr: EndpointAddr,
     handle: WebRtcHandle,
     guard: super::admission::AdmissionGuard,
-    attach_info: Option<&'static str>,
+    offer: Offer,
 ) {
     let endpoint = ctx.endpoint.clone();
     let admission = state.webrtc_admission.clone();
     let ice = state.webrtc_ice;
     let proven = state.direct_proven.clone();
+    let pool = state.unicast_pool.clone();
     let task = n0_future::task::spawn(async move {
         let _guard = guard;
         if let Err(error) = Box::pin(dial_signal(&endpoint, addr, &handle, ice)).await {
@@ -695,9 +726,14 @@ fn spawn_offer_round(
                 admission.note_refused(peer);
             }
             tracing::debug!(target: LOG_TARGET, %peer, %error, "webrtc offer failed");
+        } else if offer == Offer::UdpRace && pool.udp_won(peer).await {
+            // UDP won while the round ran: the session would sit unused and hold
+            // one of the direct-peer slots.
+            let _ = handle.detach(&peer);
+            tracing::debug!(target: LOG_TARGET, %peer, "udp won the race; webrtc session detached");
         } else {
-            if let Some(message) = attach_info {
-                tracing::info!(target: LOG_TARGET, %peer, "{message}");
+            if offer == Offer::Rendezvous {
+                tracing::info!(target: LOG_TARGET, %peer, "webrtc session attached to the rendezvous");
             }
             let _ = proven.send(crate::transport::probe::DirectOutcome { peer, direct: true });
         }
@@ -804,7 +840,7 @@ pub(crate) fn negotiate_rendezvous_session(
         EndpointAddr::new(rendezvous),
         handle,
         guard,
-        Some("webrtc session attached to the rendezvous"),
+        Offer::Rendezvous,
     );
 }
 
@@ -1081,7 +1117,13 @@ pub(crate) fn retry_sessions(
         .peer_endpoints
         .values()
         .filter(|addr| addr.id != ctx.rendezvous_id)
-        .filter(|addr| own_needs_lane || needs_webrtc_lane(addr))
+        .filter(|addr| {
+            wants_session(
+                own_needs_lane || needs_webrtc_lane(addr),
+                state.unicast_pool.selected_is_ip(addr.id),
+                state.direct.get(&addr.id) == Some(&crate::daemon::state::DirectState::Direct),
+            )
+        })
         .filter(|addr| {
             !state
                 .webrtc
@@ -1144,6 +1186,33 @@ mod tests {
     /// mesh negotiated a data channel with *every* peer, so two native peers ran
     /// gossip over a transport measured at 6× less throughput and 36× the
     /// latency of the QUIC path they already had.
+    #[test]
+    fn a_udp_pair_races_until_udp_is_selected() {
+        assert!(
+            wants_session(false, false, false),
+            "a udp pair races the punch"
+        );
+        assert!(!wants_session(false, true, false), "udp won; no round");
+        assert!(
+            wants_session(true, false, false),
+            "a lane pair always negotiates"
+        );
+        assert!(
+            wants_session(true, true, true),
+            "a lane pair's session is its only direct path"
+        );
+    }
+
+    // A pair proven direct with no session proved its UDP path; a cold or
+    // idled-out pool must not start the race again on every alive tick.
+    #[test]
+    fn a_proven_udp_pair_is_not_raced_again() {
+        assert!(
+            !wants_session(false, false, true),
+            "proven direct, no pooled connection"
+        );
+    }
+
     #[test]
     fn only_a_peer_without_ip_needs_the_webrtc_lane() {
         let id = SecretKey::from_bytes(&[5u8; 32]).public();
