@@ -373,10 +373,7 @@ fn member_transports(
 ) -> Result<crate::lookup::TransportOpts> {
     let transports = transports.within(&policy);
     #[cfg(target_arch = "wasm32")]
-    anyhow::ensure!(
-        transports.webrtc || policy.relay_transport,
-        BROWSER_HAS_NO_PATH
-    );
+    anyhow::ensure!(transports.carry_without_udp(&policy), BROWSER_HAS_NO_PATH);
     Ok(transports)
 }
 

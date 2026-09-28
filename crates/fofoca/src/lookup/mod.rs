@@ -219,6 +219,13 @@ impl TransportOpts {
             ..self
         }
     }
+
+    /// Whether these paths carry payload on a node with no UDP, such as a
+    /// browser: only a data channel or relay payload can.
+    #[must_use]
+    pub fn carry_without_udp(self, policy: &TransportPolicy) -> bool {
+        self.webrtc || policy.relay_transport
+    }
 }
 
 /// # Errors

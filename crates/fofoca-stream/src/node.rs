@@ -94,13 +94,8 @@ impl StreamNode {
         transport: TransportPolicy,
         transports: TransportOpts,
     ) -> Result<Self> {
-        // A browser has no UDP socket, so a loopback node there is one no peer
-        // can ever reach, and it would fail silently.
         #[cfg(target_arch = "wasm32")]
-        anyhow::ensure!(
-            !lookups.is_loopback(),
-            "a browser cannot reach a loopback stream: name a lookup (`relay`)"
-        );
+        refuse_in_browser(&lookups, transport, transports)?;
         let (endpoint, webrtc) = build_peer_webrtc(&lookups, transports).await?;
         let registry = Arc::new(Registry::default());
         let ice = IceProfile {
@@ -222,6 +217,29 @@ impl StreamNode {
     }
 }
 
+/// A browser has no UDP socket, so a loopback node there is one no peer can
+/// ever reach, and a list with neither `webrtc` nor `relay` leaves it no path
+/// to carry bytes. Either would fail silently.
+#[cfg_attr(
+    not(any(target_arch = "wasm32", test)),
+    expect(dead_code, reason = "only a browser runs this check")
+)]
+fn refuse_in_browser(
+    lookups: &LookupOpts,
+    transport: TransportPolicy,
+    transports: TransportOpts,
+) -> Result<()> {
+    anyhow::ensure!(
+        !lookups.is_loopback(),
+        "a browser cannot reach a loopback stream: name a lookup (`relay`)"
+    );
+    anyhow::ensure!(
+        transports.carry_without_udp(&transport),
+        fofoca::runtime::BROWSER_HAS_NO_PATH
+    );
+    Ok(())
+}
+
 /// The ladder `urls` name, or `None` for the default. Parsed as one list, so an
 /// empty or bad entry is an error rather than a shrunk ladder.
 fn relay_ladder(urls: &[String]) -> Result<Option<RelayLadder>> {
@@ -237,6 +255,23 @@ fn relay_ladder(urls: &[String]) -> Result<Option<RelayLadder>> {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
+
+    // A browser has no UDP, so a list without `webrtc` leaves relay payload as
+    // its only path: without `relay` in the list, nothing carries its bytes.
+    #[test]
+    fn a_browser_refuses_a_list_with_no_path_it_can_run() {
+        let refused = |transport: &[Transport]| {
+            let config = MeshConfig::resolve(&[Lookup::Relay], None, transport).expect("valid");
+            let transports = TransportOpts::default().within(&config.transport);
+            refuse_in_browser(&config.lookups, config.transport, transports).is_err()
+        };
+        assert!(refused(&[Transport::Udp]), "udp only");
+        assert!(
+            !refused(&[Transport::Udp, Transport::Relay]),
+            "relay payload"
+        );
+        assert!(!refused(&[Transport::WebRtc]), "a data channel");
+    }
 
     // A reader runs only the paths the producer runs: an offer to a producer
     // with no data channel would fail only after its whole JSEP round.
