@@ -591,9 +591,9 @@ pub(crate) fn needs_webrtc_lane(addr: &EndpointAddr) -> bool {
 /// lane? Answered from the node's own transport set, never from its address
 /// snapshot — that snapshot is empty while the relay link is down, and empty
 /// reads as "unknown" for a remote but must not for ourselves. A wasm node
-/// never has IP transports whatever the flags say.
+/// reads `false`: `TransportOpts::within` clears UDP there.
 pub(crate) fn local_needs_webrtc_lane(has_udp_transport: bool) -> bool {
-    cfg!(target_arch = "wasm32") || !has_udp_transport
+    !has_udp_transport
 }
 
 /// Whether a pair needs the lane: **either** end lacking IP is enough. The

@@ -210,11 +210,12 @@ impl TransportOpts {
 
 impl TransportOpts {
     /// These paths, less any the mesh's transport list leaves out. Never
-    /// widens: a path this node lacks stays off whatever the mesh allows.
+    /// widens: a path this node lacks stays off whatever the mesh allows, and
+    /// a browser has no UDP at all.
     #[must_use]
     pub fn within(self, policy: &TransportPolicy) -> Self {
         Self {
-            udp: self.udp && policy.udp,
+            udp: self.udp && policy.udp && !cfg!(target_arch = "wasm32"),
             webrtc: self.webrtc && policy.webrtc,
             ..self
         }

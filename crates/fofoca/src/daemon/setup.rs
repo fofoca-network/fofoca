@@ -636,7 +636,7 @@ pub async fn setup_mesh(kind: SetupKind, params: SetupParams) -> Result<EventLoo
         multihop: multihop_handle,
         webrtc,
         webrtc_enabled: transports.webrtc,
-        local_udp_transport: !cfg!(target_arch = "wasm32") && transports.udp,
+        local_udp_transport: transports.udp,
         webrtc_admission,
         webrtc_ice,
         unicast_rx,
