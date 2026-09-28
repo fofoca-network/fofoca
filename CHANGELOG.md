@@ -10,6 +10,11 @@ published to a registry; pin it with
 
 ### Added
 
+- Native pairs race WebRTC against UDP on a `udp,webrtc` mesh. A session
+  that attaches after UDP won is detached, and the far side drops its half
+  at once. A path watcher races the pair again when UDP is lost, and detaches
+  the session when UDP returns; while a pair rides WebRTC it nudges iroh each
+  alive tick to try the UDP punch again.
 - `fofoca-stream`: 1-1 byte streams addressed by a hash. A producer creates a
   stream and hands its hash to one consumer. The bytes ride a direct QUIC path
   or a WebRTC data channel by default, the relay only when the stream's

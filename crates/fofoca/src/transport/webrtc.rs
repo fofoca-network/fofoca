@@ -14,13 +14,12 @@
 //! already homes every member on a relay rung. No file or gossip payload ever
 //! crosses it; it exists to introduce two peers to each other.
 //!
-//! **Why a session must exist before the peer is grafted.** iroh only fans a
-//! connect's Initial out to candidate paths *while the remote has no selected
-//! path*, so a live connection cannot be upgraded onto a newly attached
-//! transport in place. A gossip graft that beats the JSEP round therefore pins
-//! that pair to the relay for as long as the link lives. `lifecycle`'s dial
-//! deferral is where the ordering is enforced; this module only provides the
-//! two halves of the exchange.
+//! **Why a session should exist before the peer is grafted.** A live
+//! connection gains a newly attached transport's path only when another
+//! connection to the peer completes: that is when iroh opens new paths and
+//! re-runs selection (the pinned fork's Initial fan-out patch). Grafting on the
+//! attach event gives the pair that connection. A connection that stays up
+//! across a later attach, as in a re-race, is moved by a [`nudge`].
 //!
 //! Both roles are written once and split by target only where the JSEP APIs
 //! genuinely differ (str0m natively, `RTCPeerConnection` in a tab). The wire
@@ -681,6 +680,39 @@ pub(crate) fn negotiate_session(
     spawn_offer_round(state, ctx, peer, addr, handle, guard, offer);
 }
 
+/// The ALPN a nudge connects on. Its acceptor ([`NudgeAcceptor`]) closes
+/// every connection at once: the connect exists only for what iroh does when
+/// it completes, which is to try the UDP punch again and re-run path selection
+/// over every connection to the peer, moving them onto a newly attached
+/// session's path or back to UDP. A connect that fails does neither. Not the
+/// signal ALPN (its acceptor detaches a session on a fresh connection) nor
+/// unicast (its acceptor holds a connection).
+pub(crate) const NUDGE_ALPN: &[u8] = b"habilis-mesh/nudge/0";
+
+/// Closes every nudge at once. See [`NUDGE_ALPN`].
+#[derive(Debug, Clone)]
+pub(crate) struct NudgeAcceptor;
+
+impl ProtocolHandler for NudgeAcceptor {
+    async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
+        conn.close(0u32.into(), b"nudge");
+        Ok(())
+    }
+}
+
+/// Make iroh re-run path selection to `peer` now. Bounded, and every outcome
+/// is ignored.
+pub(crate) async fn nudge(endpoint: &Endpoint, peer: EndpointId) {
+    if let Ok(Ok(conn)) = n0_future::time::timeout(
+        super::pool::DIAL_TIMEOUT,
+        endpoint.connect(EndpointAddr::new(peer), NUDGE_ALPN),
+    )
+    .await
+    {
+        conn.close(0u32.into(), b"nudge");
+    }
+}
+
 /// What an offer is for, which decides what happens once its session attaches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Offer {
@@ -726,7 +758,12 @@ fn spawn_offer_round(
                 admission.note_refused(peer);
             }
             tracing::debug!(target: LOG_TARGET, %peer, %error, "webrtc offer failed");
-        } else if offer == Offer::UdpRace && pool.udp_won(peer).await {
+        } else if offer == Offer::UdpRace && {
+            // A connection opened before the attach rides the session only
+            // after a connect; the race is judged on the connection after.
+            nudge(&endpoint, peer).await;
+            pool.udp_won(peer).await
+        } {
             // UDP won while the round ran: the session would sit unused and hold
             // one of the direct-peer slots.
             let _ = handle.detach(&peer);

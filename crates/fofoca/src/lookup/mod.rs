@@ -680,7 +680,12 @@ pub(crate) fn build_mesh(
     // A peer also accepts inbound unicast; the rendezvous/beacon endpoint
     // passes `None` (it is not a peer and carries no unicast traffic).
     if let Some(acceptor) = unicast {
-        builder = builder.accept(crate::transport::UNICAST_ALPN, acceptor);
+        builder = builder
+            .accept(crate::transport::UNICAST_ALPN, acceptor)
+            .accept(
+                crate::transport::webrtc::NUDGE_ALPN,
+                crate::transport::webrtc::NudgeAcceptor,
+            );
     }
     // …and answers JSEP offers, so a peer that cannot reach us over IP can
     // still open a direct data channel. Answering is unconditional: the role

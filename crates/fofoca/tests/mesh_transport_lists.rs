@@ -83,6 +83,12 @@ fn link_trace() -> String {
                 "connection established",
                 "connection closed",
                 "Neighbor(",
+                "watching the selected path",
+                "watcher started",
+                "selected path changed",
+                "racing again",
+                "udp",
+                "not negotiating",
             ]
             .iter()
             .any(|needle| line.contains(needle))
@@ -191,6 +197,13 @@ impl Member {
             .await
             .expect("the loop answers")
             .expect("merged");
+    }
+
+    async fn block_udp(&self, blocked: bool) {
+        self.membership
+            .request(|reply| Request::BlockUdp { blocked, reply })
+            .await
+            .expect("the loop answers");
     }
 
     async fn state_json(&self) -> String {
@@ -342,4 +355,60 @@ async fn a_udp_and_webrtc_mesh_races_and_keeps_no_session_once_udp_wins() {
         !logs.contains("both ends advertise IP"),
         "the pair skipped the race"
     );
+}
+
+/// Requirements 3 and 4 in one cycle: UDP wins, UDP is taken away and the pair
+/// races again onto a data channel, UDP comes back and the session is dropped.
+/// Payload flows in every stage.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_pair_races_again_when_udp_drops_and_detaches_when_it_returns() {
+    let _serial = serial().lock().await;
+    init_logging();
+    let (relay, _server) = fofoca::net::test_relay::spawn_plain()
+        .await
+        .expect("local relay");
+
+    let (mut alice, mut bob) = linked_pair(&relay, vec![Transport::Udp, Transport::WebRtc]).await;
+    every_lane_carries(&mut alice, &mut bob).await;
+    let attached = || logs().matches("webrtc session attached (offerer)").count();
+    let before = attached();
+
+    alice.block_udp(true).await;
+    let raced = eventually(Duration::from_mins(1), || {
+        logs().contains("direct path lost; racing again") && attached() > before
+    })
+    .await;
+    // The race's own check for UDP after the attach takes at most 8 s (a
+    // 3 s dial, then 5 s for UDP to be selected). Waiting 9 s past the attach
+    // lets it end first, so the session is kept and the watcher, not the
+    // race, has to drop it once UDP is back.
+    tokio::time::sleep(Duration::from_secs(9)).await;
+    let carried_on_webrtc = if raced {
+        alice.send(None, "over the data channel").await;
+        eventually(PAYLOAD_DEADLINE, || {
+            bob.saw_msg("over the data channel", false)
+        })
+        .await
+    } else {
+        false
+    };
+
+    alice.block_udp(false).await;
+    let detached = eventually(Duration::from_secs(30), || {
+        logs().contains("udp selected again; webrtc session detached")
+    })
+    .await;
+    alice.send(None, "back on udp").await;
+    let carried_on_udp = eventually(PAYLOAD_DEADLINE, || bob.saw_msg("back on udp", false)).await;
+
+    let _ = alice.membership.node.leave().await;
+    let _ = bob.membership.node.leave().await;
+    assert!(raced, "no race after udp dropped:\n{}", link_trace());
+    assert!(carried_on_webrtc, "no payload while udp was gone");
+    assert!(
+        detached,
+        "the session outlived udp's return:\n{}",
+        link_trace()
+    );
+    assert!(carried_on_udp, "no payload once udp was back");
 }

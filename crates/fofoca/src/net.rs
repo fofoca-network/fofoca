@@ -32,4 +32,7 @@ pub mod direct {
     };
     pub use crate::transport::{MAX_DIRECT_PEERS, SignalAdmission};
     pub use fofoca_iroh_webrtc_transport::WebRtcHandle;
+    /// Tests only: take UDP away from every connection in the process.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    pub use fofoca_iroh_webrtc_transport::block_ip_paths;
 }

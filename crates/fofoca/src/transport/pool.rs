@@ -26,7 +26,7 @@ use crate::util::cooldown::Cooldown;
 /// and an unreachable peer should surface as an error now, not stall the
 /// caller. The addressee's `EndpointAddr` is already registered with the
 /// endpoint (`add_peer_addr`), so a reachable peer resolves well inside this.
-const DIAL_TIMEOUT: Duration = Duration::from_secs(3);
+pub(crate) const DIAL_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// After a failed dial the endpoint goes on cooldown: further cold sends to it
 /// error immediately instead of re-dialing. The dial blocks the event loop, so
@@ -74,6 +74,11 @@ struct PoolInner {
     /// [`UnicastPool::dial_and_send_in_background`] reads it: an inline dial
     /// through [`UnicastPool::warm_or_dial`] does not.
     dialing: std::sync::Mutex<HashSet<EndpointId>>,
+    /// Each peer's full address, from its `PeerInfo`. Dialed instead of the
+    /// bare id so the relay is in the address book before the handshake:
+    /// iroh opens a connection's relay path only then, and with it a UDP loss
+    /// has a backup path to fall to rather than none.
+    addrs: std::sync::Mutex<HashMap<EndpointId, EndpointAddr>>,
     /// `TransportPolicy::relay`. Off, a send on a connection whose selected
     /// path is the relay is refused; the connection stays pooled, since iroh
     /// may still punch a direct path on it.
@@ -102,6 +107,7 @@ impl UnicastPool {
                 dial_failures: Mutex::new(Cooldown::new(DIAL_FAILURE_COOLDOWN)),
                 dial_attempts: AtomicU64::new(0),
                 dialing: std::sync::Mutex::new(HashSet::new()),
+                addrs: std::sync::Mutex::new(HashMap::new()),
                 relay_transport,
             }),
         }
@@ -119,6 +125,7 @@ impl UnicastPool {
                 dial_failures: Mutex::new(Cooldown::new(DIAL_FAILURE_COOLDOWN)),
                 dial_attempts: AtomicU64::new(0),
                 dialing: std::sync::Mutex::new(HashSet::new()),
+                addrs: std::sync::Mutex::new(HashMap::new()),
                 relay_transport: false,
             }),
         }
@@ -165,6 +172,24 @@ impl UnicastPool {
             Ok(conn) => super::path::wait_ip(&conn, PATH_SELECT_TIMEOUT).await,
             Err(_) => false,
         }
+    }
+
+    /// Remember `addr` as the address to dial its peer at.
+    pub(crate) fn note_addr(&self, addr: &EndpointAddr) {
+        if let Ok(mut addrs) = self.inner.addrs.lock() {
+            addrs.insert(addr.id, addr.clone());
+        }
+    }
+
+    /// The open pooled connection to `eid`, for the path watcher. A contended
+    /// lock reads as none; the next alive tick asks again.
+    pub(crate) fn connection(&self, eid: EndpointId) -> Option<Connection> {
+        self.inner.conns.try_lock().ok().and_then(|conns| {
+            conns
+                .get(&eid)
+                .filter(|conn| conn.close_reason().is_none())
+                .cloned()
+        })
     }
 
     /// Whether the pooled connection to `eid` is on a selected UDP path.
@@ -288,7 +313,14 @@ impl UnicastPool {
         {
             bail!("unicast dial on cooldown after a recent failure");
         }
-        match dial(&endpoint, eid).await {
+        let addr = self
+            .inner
+            .addrs
+            .lock()
+            .ok()
+            .and_then(|addrs| addrs.get(&eid).cloned())
+            .unwrap_or_else(|| EndpointAddr::new(eid));
+        match dial(&endpoint, addr).await {
             Ok(conn) => {
                 self.inner.dial_failures.lock().await.forget(&eid);
                 self.inner.conns.lock().await.insert(eid, conn.clone());
@@ -316,6 +348,10 @@ impl UnicastPool {
             conn.close(0u32.into(), b"peer left");
         }
         self.inner.dial_failures.lock().await.forget(&eid);
+        // A rejoin may come back at another address; its `PeerInfo` notes it.
+        if let Ok(mut addrs) = self.inner.addrs.lock() {
+            addrs.remove(&eid);
+        }
     }
 }
 
@@ -341,13 +377,8 @@ impl Drop for InFlightDial {
 /// Dial `eid` on the unicast ALPN within [`DIAL_TIMEOUT`]. The endpoint already
 /// knows the peer's address (registered via `add_peer_addr`), so a bare-id
 /// `EndpointAddr` resolves through the endpoint's address book + lookups.
-async fn dial(endpoint: &Endpoint, eid: EndpointId) -> Result<Connection> {
-    match n0_future::time::timeout(
-        DIAL_TIMEOUT,
-        endpoint.connect(EndpointAddr::new(eid), UNICAST_ALPN),
-    )
-    .await
-    {
+async fn dial(endpoint: &Endpoint, addr: EndpointAddr) -> Result<Connection> {
+    match n0_future::time::timeout(DIAL_TIMEOUT, endpoint.connect(addr, UNICAST_ALPN)).await {
         Ok(Ok(conn)) => Ok(conn),
         Ok(Err(error)) => Err(anyhow::anyhow!("{error}")),
         Err(_) => bail!("unicast dial timed out after {DIAL_TIMEOUT:?}"),
