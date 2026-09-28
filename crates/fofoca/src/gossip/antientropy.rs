@@ -9,10 +9,12 @@
 //! re-send only **in-window** gaps, so advertising a sub-window never makes
 //! peers perpetually re-broadcast the out-of-window remainder.
 //!
-//! A resend rides the same plane the original send chose: broadcast content
-//! goes back on gossip, and a directed frame goes point-to-point to its
-//! addressee — never to the peer that merely asked. Both follow from routing
-//! every resend through [`crate::transport::deliver`].
+//! A chat resend rides the same plane the original send chose: broadcast
+//! content goes back on gossip, and a directed frame goes point-to-point to
+//! its addressee — never to the peer that merely asked. Both follow from
+//! routing every chat resend through [`crate::transport::deliver`]. A state
+//! or meta answer is the exception: it goes point-to-point to the linked
+//! neighbor that asked, see [`handle_state_digest`].
 
 use std::collections::HashSet;
 
@@ -297,29 +299,73 @@ fn state_digest(
     )
 }
 
+/// How [`handle_state_digest`] sent its answer, in frames. `unicast` counts
+/// frames handed to a background send, not proof that they arrived.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct Answered {
+    pub(crate) unicast: usize,
+    pub(crate) broadcast: usize,
+}
+
 /// Handle a received state digest: the sender advertised its automerge heads, so
-/// re-broadcast the signed change frames it is missing (`changes_since`), up to
+/// re-send the signed change frames it is missing (`changes_since`), up to
 /// an own resend budget (separate from the chat digest's, so a busy chat log
 /// can't starve state backfill). automerge's DAG collapses "what's missing" into
 /// one query — no windows, no cursor. A late joiner advertising an empty (or
 /// genesis-only) frontier pulls the whole history over successive rounds as its
 /// heads advance.
+///
+/// The answer goes point-to-point to the asker when it is a linked neighbor
+/// (see [`crate::transport::unicast_answer_target`]), else on gossip as before.
+/// Point-to-point, the holder does not push frames all its other neighbors
+/// already hold (each such push costs a prune), a link that comes up during
+/// the answer cannot cut it short, and a frame the asker dropped from its
+/// orphan buffer can come again at once: the unicast plane drops no message
+/// id as seen.
 pub(crate) async fn handle_state_digest(
     channel: Channel,
     message: &Message,
     state: &EventLoopState,
     ctx: &HandlerCtx<'_>,
-) {
-    let mut resent = 0usize;
-    for frame in missing_frames(channel, message, state) {
-        if let Ok(bytes) = frame.serialize() {
-            let _ = ctx.sender.broadcast(Bytes::from(bytes)).await;
-            resent += 1;
+) -> Answered {
+    let frames: Vec<Bytes> = missing_frames(channel, message, state)
+        .iter()
+        .filter_map(|frame| frame.serialize().ok().map(Bytes::from))
+        .collect();
+    let mut answered = Answered::default();
+    if frames.is_empty() {
+        return answered;
+    }
+    let count = frames.len();
+    let fallback = match crate::transport::unicast_answer_target(&message.author, state) {
+        None => Some("asker is not a linked neighbor with a direct path"),
+        Some(eid)
+            if state
+                .unicast_pool
+                .send_batch_in_background(eid, frames.clone())
+                .await =>
+        {
+            None
         }
+        Some(_) => Some(
+            "the send could not start: a dial in flight, a dial cooldown, or a relay-only path",
+        ),
+    };
+    if fallback.is_some() {
+        for bytes in frames {
+            let _ = ctx.sender.broadcast(bytes).await;
+        }
+        answered.broadcast = count;
+    } else {
+        answered.unicast = count;
     }
-    if resent > 0 {
-        tracing::debug!(resent, "state anti-entropy: resent frames a peer lacked");
-    }
+    tracing::debug!(
+        unicast = answered.unicast,
+        broadcast = answered.broadcast,
+        on_gossip_because = fallback.unwrap_or("-"),
+        "state anti-entropy: resent frames a peer lacked"
+    );
+    answered
 }
 
 /// The signed change frames the author of `digest` lacks on `channel`, up to

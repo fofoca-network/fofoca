@@ -70,7 +70,8 @@ pub async fn deliver(
 ///   moments ago reads the same way until its path is selected, for up to
 ///   the path-select budget.
 /// - it is cold and on the per-peer dial-failure cooldown.
-/// - it is cold and a background dial to it is already in flight.
+/// - it is cold and a background dial or batch send to it is already in
+///   flight.
 /// - the gossip broadcast failed.
 ///
 /// A `false` send is not queued: the caller tries again later.
@@ -133,6 +134,21 @@ fn route(msg: &Message, state: &EventLoopState) -> Route {
         Some(eid) => Route::Unicast(eid),
         None => Route::Undeliverable,
     }
+}
+
+/// Where an answer to `asker`'s state digest can go point-to-point: its
+/// endpoint, when it is a linked gossip neighbor with a usable path. Linked,
+/// because every holder that hears a digest answers it, and one answer is up
+/// to a whole resend budget of frames: the asker's link count bounds how many
+/// answers reach its unicast inbox. Linked also proves the address; a digest
+/// must never make us dial an address a `PeerInfo` merely claimed. `None`
+/// means answer as before, on gossip.
+pub(crate) fn unicast_answer_target(
+    asker: &Nickname,
+    state: &EventLoopState,
+) -> Option<EndpointId> {
+    let eid = directed_endpoint(asker, state)?;
+    (state.linked_endpoints.contains(&eid) && !held(eid, state)).then_some(eid)
 }
 
 /// The error [`deliver`] returns for a [`Route::Held`] frame. Typed, so a
@@ -720,5 +736,198 @@ mod tests {
     fn lane_is_unreachable_for_an_unknown_peer() {
         let (state, _) = state_knowing_bob();
         assert_eq!(lane_for(&nick("carol"), &state), Lane::Unreachable);
+    }
+
+    /// Linked with a usable path: the answer goes point-to-point. Every other
+    /// case answers on gossip as before.
+    #[test]
+    fn a_digest_answer_goes_point_to_point_only_to_a_linked_neighbor() {
+        use super::unicast_answer_target;
+        let bob = endpoint_id(1);
+        let linked = || {
+            let mut state = fresh_state();
+            state
+                .peer_endpoints
+                .insert(nick("bob"), iroh::EndpointAddr::new(bob));
+            state
+                .direct
+                .insert(bob, crate::daemon::state::DirectState::Direct);
+            state.linked_endpoints.insert(bob);
+            state
+        };
+
+        assert_eq!(unicast_answer_target(&nick("bob"), &linked()), Some(bob));
+        assert_eq!(
+            unicast_answer_target(&nick("carol"), &linked()),
+            None,
+            "no known endpoint"
+        );
+        let mut rendezvous = linked();
+        rendezvous.rendezvous_id = Some(bob);
+        assert_eq!(
+            unicast_answer_target(&nick("bob"), &rendezvous),
+            None,
+            "the rendezvous pseudo-node"
+        );
+        let mut held = linked();
+        held.direct.remove(&bob);
+        assert_eq!(
+            unicast_answer_target(&nick("bob"), &held),
+            None,
+            "no proven direct path on a lookup-only relay"
+        );
+        let mut unlinked = linked();
+        unlinked.linked_endpoints.remove(&bob);
+        assert_eq!(
+            unicast_answer_target(&nick("bob"), &unlinked),
+            None,
+            "known but not a gossip neighbor"
+        );
+    }
+
+    /// A state digest from a linked neighbor with a direct path is answered
+    /// on the unicast plane, every frame, in order: on gossip every other
+    /// member already holds these frames, so a hop drops them as seen.
+    #[tokio::test]
+    async fn a_linked_neighbors_state_digest_is_answered_point_to_point_in_order() {
+        use crate::protocol::Channel;
+        use crate::protocol::identity::{Identity, encode_pubkey};
+
+        let (bob_endpoint, _bob_sender) = loopback_node().await;
+        let (endpoint, sender) = loopback_node().await;
+        let mut state = state_with_pool(&endpoint, bob_endpoint.addr());
+        state.linked_endpoints.insert(bob_endpoint.id());
+        let mesh = MeshId::from("test");
+        let seed = *state.identity.public().as_bytes();
+        let frames: Vec<Bytes> = (0..3)
+            .map(|step| {
+                let change = state
+                    .doc(Channel::State)
+                    .build_change(&serde_json::json!({ format!("k{step}"): step }), &seed)
+                    .expect("a JSON object merges")
+                    .expect("a non-empty merge yields a change");
+                let (wire, _plain) = state
+                    .doc(Channel::State)
+                    .compose_wire_body(&change, None)
+                    .expect("compose the wire body");
+                let frame = Message::new_channel_event(&mesh, &nick("alice"), wire, Channel::State)
+                    .signed(&state.identity);
+                let _ = state.doc_mut(Channel::State).ingest(&frame);
+                Bytes::from(frame.serialize().expect("serialize"))
+            })
+            .collect();
+        let received = tokio::spawn(async move {
+            let conn = bob_endpoint
+                .accept()
+                .await
+                .expect("an incoming connection")
+                .await
+                .expect("accept the connection");
+            let mut got = Vec::new();
+            for _ in 0..3 {
+                let mut stream = conn.accept_uni().await.expect("a uni stream");
+                got.push(stream.read_to_end(64 * 1024).await.expect("read the frame"));
+            }
+            (got, bob_endpoint, conn)
+        });
+        let identity = Identity::generate();
+        let our_pubkey = encode_pubkey(&identity.public());
+        let author = nick("alice");
+        let sink = crate::gossip::event::SilentSink;
+        let ctx = crate::daemon::ctx::HandlerCtx {
+            sender: &sender,
+            endpoint: &endpoint,
+            mesh: &mesh,
+            author: &author,
+            identity: &identity,
+            our_pubkey: &our_pubkey,
+            max_peers: 16,
+            rendezvous_id: endpoint_id(9),
+            external_msg_tx: None,
+            sink: &sink,
+        };
+        let heads = MessageBody::new(r#"{"heads":[]}"#.to_owned()).expect("a JSON body");
+        let digest = Message::new_channel_digest(&mesh, &nick("bob"), heads, Channel::State)
+            .signed(&Identity::generate());
+
+        let answered =
+            crate::gossip::antientropy::handle_state_digest(Channel::State, &digest, &state, &ctx)
+                .await;
+
+        assert_eq!(answered.broadcast, 0, "nothing went on gossip");
+        assert_eq!(answered.unicast, 3);
+        let (got, _bob_endpoint, _conn) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), received)
+                .await
+                .expect("bob reads the answer in time")
+                .expect("reader task");
+        let expected: Vec<Vec<u8>> = frames.iter().map(|bytes| bytes.to_vec()).collect();
+        assert_eq!(got, expected, "every frame, in order");
+    }
+
+    /// A node sends its state and meta digests back to back, so a holder
+    /// answers the same warm peer twice at once. The in-flight guard exists
+    /// for a cold peer's dial; a warm connection must take both batches.
+    #[tokio::test]
+    async fn two_batches_to_a_warm_peer_both_go_out() {
+        let (bob_endpoint, _bob_sender) = loopback_node().await;
+        let (endpoint, _sender) = loopback_node().await;
+        let state = state_with_pool(&endpoint, bob_endpoint.addr());
+        let received = tokio::spawn(async move {
+            let conn = bob_endpoint
+                .accept()
+                .await
+                .expect("an incoming connection")
+                .await
+                .expect("accept the connection");
+            let mut got = Vec::new();
+            for _ in 0..4 {
+                let mut stream = conn.accept_uni().await.expect("a uni stream");
+                got.push(stream.read_to_end(64 * 1024).await.expect("read the frame"));
+            }
+            (got, bob_endpoint, conn)
+        });
+        let bob = endpoint_of_bob(&state);
+        let conn = state
+            .unicast_pool
+            .warm_or_dial(bob)
+            .await
+            .expect("warm the pool");
+        assert!(
+            crate::transport::path::wait_direct(&conn, std::time::Duration::from_secs(5)).await,
+            "loopback selects a direct path"
+        );
+        let batch = |tag: &str| {
+            (0..2)
+                .map(|step| Bytes::from(format!("{tag}{step}")))
+                .collect::<Vec<_>>()
+        };
+
+        let first = state
+            .unicast_pool
+            .send_batch_in_background(bob, batch("state"))
+            .await;
+        let second = state
+            .unicast_pool
+            .send_batch_in_background(bob, batch("meta"))
+            .await;
+
+        assert!(first, "the first batch starts");
+        assert!(second, "the second batch to the same warm peer starts too");
+        let (mut got, _bob_endpoint, _conn) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), received)
+                .await
+                .expect("bob reads both batches in time")
+                .expect("reader task");
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                b"meta0".to_vec(),
+                b"meta1".to_vec(),
+                b"state0".to_vec(),
+                b"state1".to_vec()
+            ]
+        );
     }
 }
