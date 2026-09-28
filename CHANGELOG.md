@@ -108,9 +108,16 @@ published to a registry; pin it with
   rungs it panicked, and between 17 and 255 it minted an id no member could
   decode.
 - The chat example lives in `examples/chat/rust` (package `chat`).
+- A node without UDP needs the relay: `'relay'` in `lookup`, and a relay
+  transport on the node. A browser always has no UDP, so a tab now refuses
+  a mesh with no relay lookup at join, and a stream node refuses it at bind.
+  A native node meets this rule only when its own paths leave out UDP.
 
 ### Fixed
 
+- A stream rides the relay only if both lists allow it. A consumer whose own
+  `transport` list left out `'relay'` still streamed over the relay when the
+  producer's list allowed it.
 - A dial that learned a WebRTC address after iroh had selected the relay
   path stayed on the relay: its Initials went only to the selected path, and
   the custom-transport path was never opened. The pinned iroh fork now fans
