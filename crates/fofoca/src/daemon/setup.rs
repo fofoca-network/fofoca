@@ -358,10 +358,17 @@ pub const BROWSER_HAS_NO_PATH: &str = "a browser cannot carry payload in this me
 /// paths exist, and a node can only have fewer.
 ///
 /// # Errors
-/// A node whose own paths leave none the mesh allows: no `udp`, no `webrtc`,
-/// and no relay payload. On a browser, also a mesh [`refuse_in_browser`]
-/// refuses. Refused here rather than left as a member that links to nobody
-/// and says nothing.
+/// On a browser, a mesh [`refuse_in_browser`] refuses. Refused here rather
+/// than left as a member that links to nobody and says nothing. A native node
+/// never refuses: every list `validate` accepts names `udp` or `webrtc`, and
+/// a native node can run either.
+#[cfg_attr(
+    not(target_arch = "wasm32"),
+    expect(
+        clippy::unnecessary_wraps,
+        reason = "only a browser can refuse; the signature is one for both targets"
+    )
+)]
 fn member_transports(
     #[cfg_attr(
         not(target_arch = "wasm32"),
@@ -374,10 +381,6 @@ fn member_transports(
     let transports = transports.within(&policy);
     #[cfg(target_arch = "wasm32")]
     refuse_in_browser(lookups, policy, transports)?;
-    anyhow::ensure!(
-        transports.udp || transports.webrtc || (transports.relay && policy.relay_transport),
-        "this node has no path the mesh allows: its transports and the mesh's list share neither `udp`, `webrtc` nor relay payload"
-    );
     Ok(transports)
 }
 
@@ -948,32 +951,6 @@ mod tests {
             ..dht_only
         };
         super::refuse_in_browser(&relay, policy, transports).expect("the relay signals");
-    }
-
-    // A node's own paths can only shrink the mesh's list. When nothing is
-    // left, the member would join and link to nobody.
-    #[test]
-    fn a_member_with_no_path_the_mesh_allows_is_refused() {
-        let lookups = LookupOpts {
-            mdns: false,
-            dht: false,
-            relay_lookup: RelayChoice::Pinned,
-        };
-        let udp_only = TransportPolicy::from_transports(&[Transport::Udp]).expect("valid");
-        super::member_transports(
-            &lookups,
-            crate::lookup::TransportOpts::webrtc_only(),
-            udp_only,
-        )
-        .expect_err("webrtc-only node, udp-only mesh");
-        let relay_payload =
-            TransportPolicy::from_transports(&[Transport::Udp, Transport::Relay]).expect("valid");
-        super::member_transports(
-            &lookups,
-            crate::lookup::TransportOpts::webrtc_only(),
-            relay_payload,
-        )
-        .expect("the relay carries payload");
     }
 
     // The relay lookup names a relay, but only this node's relay transport
