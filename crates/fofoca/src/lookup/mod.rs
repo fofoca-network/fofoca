@@ -672,7 +672,7 @@ pub(crate) fn build_mesh(
     let session_gate = webrtc
         .as_ref()
         .filter(|_| needs_session)
-        .map(|(handle, admission, _)| (handle.clone(), admission.clone()));
+        .map(|(handle, admission, _)| (handle.clone(), admission.clone(), local));
     let mut builder = Router::builder(endpoint).accept(
         GOSSIP_ALPN,
         crate::transport::DirectOnlyGossip::new(gossip.clone(), relay_transport, session_gate),

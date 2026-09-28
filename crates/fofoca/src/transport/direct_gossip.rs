@@ -19,15 +19,17 @@ pub(crate) struct DirectOnlyGossip {
     inner: Gossip,
     relay_transport: bool,
     /// Set on a node with no UDP path, whose only direct path to anyone is a
-    /// `WebRTC` session. See [`DirectOnlyGossip::accept`].
-    session_gate: Option<(WebRtcHandle, super::SignalAdmission)>,
+    /// `WebRTC` session. See [`DirectOnlyGossip::accept`]. The third element is
+    /// this node's own id: the lower id of a pair offers, and the gate treats
+    /// the offerer and the answerer differently.
+    session_gate: Option<(WebRtcHandle, super::SignalAdmission, iroh::EndpointId)>,
 }
 
 impl DirectOnlyGossip {
     pub(crate) fn new(
         inner: Gossip,
         relay_transport: bool,
-        session_gate: Option<(WebRtcHandle, super::SignalAdmission)>,
+        session_gate: Option<(WebRtcHandle, super::SignalAdmission, iroh::EndpointId)>,
     ) -> Self {
         Self {
             inner,
@@ -39,11 +41,12 @@ impl DirectOnlyGossip {
 
 impl ProtocolHandler for DirectOnlyGossip {
     /// On a node without UDP, a connection from a peer it holds no session
-    /// with, and is not negotiating one with, is refused at once rather than
-    /// held. It can only go direct once a session attaches, and the session's
-    /// offerer grafts the pair over it the moment it does. A round in flight
-    /// is held as before: the offerer attaches first and may dial before this
-    /// side has. Held, it would be a second connection for the same
+    /// with is refused at once rather than held. It can only go direct once a
+    /// session attaches, and the session's offerer (the lower id) grafts the
+    /// pair over it the moment it does. The answerer holds a dial during a
+    /// round in flight: the offerer attaches first and may dial before this
+    /// side has. The offerer never holds one, because its own graft is the
+    /// dial the pair needs. Held, it would be a second connection for the same
     /// pair: iroh-gossip dedups a pair by closing the connection each side
     /// dialed, and the HyParView reply already sent on the closed one is
     /// lost, which leaves the pair half-linked until a heal re-grafts it.
@@ -52,8 +55,12 @@ impl ProtocolHandler for DirectOnlyGossip {
     async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
         let remote = conn.remote_id();
         if !self.relay_transport
-            && let Some((webrtc, admission)) = &self.session_gate
-            && refuse_before_session(webrtc.has_session(&remote), admission.negotiating(remote))
+            && let Some((webrtc, admission, local)) = &self.session_gate
+            && refuse_before_session(
+                webrtc.has_session(&remote),
+                admission.negotiating(remote),
+                *local < remote,
+            )
         {
             tracing::debug!(target: super::LOG_TARGET, remote = %conn.remote_id(), "gossip dial before its webrtc session refused");
             conn.close(GOSSIP_RELAY_REFUSED_CODE.into(), b"no webrtc session yet");
@@ -84,8 +91,8 @@ impl ProtocolHandler for DirectOnlyGossip {
 
 /// Whether the gate refuses a gossip dial at once rather than holding it,
 /// from what this node knows about the dialer's `WebRTC` session.
-fn refuse_before_session(has_session: bool, negotiating: bool) -> bool {
-    !has_session && !negotiating
+fn refuse_before_session(has_session: bool, negotiating: bool, we_offer: bool) -> bool {
+    !has_session && (we_offer || !negotiating)
 }
 
 #[cfg(test)]
@@ -96,11 +103,37 @@ mod tests {
     // the moment it attaches, so its dial can reach the answerer mid-round.
     #[test]
     fn a_dial_during_the_round_is_held_not_refused() {
-        assert!(refuse_before_session(false, false), "no session, no round");
         assert!(
-            !refuse_before_session(false, true),
+            refuse_before_session(false, false, false),
+            "no session, no round"
+        );
+        assert!(
+            !refuse_before_session(false, true, false),
             "the round is finishing"
         );
-        assert!(!refuse_before_session(true, false), "the session is up");
+        assert!(
+            !refuse_before_session(true, false, false),
+            "the session is up"
+        );
+    }
+
+    // The offerer grafts the pair itself the moment its session attaches, so
+    // a dial from the answerer before then is the answerer's own `ForwardJoin`
+    // dial. Held, it outlives the graft, and the dedup that follows loses the
+    // answerer's HyParView reply.
+    #[test]
+    fn the_offerer_refuses_a_dial_before_its_session() {
+        assert!(
+            refuse_before_session(false, true, true),
+            "mid-round, as the offerer"
+        );
+        assert!(
+            refuse_before_session(false, false, true),
+            "no round, as the offerer"
+        );
+        assert!(
+            !refuse_before_session(true, false, true),
+            "the session is up"
+        );
     }
 }
