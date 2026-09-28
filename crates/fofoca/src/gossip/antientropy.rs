@@ -299,6 +299,13 @@ fn state_digest(
     )
 }
 
+/// Which plane a state digest answer takes; part of the serve gate's key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum Plane {
+    Unicast,
+    Gossip,
+}
+
 /// How [`handle_state_digest`] sent its answer, in frames. `unicast` counts
 /// frames handed to a background send, not proof that they arrived.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -308,26 +315,35 @@ pub(crate) struct Answered {
 }
 
 /// Handle a received state digest: the sender advertised its automerge heads, so
-/// re-send the signed change frames it is missing (`changes_since`), up to
-/// an own resend budget (separate from the chat digest's, so a busy chat log
-/// can't starve state backfill). automerge's DAG collapses "what's missing" into
-/// one query — no windows, no cursor. A late joiner advertising an empty (or
-/// genesis-only) frontier pulls the whole history over successive rounds as its
-/// heads advance.
-///
-/// The answer goes point-to-point to the asker when it is a linked neighbor
-/// (see [`crate::transport::unicast_answer_target`]), else on gossip as before.
-/// Point-to-point, the holder does not push frames all its other neighbors
-/// already hold (each such push costs a prune), a link that comes up during
-/// the answer cannot cut it short, and a frame the asker dropped from its
-/// orphan buffer can come again at once: the unicast plane drops no message
-/// id as seen.
+/// re-send the signed change frames it is missing (`changes_since`), up to an
+/// own resend budget; automerge's DAG collapses "what's missing" into one query.
+/// The answer goes point-to-point to a linked neighbor (see
+/// [`crate::transport::unicast_answer_target`]), else on gossip, where every
+/// hop already holds these frames and pushing them costs a prune each; the
+/// unicast plane also drops no message id as seen, so an evicted orphan can come
+/// again at once. Each asker is served once per channel and plane per
+/// [`ANTIENTROPY_SERVE_COOLDOWN_SECS`](fofoca_util::tuning::ANTIENTROPY_SERVE_COOLDOWN_SECS)
+/// window, checked before the query (see `state_digest_serves`); a digest with
+/// nothing missing uses no serve.
 pub(crate) async fn handle_state_digest(
     channel: Channel,
     message: &Message,
-    state: &EventLoopState,
+    state: &mut EventLoopState,
     ctx: &HandlerCtx<'_>,
 ) -> Answered {
+    let now = crate::util::clock::Instant::now();
+    let serve = |plane| (message.pubkey.clone(), channel, plane);
+    let target = crate::transport::unicast_answer_target(&message.author, state);
+    let plane = if target.is_some() {
+        Plane::Unicast
+    } else {
+        Plane::Gossip
+    };
+    // Before the query: a refused digest costs no `changes_since`.
+    if state.state_digest_serves.on_cooldown(&serve(plane), now) {
+        tracing::debug!(author = %message.author, ?channel, ?plane, "state digest ignored: this asker was served within the window");
+        return Answered::default();
+    }
     let frames: Vec<Bytes> = missing_frames(channel, message, state)
         .iter()
         .filter_map(|frame| frame.serialize().ok().map(Bytes::from))
@@ -337,7 +353,7 @@ pub(crate) async fn handle_state_digest(
         return answered;
     }
     let count = frames.len();
-    let fallback = match crate::transport::unicast_answer_target(&message.author, state) {
+    let fallback = match target {
         None => Some("asker is not a linked neighbor with a direct path"),
         Some(eid)
             if state
@@ -352,12 +368,22 @@ pub(crate) async fn handle_state_digest(
         ),
     };
     if fallback.is_some() {
+        if plane == Plane::Unicast
+            && state
+                .state_digest_serves
+                .on_cooldown(&serve(Plane::Gossip), now)
+        {
+            tracing::debug!(author = %message.author, ?channel, "state digest ignored: the unicast send could not start and the gossip answer was used within the window");
+            return answered;
+        }
         for bytes in frames {
             let _ = ctx.sender.broadcast(bytes).await;
         }
         answered.broadcast = count;
+        state.state_digest_serves.note(serve(Plane::Gossip), now);
     } else {
         answered.unicast = count;
+        state.state_digest_serves.note(serve(Plane::Unicast), now);
     }
     tracing::debug!(
         unicast = answered.unicast,

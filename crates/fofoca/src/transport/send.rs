@@ -785,37 +785,107 @@ mod tests {
         );
     }
 
+    /// What a `HandlerCtx` borrows, kept apart from the state so a test can
+    /// hold a context and a `&mut EventLoopState` at once. The state digest
+    /// answer tests live here, not in `antientropy`, for the loopback helpers.
+    struct Net {
+        endpoint: iroh::Endpoint,
+        sender: crate::transport::MeshSender,
+        mesh: MeshId,
+        identity: crate::protocol::identity::Identity,
+        our_pubkey: String,
+        author: crate::protocol::Nickname,
+        sink: crate::gossip::event::SilentSink,
+    }
+
+    impl Net {
+        fn ctx(&self) -> crate::daemon::ctx::HandlerCtx<'_> {
+            crate::daemon::ctx::HandlerCtx {
+                sender: &self.sender,
+                endpoint: &self.endpoint,
+                mesh: &self.mesh,
+                author: &self.author,
+                identity: &self.identity,
+                our_pubkey: &self.our_pubkey,
+                max_peers: 16,
+                rendezvous_id: endpoint_id(9),
+                external_msg_tx: None,
+                sink: &self.sink,
+            }
+        }
+    }
+
+    /// A holder of `changes` changes in each of the state and meta documents
+    /// that knows `bob` at `bob_addr` with a proven direct path, and the wire
+    /// bytes of each state change.
+    async fn holder(
+        bob_addr: iroh::EndpointAddr,
+        changes: usize,
+    ) -> (Net, EventLoopState, Vec<Bytes>) {
+        use crate::protocol::Channel;
+        use crate::protocol::identity::{Identity, encode_pubkey};
+
+        let (endpoint, sender) = loopback_node().await;
+        let mut state = state_with_pool(&endpoint, bob_addr);
+        let mesh = MeshId::from("test");
+        let seed = *state.identity.public().as_bytes();
+        let mut write = |channel: Channel| -> Vec<Bytes> {
+            (0..changes)
+                .map(|step| {
+                    let change = state
+                        .doc(channel)
+                        .build_change(&serde_json::json!({ format!("k{step}"): step }), &seed)
+                        .expect("a JSON object merges")
+                        .expect("a non-empty merge yields a change");
+                    let (wire, _plain) = state
+                        .doc(channel)
+                        .compose_wire_body(&change, None)
+                        .expect("compose the wire body");
+                    let frame = Message::new_channel_event(&mesh, &nick("alice"), wire, channel)
+                        .signed(&state.identity);
+                    let _ = state.doc_mut(channel).ingest(&frame);
+                    Bytes::from(frame.serialize().expect("serialize"))
+                })
+                .collect()
+        };
+        let frames = write(Channel::State);
+        write(Channel::Meta);
+        let identity = Identity::generate();
+        let our_pubkey = encode_pubkey(&identity.public());
+        let net = Net {
+            endpoint,
+            sender,
+            mesh,
+            identity,
+            our_pubkey,
+            author: nick("alice"),
+            sink: crate::gossip::event::SilentSink,
+        };
+        (net, state, frames)
+    }
+
+    /// `bob`'s digest on `channel`, advertising `heads`, signed by `asker`.
+    fn digest(
+        mesh: &MeshId,
+        channel: crate::protocol::Channel,
+        heads: &serde_json::Value,
+        asker: &crate::protocol::identity::Identity,
+    ) -> Message {
+        let body = MessageBody::new(serde_json::json!({ "heads": heads }).to_string())
+            .expect("a JSON body");
+        Message::new_channel_digest(mesh, &nick("bob"), body, channel).signed(asker)
+    }
+
     /// A state digest from a linked neighbor with a direct path is answered
     /// on the unicast plane, every frame, in order: on gossip every other
     /// member already holds these frames, so a hop drops them as seen.
     #[tokio::test]
     async fn a_linked_neighbors_state_digest_is_answered_point_to_point_in_order() {
         use crate::protocol::Channel;
-        use crate::protocol::identity::{Identity, encode_pubkey};
 
         let (bob_endpoint, _bob_sender) = loopback_node().await;
-        let (endpoint, sender) = loopback_node().await;
-        let mut state = state_with_pool(&endpoint, bob_endpoint.addr());
+        let (net, mut state, frames) = holder(bob_endpoint.addr(), 3).await;
         state.linked_endpoints.insert(bob_endpoint.id());
-        let mesh = MeshId::from("test");
-        let seed = *state.identity.public().as_bytes();
-        let frames: Vec<Bytes> = (0..3)
-            .map(|step| {
-                let change = state
-                    .doc(Channel::State)
-                    .build_change(&serde_json::json!({ format!("k{step}"): step }), &seed)
-                    .expect("a JSON object merges")
-                    .expect("a non-empty merge yields a change");
-                let (wire, _plain) = state
-                    .doc(Channel::State)
-                    .compose_wire_body(&change, None)
-                    .expect("compose the wire body");
-                let frame = Message::new_channel_event(&mesh, &nick("alice"), wire, Channel::State)
-                    .signed(&state.identity);
-                let _ = state.doc_mut(Channel::State).ingest(&frame);
-                Bytes::from(frame.serialize().expect("serialize"))
-            })
-            .collect();
         let received = tokio::spawn(async move {
             let conn = bob_endpoint
                 .accept()
@@ -830,29 +900,16 @@ mod tests {
             }
             (got, bob_endpoint, conn)
         });
-        let identity = Identity::generate();
-        let our_pubkey = encode_pubkey(&identity.public());
-        let author = nick("alice");
-        let sink = crate::gossip::event::SilentSink;
-        let ctx = crate::daemon::ctx::HandlerCtx {
-            sender: &sender,
-            endpoint: &endpoint,
-            mesh: &mesh,
-            author: &author,
-            identity: &identity,
-            our_pubkey: &our_pubkey,
-            max_peers: 16,
-            rendezvous_id: endpoint_id(9),
-            external_msg_tx: None,
-            sink: &sink,
-        };
-        let heads = MessageBody::new(r#"{"heads":[]}"#.to_owned()).expect("a JSON body");
-        let digest = Message::new_channel_digest(&mesh, &nick("bob"), heads, Channel::State)
-            .signed(&Identity::generate());
+        let asker = crate::protocol::identity::Identity::generate();
+        let digest = digest(&net.mesh, Channel::State, &serde_json::json!([]), &asker);
 
-        let answered =
-            crate::gossip::antientropy::handle_state_digest(Channel::State, &digest, &state, &ctx)
-                .await;
+        let answered = crate::gossip::antientropy::handle_state_digest(
+            Channel::State,
+            &digest,
+            &mut state,
+            &net.ctx(),
+        )
+        .await;
 
         assert_eq!(answered.broadcast, 0, "nothing went on gossip");
         assert_eq!(answered.unicast, 3);
@@ -863,6 +920,82 @@ mod tests {
                 .expect("reader task");
         let expected: Vec<Vec<u8>> = frames.iter().map(|bytes| bytes.to_vec()).collect();
         assert_eq!(got, expected, "every frame, in order");
+    }
+
+    /// One serve per asker, channel and plane per window: a new node sends a
+    /// digest pair for every peer it sees, all with the same heads, and every
+    /// holder hears each one. The re-ask at the asker's first real-peer link
+    /// switches it to the unicast plane, so it is still answered.
+    #[tokio::test]
+    async fn a_state_digest_is_served_once_per_asker_channel_and_plane_per_window() {
+        use crate::gossip::antientropy::{Answered, handle_state_digest};
+        use crate::protocol::Channel;
+
+        let (bob_endpoint, _bob_sender) = loopback_node().await;
+        let (net, mut state, _frames) = holder(bob_endpoint.addr(), 3).await;
+        let ctx = net.ctx();
+        let asker = crate::protocol::identity::Identity::generate();
+        let empty = serde_json::json!([]);
+        let state_digest = digest(&net.mesh, Channel::State, &empty, &asker);
+        let meta_digest = digest(&net.mesh, Channel::Meta, &empty, &asker);
+        let gossip = Answered {
+            unicast: 0,
+            broadcast: 3,
+        };
+        let refused = Answered::default();
+
+        assert_eq!(
+            handle_state_digest(Channel::State, &state_digest, &mut state, &ctx).await,
+            gossip,
+            "an unlinked asker is answered on gossip"
+        );
+        assert_eq!(
+            handle_state_digest(Channel::State, &state_digest, &mut state, &ctx).await,
+            refused,
+            "a second gossip answer inside the window"
+        );
+        assert_eq!(
+            handle_state_digest(Channel::Meta, &meta_digest, &mut state, &ctx).await,
+            gossip,
+            "the meta digest right after is its own serve"
+        );
+
+        state.linked_endpoints.insert(bob_endpoint.id());
+        assert_eq!(
+            handle_state_digest(Channel::State, &state_digest, &mut state, &ctx).await,
+            Answered {
+                unicast: 3,
+                broadcast: 0
+            },
+            "the re-ask once linked goes on the other plane"
+        );
+        assert_eq!(
+            handle_state_digest(Channel::State, &state_digest, &mut state, &ctx).await,
+            refused,
+            "a second unicast answer inside the window"
+        );
+    }
+
+    /// A digest with nothing to answer must not use up the window: the
+    /// asker's next digest, with a real gap, is still served. (The gate is
+    /// checked before the missing-frames query, which this test cannot see.)
+    #[tokio::test]
+    async fn a_digest_with_nothing_missing_does_not_use_the_serve() {
+        use crate::gossip::antientropy::handle_state_digest;
+        use crate::protocol::Channel;
+
+        let (bob_endpoint, _bob_sender) = loopback_node().await;
+        let (net, mut state, _frames) = holder(bob_endpoint.addr(), 3).await;
+        let ctx = net.ctx();
+        let asker = crate::protocol::identity::Identity::generate();
+        let current = serde_json::to_value(state.doc(Channel::State).heads()).expect("heads");
+        let up_to_date = digest(&net.mesh, Channel::State, &current, &asker);
+        let behind = digest(&net.mesh, Channel::State, &serde_json::json!([]), &asker);
+
+        let nothing = handle_state_digest(Channel::State, &up_to_date, &mut state, &ctx).await;
+        assert_eq!(nothing.broadcast + nothing.unicast, 0, "nothing is missing");
+        let gap = handle_state_digest(Channel::State, &behind, &mut state, &ctx).await;
+        assert_eq!(gap.broadcast, 3, "the gap is served inside the window");
     }
 
     /// A node sends its state and meta digests back to back, so a holder

@@ -175,6 +175,16 @@ pub struct EventLoopState {
     /// When each author's digest was last served. Keyed on the pubkey rather
     /// than the nickname, which an author picks freely.
     digest_serves: Cooldown<String>,
+    /// When each asker's state or meta digest was last served, per plane. A
+    /// new node sends a digest pair for every peer it sees, all with the same
+    /// heads, and every holder hears each one; the plane is in the key so the
+    /// asker's re-ask at its first real-peer link, answered point-to-point,
+    /// is not refused by the gossip answer before it.
+    pub(crate) state_digest_serves: Cooldown<(
+        String,
+        crate::protocol::Channel,
+        crate::gossip::antientropy::Plane,
+    )>,
     /// Membership layer: the peer roster. Nickname-keyed set of
     /// other peers, feeding the state file's `peer_count`
     /// (`peers.len() + 1`). Excludes self. Driven by
@@ -610,6 +620,9 @@ impl EventLoopState {
             peerinfo: Cooldown::new(RELINK_COOLDOWN),
             peerinfo_flooded_at: None,
             digest_serves: Cooldown::new(Duration::from_secs(
+                fofoca_util::tuning::ANTIENTROPY_SERVE_COOLDOWN_SECS,
+            )),
+            state_digest_serves: Cooldown::new(Duration::from_secs(
                 fofoca_util::tuning::ANTIENTROPY_SERVE_COOLDOWN_SECS,
             )),
             peers: HashSet::new(),
