@@ -347,16 +347,19 @@ impl std::fmt::Debug for SetupParams {
     }
 }
 
-/// Why a browser refuses a mesh: one string, so a test can match the refusal
-/// without copying its text.
+/// Why a browser refuses a mesh with no relay lookup: one string, so a test
+/// can match the refusal without copying its text.
+pub const BROWSER_NEEDS_RELAY_LOOKUP: &str =
+    "a browser cannot reach a peer in this mesh: it has no UDP, so it needs `relay` in lookup";
+
+/// Why a browser refuses a mesh whose list leaves it no payload path.
 pub const BROWSER_HAS_NO_PATH: &str = "a browser cannot carry payload in this mesh: its transport list has neither `webrtc` nor `relay`";
 
 /// The paths this member runs: the mesh's transport list decides which direct
 /// paths exist, and a node can only have fewer.
 ///
 /// # Errors
-/// On a browser, which has no UDP, a list that leaves both the data channel
-/// and relay payload out: nothing could carry its payload. Refused here rather
+/// On a browser, a mesh [`refuse_in_browser`] refuses. Refused here rather
 /// than left as a member that links to nobody and says nothing. A native node
 /// never refuses: every list `validate` accepts names `udp` or `webrtc`, and
 /// a native node can run either.
@@ -368,13 +371,38 @@ pub const BROWSER_HAS_NO_PATH: &str = "a browser cannot carry payload in this me
     )
 )]
 fn member_transports(
+    #[cfg_attr(
+        not(target_arch = "wasm32"),
+        expect(unused_variables, reason = "only a browser reads it")
+    )]
+    lookups: &LookupOpts,
     transports: crate::lookup::TransportOpts,
     policy: crate::protocol::TransportPolicy,
 ) -> Result<crate::lookup::TransportOpts> {
     let transports = transports.within(&policy);
     #[cfg(target_arch = "wasm32")]
-    anyhow::ensure!(transports.carry_without_udp(&policy), BROWSER_HAS_NO_PATH);
+    refuse_in_browser(lookups, policy, transports)?;
     Ok(transports)
+}
+
+/// Whether a browser, which has no UDP, can run with these lookups and paths
+/// (already narrowed to `policy`).
+///
+/// # Errors
+/// No relay lookup: a browser reaches a peer only through the relay, and a
+/// data channel's handshake crosses the relay too. Or a list that leaves both
+/// the data channel and relay payload out: nothing could carry its payload.
+pub fn refuse_in_browser(
+    lookups: &LookupOpts,
+    policy: crate::protocol::TransportPolicy,
+    transports: crate::lookup::TransportOpts,
+) -> Result<()> {
+    anyhow::ensure!(
+        lookups.relay_lookup != crate::protocol::mesh::RelayChoice::Disabled,
+        BROWSER_NEEDS_RELAY_LOOKUP
+    );
+    anyhow::ensure!(transports.carry_without_udp(&policy), BROWSER_HAS_NO_PATH);
+    Ok(())
 }
 
 /// The kind-independent build inputs threaded into [`setup_create`] /
@@ -501,7 +529,7 @@ pub async fn setup_mesh(kind: SetupKind, params: SetupParams) -> Result<EventLoo
     mesh_config.validate()?;
     let lookups = mesh_config.lookups.clone();
     let relay_transport = mesh_config.transport.relay_transport;
-    let transports = member_transports(transports, mesh_config.transport)?;
+    let transports = member_transports(&lookups, transports, mesh_config.transport)?;
 
     // The off-loop rung channel: the backgrounded startup probe and the
     // beacon's liveness self-monitor publish a chosen rung here; the
@@ -897,6 +925,33 @@ async fn setup_join(build: &SetupBuild<'_>, kind: SetupKind) -> Result<Assembled
 #[cfg(all(test, feature = "host"))]
 mod tests {
     use std::time::Duration;
+
+    use crate::protocol::mesh::{LookupOpts, RelayChoice, Transport, TransportPolicy};
+
+    // A browser has no UDP: it reaches a peer only through the relay, and a
+    // data channel's handshake crosses the relay too. `validate` accepts
+    // `udp,webrtc` with no relay lookup, because a native node can signal
+    // over UDP.
+    #[test]
+    fn a_browser_refuses_a_mesh_with_no_relay_lookup() {
+        let dht_only = LookupOpts {
+            mdns: false,
+            dht: true,
+            relay_lookup: RelayChoice::Disabled,
+        };
+        let policy =
+            TransportPolicy::from_transports(&[Transport::Udp, Transport::WebRtc]).expect("valid");
+        let transports = crate::lookup::TransportOpts::default().within(&policy);
+        let error = super::refuse_in_browser(&dht_only, policy, transports)
+            .expect_err("no path to signal on");
+        assert_eq!(error.to_string(), super::BROWSER_NEEDS_RELAY_LOOKUP);
+
+        let relay = LookupOpts {
+            relay_lookup: RelayChoice::Pinned,
+            ..dht_only
+        };
+        super::refuse_in_browser(&relay, policy, transports).expect("the relay signals");
+    }
 
     use tokio::sync::watch;
 

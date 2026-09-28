@@ -14,7 +14,8 @@ pub use crate::daemon::params::{
     derive_topic_mesh_with,
 };
 pub use crate::daemon::setup::{
-    BROWSER_HAS_NO_PATH, InjectedEndpoint, SetupKind, SetupParams, setup_mesh,
+    BROWSER_HAS_NO_PATH, BROWSER_NEEDS_RELAY_LOOKUP, InjectedEndpoint, SetupKind, SetupParams,
+    refuse_in_browser, setup_mesh,
 };
 
 /// The session state file the daemon writes for external readers — its sole
