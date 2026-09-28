@@ -176,17 +176,20 @@ impl StreamNode {
     /// refuses, or the producer refuses the hash (a [`Refused`]).
     pub async fn open(&self, hash: &StreamHash) -> Result<Reader> {
         let needs_lane = pair_needs_lane(&hash.addr, self.transports.udp);
-        // Only a data channel could carry the bytes, and this node has none:
+        // A data channel needs `webrtc` on both ends: the producer's list is in
+        // the hash, and a producer without it answers no offer.
+        let can_lane = self.transports.webrtc && hash.transport.webrtc;
+        // Only a data channel could carry the bytes, and the pair has none:
         // what is left is the relay the stream refuses, so say so now rather
         // than after the direct-path probe.
-        if needs_lane && !self.transports.webrtc && !hash.transport.relay_transport {
+        if needs_lane && !can_lane && !hash.transport.relay_transport {
             bail!(Refused::RelayRefused);
         }
         self.producers.add_endpoint_info(hash.addr.clone());
-        // The WebRTC lane first: iroh does not move a live connection onto a
-        // transport attached after it, so a browser's connection must start on
-        // the data channel.
-        if self.transports.webrtc
+        // The WebRTC lane first: the connect below then finds the session's
+        // path in the address book and can start on the data channel, rather
+        // than on the relay a later attach would have to move it off.
+        if can_lane
             && needs_lane
             && !self.webrtc.has_session(&hash.addr.id)
             && let Err(error) =

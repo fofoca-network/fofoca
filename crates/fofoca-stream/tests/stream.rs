@@ -355,6 +355,24 @@ async fn a_consumer_with_no_lane_to_a_webrtc_only_producer_fails_fast() {
     assert!(elapsed < Duration::from_secs(2), "took {elapsed:?}");
 }
 
+/// The mirror case: the reader has only a data channel, and the producer
+/// runs none. The hash says so, so the open fails at once instead of offering
+/// a round the producer cannot answer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_webrtc_only_consumer_of_a_producer_without_webrtc_fails_fast() {
+    let (url, _relay) = test_relay::spawn_plain().await.expect("relay");
+    let url = url.to_string();
+    let producer_node = on_relay(&url, vec![Transport::Udp]).await;
+    let consumer_node = on_relay(&url, vec![Transport::WebRtc]).await;
+    let producer = producer_node.create().await;
+    let hash = producer.hash().clone();
+    let started = Instant::now();
+    let error = consumer_node.open(&hash).await.expect_err("no lane");
+    let elapsed = started.elapsed();
+    assert_eq!(refusal(&error), Some(Refused::RelayRefused), "{error:#}");
+    assert!(elapsed < Duration::from_secs(2), "took {elapsed:?}");
+}
+
 /// A node made to read a hash can produce as well, and the hash it mints must
 /// carry its home relay like one from `bind` does.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
