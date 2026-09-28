@@ -1266,6 +1266,10 @@ async fn handle_peer_info(
     // the bootstrap link is never subject to this.
     let defer_first_dial = first_sighting && ctx.endpoint.id() > peer_id;
     if defer_first_dial {
+        // The deferral starts the relink cooldown, as a dial would: a copy of
+        // this `PeerInfo` right after it is not a first sighting, and without
+        // the cooldown it would dial after all.
+        state.note_relink(peer_id, now);
         tracing::debug!(target: "fofoca::gossip",
             endpoint_id = %peer_id,
             "deferring first dial to the lower endpoint id (simultaneous-open tie-break)"
@@ -1762,6 +1766,50 @@ mod first_contact_tests {
                 sink: &self.sink,
             }
         }
+    }
+
+    /// The tie-break defers the first dial to the lower endpoint id. A second
+    /// copy of the same `PeerInfo` milliseconds later (every member floods its
+    /// address on a newcomer's first frame) must not dial either: both sides
+    /// would dial each other, iroh-gossip closes both connections, and the pair
+    /// is left with no link.
+    #[tokio::test]
+    async fn a_second_peer_info_right_after_a_deferred_dial_does_not_dial() {
+        use crate::protocol::message::MessageBody;
+        use crate::protocol::peer_addr::endpoint_addr_to_json;
+
+        let node = Node::spawn().await;
+        let ctx = node.ctx();
+        let mut state = fresh_state();
+        let lower = loop {
+            let id = iroh::SecretKey::generate().public();
+            if id < node.endpoint.id() {
+                break id;
+            }
+        };
+        let body =
+            MessageBody::new(endpoint_addr_to_json(&iroh::EndpointAddr::new(lower)).to_string())
+                .expect("an address body");
+        let peer_info =
+            Message::new_peer_info(&node.mesh, &nick("lower"), body).signed(&Identity::generate());
+
+        super::handle_peer_info(&peer_info, bytes::Bytes::new(), &mut state, &ctx).await;
+        assert!(
+            !state.direct.contains_key(&lower),
+            "the first sighting defers"
+        );
+        super::handle_peer_info(&peer_info, bytes::Bytes::new(), &mut state, &ctx).await;
+        assert!(
+            !state.direct.contains_key(&lower),
+            "the copy right after must not dial"
+        );
+        state.relink.clear();
+        super::handle_peer_info(&peer_info, bytes::Bytes::new(), &mut state, &ctx).await;
+        assert!(
+            state.direct.contains_key(&lower),
+            "once the cooldown ends, this side dials after all"
+        );
+        node.endpoint.close().await;
     }
 
     /// A node whose first digests went out over the rendezvous alone can have
