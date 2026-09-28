@@ -96,7 +96,7 @@ pub struct SelfWriteGate {
 struct Pending {
     frame: Message,
     change: Change,
-    seq: u64,
+    arrival: u64,
 }
 
 /// One channel's automerge document plus the bookkeeping to apply changes in
@@ -121,10 +121,10 @@ pub struct MeshDoc {
     /// dependencies will ever arrive. An author who gossips a chain while
     /// withholding its first link parks every later one here for good.
     pending: HashMap<ChangeHash, Pending>,
-    /// Insertion order for `pending`, so the per-author ceiling can evict that
-    /// author's stalest orphan. A counter rather than a clock: this crate runs
-    /// in a browser too, where `Instant` is not available.
-    pending_seq: u64,
+    /// Insertion order for `pending`, so the per-author ceiling picks the same
+    /// victim among equal seqs on every run. A counter rather than a clock:
+    /// this crate runs in a browser too, where `Instant` is not available.
+    pending_arrivals: u64,
     /// Dedup keys of orphan frames dropped from `pending` since the last
     /// [`Self::take_dropped`]. The receive path marked them seen on arrival, so
     /// unless it forgets them the author's re-send is discarded as a repeat and
@@ -185,7 +185,7 @@ impl MeshDoc {
             applied,
             frames: HashMap::new(),
             pending: HashMap::new(),
-            pending_seq: 0,
+            pending_arrivals: 0,
             dropped: Vec::new(),
             gate,
             key: None,
@@ -440,26 +440,36 @@ impl MeshDoc {
 
     /// Buffer an orphan under the per-author and global ceilings.
     ///
-    /// The author ceiling evicts *that author's* stalest orphan, so a peer
-    /// flooding orphans exhausts only itself. A global breach refuses the
-    /// newcomer instead: evicting across authors would let one hostile stream
-    /// push a joiner's honest backfill out of the buffer, which is the failure
-    /// the ceiling exists to prevent. Both mirror the reassembly store.
+    /// The author ceiling keeps *that author's* lowest seqs, so a peer flooding
+    /// orphans exhausts only itself. The lowest seqs are the links next to what
+    /// this doc holds, so they drain first; a kept tail waits on every link
+    /// below it. A global breach refuses the newcomer instead: evicting across
+    /// authors would let one hostile stream push a joiner's honest backfill out
+    /// of the buffer, which is the failure the ceiling exists to prevent. Both
+    /// mirror the reassembly store.
     fn buffer_orphan(&mut self, hash: ChangeHash, change: Change, frame: &Message) -> Ingested {
         if self.pending.contains_key(&hash) {
             return Ingested::Buffered;
         }
-        while self.pending_by(&frame.pubkey) >= DOC_PENDING_AUTHOR_MAX {
-            let Some(victim) = self.stalest_of(&frame.pubkey) else {
-                break;
-            };
+        if self.pending_by(&frame.pubkey) >= DOC_PENDING_AUTHOR_MAX
+            && let Some((victim, victim_seq)) = self.highest_of(&frame.pubkey)
+        {
+            if change.seq() >= victim_seq {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    author = %frame.author,
+                    "channel orphan buffer full for this author; incoming higher-seq orphan refused"
+                );
+                self.dropped.push(frame.dedup_key());
+                return Ingested::Ignored;
+            }
             if let Some(evicted) = self.pending.remove(&victim) {
                 self.dropped.push(evicted.frame.dedup_key());
             }
             tracing::warn!(
                 target: LOG_TARGET,
                 author = %frame.author,
-                "channel orphan buffer full for this author; stalest orphan evicted"
+                "channel orphan buffer full for this author; highest-seq orphan evicted"
             );
         }
         if self.pending.len() >= DOC_PENDING_TOTAL_MAX {
@@ -471,13 +481,13 @@ impl MeshDoc {
             self.dropped.push(frame.dedup_key());
             return Ingested::Ignored;
         }
-        self.pending_seq += 1;
+        self.pending_arrivals += 1;
         self.pending.insert(
             hash,
             Pending {
                 frame: frame.clone(),
                 change,
-                seq: self.pending_seq,
+                arrival: self.pending_arrivals,
             },
         );
         Ingested::Buffered
@@ -499,14 +509,15 @@ impl MeshDoc {
             .count()
     }
 
-    /// This pubkey's earliest-buffered orphan. Keyed on the pubkey rather than
-    /// the nickname, which an author picks freely.
-    fn stalest_of(&self, pubkey: &str) -> Option<ChangeHash> {
+    /// This pubkey's highest-seq orphan and its seq, the latest arrival among
+    /// equals. Keyed on the pubkey rather than the nickname, which an author
+    /// picks freely.
+    fn highest_of(&self, pubkey: &str) -> Option<(ChangeHash, u64)> {
         self.pending
             .iter()
             .filter(|(_, entry)| entry.frame.pubkey == pubkey)
-            .min_by_key(|(_, entry)| entry.seq)
-            .map(|(hash, _)| *hash)
+            .max_by_key(|(_, entry)| (entry.change.seq(), entry.arrival))
+            .map(|(hash, entry)| (*hash, entry.change.seq()))
     }
 
     /// Accounting snapshot `(pending, max_author_pending)` for the adversarial
@@ -786,6 +797,7 @@ mod tests {
     use super::{DOC_PENDING_AUTHOR_MAX, DOC_PENDING_TOTAL_MAX, Ingested, MeshDoc, SelfWriteGate};
     use fofoca_protocol::{Channel, MeshId, Message, Nickname};
     use serde_json::{Value, json};
+    use std::collections::HashSet;
 
     fn nick(name: &str) -> Nickname {
         Nickname::from(name)
@@ -1104,6 +1116,98 @@ mod tests {
             json!({"a": 1, "b": 2}),
             "a flood from one author must not evict another author's orphan"
         );
+    }
+
+    /// A chain one change per key, `k0` first, authored by one actor.
+    fn keyed_chain(len: usize) -> Vec<Message> {
+        let alice = nick("alice");
+        let mut source = MeshDoc::new_ungated();
+        (0..len)
+            .map(|step| author(&mut source, &alice, &json!({ format!("k{step}"): step })))
+            .collect()
+    }
+
+    /// The number of chain changes that landed in `doc`.
+    fn landed(doc: &MeshDoc) -> usize {
+        doc.to_json().as_object().map_or(0, serde_json::Map::len)
+    }
+
+    /// Feed `order` into a fresh sink, then the root prefix `0..root_len`.
+    fn deliver(chain: &[Message], order: &[usize], root_len: usize) -> MeshDoc {
+        let mut sink = MeshDoc::new_ungated();
+        for &step in order {
+            sink.ingest(&chain[step]);
+        }
+        for frame in &chain[..root_len] {
+            sink.ingest(frame);
+        }
+        sink
+    }
+
+    /// A long backfill often reaches a joiner tail first. The buffer must keep
+    /// the links next to what the joiner holds, the lowest seqs: a kept tail
+    /// cannot drain until every link below it arrives again.
+    #[test]
+    fn a_full_orphan_buffer_keeps_the_lowest_seqs_of_an_author() {
+        let chain = keyed_chain(300);
+        let tail: Vec<usize> = (100..300).collect();
+        let sink = deliver(&chain, &tail, 100);
+        assert_eq!(landed(&sink), 100 + DOC_PENDING_AUTHOR_MAX);
+    }
+
+    /// Guard: when the tail arrives lowest seq last, the old arrival order and
+    /// the seq order keep the same links.
+    #[test]
+    fn a_reversed_tail_keeps_the_lowest_seqs_of_an_author() {
+        let chain = keyed_chain(300);
+        let tail: Vec<usize> = (100..300).rev().collect();
+        let sink = deliver(&chain, &tail, 100);
+        assert_eq!(landed(&sink), 100 + DOC_PENDING_AUTHOR_MAX);
+    }
+
+    /// The arrival order does not change which links stay.
+    #[test]
+    fn a_shuffled_tail_keeps_the_lowest_seqs_of_an_author() {
+        let chain = keyed_chain(300);
+        // 7919 shares no factor with 200, so it walks all 200 slots once each.
+        let tail: Vec<usize> = (0..200).map(|slot| 100 + slot * 7919 % 200).collect();
+        let sink = deliver(&chain, &tail, 100);
+        assert_eq!(landed(&sink), 100 + DOC_PENDING_AUTHOR_MAX);
+    }
+
+    /// Every link the buffer let go is handed back to the receive path, and
+    /// only those: the rest drain and must stay seen.
+    #[test]
+    fn a_full_orphan_buffer_reports_the_links_it_let_go() {
+        let chain = keyed_chain(300);
+        let tail: Vec<usize> = (100..300).collect();
+        let mut sink = deliver(&chain, &tail, 100);
+        let dropped: HashSet<[u8; 16]> = sink.take_dropped().into_iter().collect();
+        let let_go: HashSet<[u8; 16]> = chain[100 + DOC_PENDING_AUTHOR_MAX..]
+            .iter()
+            .map(Message::dedup_key)
+            .collect();
+        assert_eq!(dropped, let_go);
+    }
+
+    /// A change at the highest buffered seq is refused, not swapped in, even
+    /// when its content differs: seq is the only order the buffer trusts.
+    #[test]
+    fn a_full_orphan_buffer_refuses_a_second_change_at_its_highest_seq() {
+        let chain = keyed_chain(DOC_PENDING_AUTHOR_MAX + 1);
+        let alice = nick("alice");
+        let mut fork = MeshDoc::new_ungated();
+        let rival = (0..=DOC_PENDING_AUTHOR_MAX)
+            .map(|step| author(&mut fork, &alice, &json!({ format!("r{step}"): step })))
+            .last()
+            .expect("a rival chain");
+
+        let mut sink = MeshDoc::new_ungated();
+        for frame in &chain[1..] {
+            assert!(matches!(sink.ingest(frame), Ingested::Buffered));
+        }
+        assert!(matches!(sink.ingest(&rival), Ingested::Ignored));
+        assert_eq!(sink.take_dropped(), vec![rival.dedup_key()]);
     }
 
     #[test]
