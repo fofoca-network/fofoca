@@ -401,23 +401,34 @@ fn devtools_port(profile: &Path, chrome: &mut Child) -> Result<u16, Skip> {
 }
 
 /// The page target's `WebSocket` URL.
+///
+/// Chrome writes `DevToolsActivePort` before its page target exists, and until
+/// then the list is empty, so the list is read again until a page shows.
 fn page_socket(port: u16) -> Result<String, Skip> {
-    let targets: serde_json::Value = ureq::get(format!("http://127.0.0.1:{port}/json/list"))
-        .call()
-        .and_then(|mut reply| reply.body_mut().read_json())
-        .map_err(|error| Skip(format!("could not list Chrome's targets: {error}")))?;
-    targets
-        .as_array()
-        .into_iter()
-        .flatten()
-        .find(|target| target.get("type").and_then(serde_json::Value::as_str) == Some("page"))
-        .and_then(|target| {
-            target
-                .get("webSocketDebuggerUrl")
-                .and_then(serde_json::Value::as_str)
-        })
-        .map(str::to_owned)
-        .ok_or_else(|| Skip("Chrome has no page to drive".to_owned()))
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let targets: serde_json::Value = ureq::get(format!("http://127.0.0.1:{port}/json/list"))
+            .call()
+            .and_then(|mut reply| reply.body_mut().read_json())
+            .map_err(|error| Skip(format!("could not list Chrome's targets: {error}")))?;
+        let page = targets
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|target| target.get("type").and_then(serde_json::Value::as_str) == Some("page"))
+            .and_then(|target| {
+                target
+                    .get("webSocketDebuggerUrl")
+                    .and_then(serde_json::Value::as_str)
+            });
+        if let Some(url) = page {
+            return Ok(url.to_owned());
+        }
+        if Instant::now() >= deadline {
+            return Err(Skip("Chrome has no page to drive".to_owned()));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 /// One line per console call. A `%c` in the first argument styles the text
@@ -478,4 +489,50 @@ fn time_of_day(params: &serde_json::Value) -> String {
         seconds % 60,
         millis % 1000
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+
+    use super::page_socket;
+
+    /// Answer each `/json/list` request with the next body, then stop.
+    fn fake_devtools(bodies: Vec<&'static str>) -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind a local port");
+        let port = listener.local_addr().expect("local addr").port();
+        std::thread::spawn(move || {
+            for body in bodies {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
+                let mut reader = BufReader::new(stream.try_clone().expect("clone the stream"));
+                let mut line = String::new();
+                while reader.read_line(&mut line).is_ok_and(|read| read > 2) {
+                    line.clear();
+                }
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        port
+    }
+
+    /// Chrome writes `DevToolsActivePort` before its page target exists, and
+    /// in that time its target list is empty.
+    #[test]
+    fn a_page_that_shows_after_the_port_file_is_found() {
+        let port = fake_devtools(vec![
+            "[]",
+            r#"[{"type":"page","webSocketDebuggerUrl":"ws://127.0.0.1/devtools/page/1"}]"#,
+        ]);
+        assert_eq!(
+            page_socket(port).map_err(|skip| skip.0),
+            Ok("ws://127.0.0.1/devtools/page/1".to_owned())
+        );
+    }
 }
