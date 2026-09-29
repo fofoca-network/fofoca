@@ -209,3 +209,35 @@ async fn ip_pair<F: Future<Output = Result<Endpoint, String>>>(
     };
     run.await.into()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{Args, BENCH_ALPN, Bench, Router, ip_addr, rounds, vanilla};
+    use crate::bench::Direction;
+
+    /// An upload's throughput is the bulk it sent, not the token it got back.
+    #[tokio::test]
+    async fn an_upload_sample_counts_the_bulk_it_sent() {
+        let args = Args {
+            only: None,
+            bytes: 64 * 1024,
+            rounds: 1,
+            direction: Direction::Up,
+            list: false,
+            json: None,
+        };
+        let client = vanilla().await.expect("bind the client");
+        let server = vanilla().await.expect("bind the server");
+        let addr = ip_addr(&server).expect("the server has an IPv4 socket");
+        let _router = Router::builder(server).accept(BENCH_ALPN, Bench).spawn();
+
+        let samples = rounds(&client, addr, &args).await.expect("the rounds run");
+
+        let counted: Vec<usize> = samples.iter().map(|sample| sample.bytes).collect();
+        assert!(
+            counted.iter().all(|&bytes| bytes == args.bytes),
+            "samples counted {counted:?} bytes, the upload sent {}",
+            args.bytes
+        );
+    }
+}

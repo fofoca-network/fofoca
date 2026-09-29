@@ -204,7 +204,8 @@ pub async fn browser_endpoint(
 }
 
 /// One exchange in `direction`, sized `bulk`, over an already-open
-/// `connection` to a [`Bench`] server. Returns the reply length.
+/// `connection` to a [`Bench`] server. Returns `bulk`, the bytes that moved in
+/// each measured direction, once the reply is verified.
 ///
 /// No deadline inside: a stall is silent and indefinite, so callers wrap this
 /// in whichever timeout their runtime has, and a benchmark times exactly this
@@ -251,5 +252,5 @@ pub async fn exchange(
         body.len()
     );
     anyhow::ensure!(is_payload(&body), "reply body did not match");
-    Ok(body.len())
+    Ok(bulk)
 }
