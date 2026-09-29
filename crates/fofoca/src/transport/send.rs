@@ -1050,9 +1050,10 @@ mod tests {
 
     /// A serve is counted when the batch is handed to the pool, not when it is
     /// delivered, so a failed batch still costs one, but it does not strand
-    /// the asker: the same digest after the 200 ms repeat interval is answered
-    /// again. Here the failed dial puts the asker on the pool's cooldown, so
-    /// the second answer goes on gossip; the same-plane repeat is
+    /// the asker: the same digest after the repeat interval is answered
+    /// again. Here the pool refuses the second send, because the dial failed
+    /// (a cooldown) or is still in flight, so the second answer goes on
+    /// gossip; the same-plane repeat is
     /// `budget_tests::the_serve_budget_takes_new_heads_up_to_its_count`.
     #[tokio::test]
     async fn after_a_failed_batch_the_asker_is_answered_again_on_gossip() {
@@ -1074,7 +1075,10 @@ mod tests {
             "handed to the pool as a point-to-point batch"
         );
 
-        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(
+            crate::util::tuning::FAST_ROUND_MIN_INTERVAL_MS + 50,
+        ))
+        .await;
         let again = handle_state_digest(Channel::State, &behind, &mut state, &ctx).await;
         assert_eq!(
             again,
@@ -1082,7 +1086,7 @@ mod tests {
                 unicast: 0,
                 broadcast: 3
             },
-            "answered again, on gossip: the failed dial put the asker on the pool's cooldown"
+            "answered again, on gossip: the pool refuses the send, the dial failed or is in flight"
         );
     }
 
