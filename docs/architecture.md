@@ -99,7 +99,7 @@ graph TD
     engine --> logging["fofoca-logging<br>tracing sink"]
     engine --> mh["fofoca-iroh-multihop-transport"]
     engine --> webrtc["fofoca-iroh-webrtc-transport"]
-    engine --> nostr["fofoca-nostr<br>Nostr relay client"]
+    engine --> nostr["fofoca-iroh-nostr-address-lookup<br>Nostr relay client"]
     doc --> proto["fofoca-protocol<br>wire vocabulary"]
     logging --> proto
     proto --> util["fofoca-util<br>host helpers, constants"]
@@ -124,7 +124,7 @@ The engine depends on `fofoca-iroh-webrtc-transport` on both targets: the `nativ
 | `fofoca-chunks` | Content-addressed chunk store: BLAKE3 leaf rows over data the crate does not own. Replaced `fofoca-blobs`. |
 | `fofoca-iroh-webrtc-transport` | An iroh custom transport: QUIC datagrams over a WebRTC data channel. |
 | `fofoca-iroh-multihop-transport` | An iroh custom transport: source-routed relaying through peers. |
-| `fofoca-nostr` | A Nostr relay client: signed ephemeral events, one socket per relay per process. Knows nothing about meshes. Reaches wasm32. |
+| `fofoca-iroh-nostr-address-lookup` | A Nostr relay client: signed ephemeral events, one socket per relay per process. Knows nothing about meshes. Reaches wasm32. |
 
 The measurement that drove the split was a consumer binary where the engine cost 39.4 MiB of 40.7 MiB.
 

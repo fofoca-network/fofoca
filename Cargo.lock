@@ -1536,9 +1536,9 @@ dependencies = [
  "divan",
  "fofoca-doc",
  "fofoca-iroh-multihop-transport",
+ "fofoca-iroh-nostr-address-lookup",
  "fofoca-iroh-webrtc-transport",
  "fofoca-logging",
- "fofoca-nostr",
  "fofoca-protocol",
  "fofoca-util",
  "futures-util",
@@ -1644,6 +1644,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "fofoca-iroh-nostr-address-lookup"
+version = "0.6.0"
+dependencies = [
+ "anyhow",
+ "fofoca-iroh-nostr-address-lookup",
+ "futures-util",
+ "getrandom 0.2.17",
+ "getrandom 0.3.4",
+ "getrandom 0.4.3",
+ "hex",
+ "k256",
+ "n0-future",
+ "rand 0.9.4",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+ "tokio-rustls",
+ "tokio-websockets",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "webpki-roots",
+ "ws_stream_wasm",
+]
+
+[[package]]
 name = "fofoca-iroh-transport-util"
 version = "0.6.0"
 dependencies = [
@@ -1705,34 +1733,6 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "fofoca-nostr"
-version = "0.6.0"
-dependencies = [
- "anyhow",
- "fofoca-nostr",
- "futures-util",
- "getrandom 0.2.17",
- "getrandom 0.3.4",
- "getrandom 0.4.3",
- "hex",
- "k256",
- "n0-future",
- "rand 0.9.4",
- "rustls",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tokio",
- "tokio-rustls",
- "tokio-websockets",
- "tracing",
- "tracing-subscriber",
- "url",
- "webpki-roots",
- "ws_stream_wasm",
 ]
 
 [[package]]
@@ -4961,8 +4961,8 @@ dependencies = [
  "anstyle",
  "clap",
  "fofoca",
+ "fofoca-iroh-nostr-address-lookup",
  "fofoca-iroh-webrtc-transport",
- "fofoca-nostr",
  "serde",
  "serde_json",
  "tokio",

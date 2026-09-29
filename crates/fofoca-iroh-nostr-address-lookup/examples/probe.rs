@@ -2,8 +2,8 @@
 //! ephemeral event between two subscribers, and how fast?
 //!
 //! ```text
-//! cargo run -p fofoca-nostr --example probe             # every candidate
-//! cargo run -p fofoca-nostr --example probe -- cadence wss://relay.example
+//! cargo run -p fofoca-iroh-nostr-address-lookup --example probe             # every candidate
+//! cargo run -p fofoca-iroh-nostr-address-lookup --example probe -- cadence wss://relay.example
 //! ```
 //!
 //! `cadence` runs ten pools on one relay and one tag with the engine's announce
@@ -12,7 +12,7 @@
 
 use std::time::{Duration, Instant};
 
-use fofoca_nostr::Pool;
+use fofoca_iroh_nostr_address_lookup::Pool;
 use url::Url;
 
 /// Trystero's pinned list (2026-09) plus a few large public relays.

@@ -19,7 +19,7 @@ use fofoca::protocol::{
     LookupOpts, MeshConfig, Message, MessageKind, Nickname, PresenceSubtype, TransportPolicy,
 };
 use fofoca::runtime::{Node, SetupKind, SetupParams, derive_topic_mesh_config, setup_mesh};
-use fofoca_nostr::test_relay::TestRelay;
+use fofoca_iroh_nostr_address_lookup::test_relay::TestRelay;
 
 struct Probe;
 
