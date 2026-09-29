@@ -311,6 +311,15 @@ impl MeshDoc {
     /// is never sent — every replica constructs it locally.
     #[must_use]
     pub fn changes_since(&self, have: &[String], max: usize) -> Vec<Message> {
+        self.changes_since_not_by(have, "", max)
+    }
+
+    /// [`Self::changes_since`] without the frames signed by `pubkey`: a peer
+    /// holds every change it signed, since a change's actor is its signer's
+    /// key and a session key lives no longer than its document. Skipped
+    /// before the cap, so the budget goes to what the peer can lack.
+    #[must_use]
+    pub fn changes_since_not_by(&self, have: &[String], pubkey: &str, max: usize) -> Vec<Message> {
         let have: Vec<ChangeHash> = have
             .iter()
             .filter_map(|encoded| decode_hash(encoded))
@@ -318,8 +327,10 @@ impl MeshDoc {
         self.doc
             .get_changes(&have)
             .into_iter()
-            .filter_map(|change| self.frames.get(&change.hash()).cloned())
+            .filter_map(|change| self.frames.get(&change.hash()))
+            .filter(|frame| pubkey.is_empty() || frame.pubkey != pubkey)
             .take(max)
+            .cloned()
             .collect()
     }
 

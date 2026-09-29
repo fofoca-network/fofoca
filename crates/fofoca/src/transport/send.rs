@@ -943,6 +943,53 @@ mod tests {
         assert_eq!(got, expected, "every frame, in order");
     }
 
+    /// A peer holds every change it signed, since a change's actor is its
+    /// signer's key and a session key lives no longer than its document. So
+    /// its own changes are never missing from it, even when it advertises
+    /// heads we do not hold, where we cannot tell what it has.
+    #[tokio::test]
+    async fn a_peer_is_not_sent_its_own_changes() {
+        use crate::gossip::antientropy::handle_state_digest;
+        use crate::protocol::Channel;
+
+        let (bob_endpoint, _bob_sender) = loopback_node().await;
+        let (net, mut state, _frames) = holder(bob_endpoint.addr(), 3).await;
+        state.linked_endpoints.insert(bob_endpoint.id());
+        let author = state.identity.clone();
+        prove_identity(&mut state, &author, bob_endpoint.id());
+        let unknown = serde_json::json!(["heads-we-do-not-hold"]);
+        let from_the_author = digest(&net.mesh, Channel::State, &unknown, &author);
+
+        let answered =
+            handle_state_digest(Channel::State, &from_the_author, &mut state, &net.ctx()).await;
+        assert_eq!(
+            answered.unicast + answered.broadcast,
+            0,
+            "all 3 changes are its own"
+        );
+    }
+
+    /// Unknown heads from anyone else still draw every change: we cannot tell
+    /// what that peer lacks, so we over-serve rather than under-serve.
+    #[tokio::test]
+    async fn a_third_peer_with_unknown_heads_gets_every_change() {
+        use crate::gossip::antientropy::handle_state_digest;
+        use crate::protocol::Channel;
+
+        let (bob_endpoint, _bob_sender) = loopback_node().await;
+        let (net, mut state, _frames) = holder(bob_endpoint.addr(), 3).await;
+        state.linked_endpoints.insert(bob_endpoint.id());
+        let third = crate::protocol::identity::Identity::generate();
+        prove_identity(&mut state, &third, bob_endpoint.id());
+        let unknown = serde_json::json!(["heads-we-do-not-hold"]);
+        let request = digest(&net.mesh, Channel::State, &unknown, &third);
+
+        // The plane does not matter here: our ask back to the peer is still
+        // dialing, so the answer may take gossip.
+        let answered = handle_state_digest(Channel::State, &request, &mut state, &net.ctx()).await;
+        assert_eq!(answered.unicast + answered.broadcast, 3);
+    }
+
     /// A nickname is a label any signer can put on a digest, so it must not
     /// pick the point-to-point target: a digest signed by a key that proved no
     /// endpoint is answered on gossip, even when a linked peer has that

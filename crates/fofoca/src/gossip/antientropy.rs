@@ -807,14 +807,16 @@ pub(crate) async fn handle_state_digest(
 }
 
 /// The signed change frames the author of `digest` lacks on `channel`, up to
-/// the resend budget. Empty for an undecodable digest body.
+/// the resend budget, less the ones it signed itself: with heads we do not
+/// hold we cannot tell what it has and send everything, but its own changes
+/// it always has. Empty for an undecodable digest body.
 fn missing_frames(channel: Channel, digest: &Message, state: &EventLoopState) -> Vec<Message> {
     let Ok(body) = serde_json::from_str::<HeadsBody>(digest.body.as_str()) else {
         return Vec::new();
     };
     state
         .doc(channel)
-        .changes_since(&body.heads, antientropy_max_resend())
+        .changes_since_not_by(&body.heads, &digest.pubkey, antientropy_max_resend())
 }
 
 #[cfg(test)]
