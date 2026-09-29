@@ -33,6 +33,8 @@ anstream = "0.6"
 # in-process and a local relay, so the runner depends on the engine it drives.
 fofoca = { path = "../crates/fofoca", features = ["iroh-test-utils"], optional = true }
 fofoca-pipe = { path = "../crates/fofoca-pipe", optional = true }
+# The in-process Nostr relay the Nostr-only cells meet on.
+fofoca-nostr = { path = "../crates/fofoca-nostr", features = ["test-relay"], optional = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"], optional = true }
 tracing-subscriber = { workspace = true, optional = true }
 
@@ -42,7 +44,7 @@ tracing-subscriber = { workspace = true, optional = true }
 # into `fofoca` (`tasks` is a workspace member, and cargo takes the union of
 # every selected package's features); `cargo task e2e --suite mesh|chat`
 # re-runs itself with this on.
-mesh = ["dep:fofoca", "dep:fofoca-pipe", "dep:tokio", "dep:tracing-subscriber"]
+mesh = ["dep:fofoca", "dep:fofoca-pipe", "dep:fofoca-nostr", "dep:tokio", "dep:tracing-subscriber"]
 
 [lints]
 workspace = true

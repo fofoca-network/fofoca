@@ -109,10 +109,17 @@ pub(crate) async fn graft_proven(
     peer: EndpointId,
 ) {
     state.direct.insert(peer, DirectState::Direct);
-    if !state.linked_endpoints.contains(&peer) && state.linked_endpoints.len() < ctx.max_peers {
+    let linked = state.linked_endpoints.contains(&peer);
+    let full = state.linked_endpoints.len() >= ctx.max_peers;
+    if linked || full {
+        tracing::debug!(target: super::LOG_TARGET, %peer, linked, full, "graft skipped");
+    } else {
         state.note_relink(peer, Instant::now());
-        if let Err(error) = ctx.sender.join_peers(vec![peer]).await {
-            tracing::warn!(target: super::LOG_TARGET, %peer, %error, "graft request failed");
+        match ctx.sender.join_peers(vec![peer]).await {
+            Ok(()) => tracing::debug!(target: super::LOG_TARGET, %peer, "graft requested"),
+            Err(error) => {
+                tracing::warn!(target: super::LOG_TARGET, %peer, %error, "graft request failed");
+            }
         }
     }
     if state.meshed && !state.pending_outbound.is_empty() {
