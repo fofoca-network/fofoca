@@ -52,6 +52,49 @@ impl Drop for Browser {
     }
 }
 
+/// Turn off Chrome's mDNS hiding of host candidates, the `chrome://flags` way,
+/// and return the profile it seeded.
+///
+/// Chrome hides its host IP behind a `.local` name that it resolves with its
+/// own multicast client, and a process started from an agent session gets
+/// `EHOSTUNREACH` on multicast here. So two peer connections in one tab, such
+/// as a tab's member linking to the rendezvous the same tab hosts, never
+/// connect. `agent-browse launch` passes no Chrome flags, but it keeps the
+/// profile at `/tmp/agent-browse/sessions/<folder, `/` as `_`>/profile`, and
+/// Chrome reads `enabled_labs_experiments` from its `Local State` there. The
+/// file is overwritten: the session folder is new for every launch.
+fn show_host_candidates(folder: &std::path::Path) -> Result<PathBuf, Skip> {
+    let folder = folder
+        .canonicalize()
+        .map_err(|error| Skip(format!("could not resolve the session folder: {error}")))?;
+    let session = folder.to_string_lossy().replace('/', "_");
+    let profile = PathBuf::from("/tmp/agent-browse/sessions")
+        .join(session)
+        .join("profile");
+    std::fs::create_dir_all(&profile)
+        .and_then(|()| {
+            std::fs::write(
+                profile.join("Local State"),
+                r#"{"browser":{"enabled_labs_experiments":["enable-webrtc-hide-local-ips-with-mdns@2"]}}"#,
+            )
+        })
+        .map_err(|error| Skip(format!("could not seed the Chrome profile: {error}")))?;
+    Ok(profile)
+}
+
+/// Whether a running Chrome uses `profile`. The seed above depends on where
+/// `agent-browse` keeps its profiles; if that moves, say so at launch rather
+/// than let every in-tab pair fail minutes later. It assumes `agent-browse
+/// launch` returns once Chrome runs; a launch that returned sooner would also
+/// read as a moved profile.
+fn chrome_runs_with(profile: &std::path::Path) -> bool {
+    let wanted = format!("--user-data-dir={}", profile.display());
+    Command::new("ps")
+        .args(["-axo", "command"])
+        .output()
+        .is_ok_and(|ps| String::from_utf8_lossy(&ps.stdout).contains(&wanted))
+}
+
 impl Browser {
     pub(super) fn launch() -> Result<Self, Skip> {
         let folder = std::env::temp_dir().join(format!(
@@ -71,6 +114,7 @@ impl Browser {
                 "could not create the browser session folder: {error}"
             ))
         })?;
+        let profile = show_host_candidates(&folder)?;
 
         let launched = Command::new("agent-browse")
             .args(["launch", "--headless"])
@@ -88,6 +132,16 @@ impl Browser {
                 } else {
                     format!(": {said}")
                 }
+            )));
+        }
+        if !chrome_runs_with(&profile) {
+            let _ = Command::new("agent-browse")
+                .arg("quit")
+                .arg(&folder)
+                .output();
+            return Err(Skip(format!(
+                "agent-browse moved its profile: seeded {}, but no Chrome runs with it",
+                profile.display()
             )));
         }
         Ok(Self {
