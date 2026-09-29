@@ -346,6 +346,9 @@ pub(crate) fn run(args: &Args) -> TaskOutcome {
     }
 
     let mut rows = Vec::new();
+    // Resolved once and only when a cell will run: the lookup can download
+    // Chrome for Testing, and `--list` must launch and fetch nothing.
+    let mut chrome_for_testing: Option<Result<PathBuf, String>> = None;
 
     for profile in args.profiles() {
         // Built lazily and once per profile: a `--only` that matches nothing in
@@ -362,7 +365,11 @@ pub(crate) fn run(args: &Args) -> TaskOutcome {
             }
 
             let missing = match browser.backend {
-                Backend::Cdp => cdp::chrome_for_testing().err().map(|Skip(why)| why),
+                Backend::Cdp if args.list => None,
+                Backend::Cdp => chrome_for_testing
+                    .get_or_insert_with(|| cdp::chrome_for_testing().map_err(|Skip(why)| why))
+                    .clone()
+                    .err(),
                 Backend::WebDriver => (!PathBuf::from(&browser.binary).exists())
                     .then(|| format!("not installed: {}", browser.binary)),
             };
