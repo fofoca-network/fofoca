@@ -293,7 +293,11 @@ async fn broadcast_state_digest(
     channel: Channel,
     trigger: DigestTrigger,
 ) {
-    if trigger == DigestTrigger::Event && state.fast_rounds.active(channel, Instant::now()) {
+    let now = Instant::now();
+    if trigger == DigestTrigger::Event
+        && (state.fast_rounds.active(channel, now)
+            || state.fast_rounds.changed_recently(channel, now))
+    {
         return;
     }
     let Some(digest) = state_digest(state, origin, channel) else {
@@ -496,6 +500,15 @@ impl FastRounds {
     /// A change landed on `channel`: an answer's frames are still arriving.
     pub(crate) fn note_change(&mut self, channel: Channel, now: Instant) {
         self.last_change.insert(channel, now);
+    }
+
+    /// Whether a change landed on `channel` within [`FAST_ROUND_MIN_INTERVAL_MS`]:
+    /// a holder is serving us, so a digest an event would send now draws a
+    /// second answer that overlaps the one arriving.
+    pub(crate) fn changed_recently(&self, channel: Channel, now: Instant) -> bool {
+        self.last_change
+            .get(&channel)
+            .is_some_and(|&changed| now.duration_since(changed) < Self::MIN_INTERVAL)
     }
 
     /// Where a round's wait starts: its ask, or the last change that landed
@@ -1014,6 +1027,49 @@ mod budget_tests {
             state.idle.broadcasts - before,
             1,
             "only the meta digest: state waits"
+        );
+        let before_tick = state.idle.broadcasts;
+        broadcast_state_digests(&mut state, &sender, &mesh, &author, DigestTrigger::Tick).await;
+        assert_eq!(
+            state.idle.broadcasts - before_tick,
+            2,
+            "the tick sends both"
+        );
+        endpoint.close().await;
+    }
+
+    /// A node that just got a change has a holder serving it, so a digest an
+    /// event sends then waits: sent while the first answer arrives, it drew
+    /// a second answer that overlapped the first. The tick still goes out.
+    #[tokio::test]
+    async fn an_event_digest_waits_while_changes_arrive() {
+        use super::{DigestTrigger, broadcast_state_digests};
+        use crate::protocol::MeshId;
+
+        let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .bind()
+            .await
+            .expect("bind a local endpoint");
+        let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
+        let topic = gossip
+            .subscribe(iroh_gossip::proto::TopicId::from_bytes([6u8; 32]), vec![])
+            .await
+            .expect("subscribe to a peerless topic");
+        let (gossip_sender, _receiver) = topic.split();
+        let sender = crate::transport::MeshSender::new(gossip_sender);
+        let mut state = crate::testing::fresh_state();
+        state.meshed = true;
+        state
+            .fast_rounds
+            .note_change(Channel::State, Instant::now());
+        let (mesh, author) = (MeshId::from("test"), nick("late"));
+
+        let before = state.idle.broadcasts;
+        broadcast_state_digests(&mut state, &sender, &mesh, &author, DigestTrigger::Event).await;
+        assert_eq!(
+            state.idle.broadcasts - before,
+            1,
+            "only the meta digest: a state change just landed"
         );
         let before_tick = state.idle.broadcasts;
         broadcast_state_digests(&mut state, &sender, &mesh, &author, DigestTrigger::Tick).await;
