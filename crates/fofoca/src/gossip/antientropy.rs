@@ -294,6 +294,7 @@ async fn broadcast_state_digest(
         return;
     };
     state.idle.broadcasts += 1;
+    tracing::debug!(me = %origin.author, ?channel, heads = heads_key(&digest), ?trigger, "broadcast a state digest on gossip");
     broadcast_msg(sender, &digest).await;
 }
 
@@ -677,7 +678,7 @@ async fn ask(
     state
         .fast_rounds
         .note_asked(pubkey.to_owned(), channel, ours_key, changes, now);
-    tracing::debug!(me = %ctx.author, peer = %author, ?channel, "asked a peer that is ahead for state directly (fast round)");
+    tracing::debug!(me = %ctx.author, peer = %author, ?channel, heads = ours_key, "asked a peer that is ahead for state directly (fast round)");
     true
 }
 
@@ -733,7 +734,7 @@ pub(crate) async fn handle_state_digest(
     };
     // Before the query: a refused digest costs no `changes_since`.
     if !state.state_digest_serves.admits(&serve(plane), heads, now) {
-        tracing::debug!(author = %message.author, ?channel, ?plane, "state digest ignored: this asker was served within the window");
+        tracing::debug!(me = %ctx.author, author = %message.author, ?channel, ?plane, heads, "state digest ignored: this asker was served within the window");
         return Answered::default();
     }
     let frames: Vec<Bytes> = missing_frames(channel, message, state)
@@ -774,7 +775,7 @@ pub(crate) async fn handle_state_digest(
                 .state_digest_serves
                 .admits(&serve(Plane::Gossip), heads, now)
         {
-            tracing::debug!(author = %message.author, ?channel, "state digest ignored: the unicast send could not start and the gossip answers are used up for this window");
+            tracing::debug!(me = %ctx.author, author = %message.author, ?channel, heads, "state digest ignored: the unicast send could not start and the gossip answers are used up for this window");
             return answered;
         }
         for bytes in frames {
@@ -791,8 +792,10 @@ pub(crate) async fn handle_state_digest(
             .note(serve(Plane::Unicast), heads, now);
     }
     tracing::debug!(
+        me = %ctx.author,
         asker = %message.author,
         ?channel,
+        heads,
         unicast = answered.unicast,
         broadcast = answered.broadcast,
         on_gossip_because = fallback.unwrap_or("-"),
