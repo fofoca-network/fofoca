@@ -131,6 +131,12 @@ pub(super) fn chrome_for_testing() -> Result<PathBuf, Skip> {
             .is_ok_and(|status| status.success());
     if unpacked {
         let folder = format!("chrome-{platform}");
+        // A folder without the binary is stale, not a winner: a CI cache step
+        // that prunes `target/` restores the folder with the binary gone, and
+        // the rename below cannot replace a folder that is not empty.
+        if !binary.exists() {
+            let _ = std::fs::remove_dir_all(root.join(&folder));
+        }
         let _ = std::fs::rename(unpack.join(&folder), root.join(&folder));
     }
     let _ = std::fs::remove_file(&zip);
