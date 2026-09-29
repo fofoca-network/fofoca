@@ -976,6 +976,97 @@ mod tests {
         );
     }
 
+    /// Two answers in flight at once each end with the holder's heads, and our
+    /// heads move with every frame of either. Asking again on each of them
+    /// ran two chains of asks, and each round cost the holder two of its
+    /// serves, so a long backfill ran out of them. The holder is asked again
+    /// at once only after a full answer landed since the last ask.
+    #[tokio::test]
+    async fn a_partial_answer_does_not_ask_the_round_peer_again_at_once() {
+        use crate::gossip::antientropy::handle_state_digest;
+        use crate::protocol::Channel;
+
+        let (bob_endpoint, _bob_sender) = loopback_node().await;
+        let bob_addr = bob_endpoint.addr();
+        let (connected_tx, connected_rx) = tokio::sync::oneshot::channel();
+        let _bob = tokio::spawn(async move {
+            let conn = bob_endpoint
+                .accept()
+                .await
+                .expect("an incoming connection")
+                .await
+                .expect("accept the connection");
+            let _ = connected_tx.send(());
+            while let Ok(mut stream) = conn.accept_uni().await {
+                let _ = stream.read_to_end(1 << 20).await;
+            }
+            bob_endpoint
+        });
+        let (net, mut state, _frames) = holder(bob_addr.clone(), 3).await;
+        state.linked_endpoints.insert(bob_addr.id);
+        let ctx = net.ctx();
+        let bob = crate::protocol::identity::Identity::generate();
+        let ahead = digest(
+            &net.mesh,
+            Channel::State,
+            &serde_json::json!(["ahead"]),
+            &bob,
+        );
+        // Warm first: the second digest must come inside the 200 ms interval,
+        // with no dial in between.
+        assert!(
+            state
+                .unicast_pool
+                .send_batch_in_background(bob_addr.id, Vec::new())
+                .await
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(5), connected_rx)
+            .await
+            .expect("the dial to bob completes")
+            .expect("bob's task reports the connection");
+
+        handle_state_digest(Channel::State, &ahead, &mut state, &ctx).await;
+        let first = state.fast_rounds.asked_heads(Channel::State);
+        assert!(first.is_some(), "bob is ahead, so we ask him");
+
+        apply_one(&mut state, &net.mesh, 100);
+        handle_state_digest(Channel::State, &ahead, &mut state, &ctx).await;
+        assert_eq!(
+            state.fast_rounds.asked_heads(Channel::State),
+            first,
+            "one change landed since the ask: not a full answer, so no new ask"
+        );
+
+        for step in 101..101 + crate::util::tuning::antientropy_max_resend() {
+            apply_one(&mut state, &net.mesh, step);
+        }
+        handle_state_digest(Channel::State, &ahead, &mut state, &ctx).await;
+        assert_ne!(
+            state.fast_rounds.asked_heads(Channel::State),
+            first,
+            "a full answer landed since the ask, so we ask again at once"
+        );
+    }
+
+    /// Apply one local state change, as a frame from the network would land.
+    fn apply_one(state: &mut EventLoopState, mesh: &MeshId, step: usize) {
+        use crate::protocol::Channel;
+
+        let seed = *state.identity.public().as_bytes();
+        let change = state
+            .doc(Channel::State)
+            .build_change(&serde_json::json!({ format!("k{step}"): step }), &seed)
+            .expect("a JSON object merges")
+            .expect("a non-empty merge yields a change");
+        let (wire, _plain) = state
+            .doc(Channel::State)
+            .compose_wire_body(&change, None)
+            .expect("compose the wire body");
+        let frame = Message::new_channel_event(mesh, &nick("alice"), wire, Channel::State)
+            .signed(&state.identity);
+        let _ = state.doc_mut(Channel::State).ingest(&frame);
+    }
+
     /// A digest with nothing to answer must not use up the window: the
     /// asker's next digest, with a real gap, is still served. (The gate is
     /// checked before the missing-frames query, which this test cannot see.)

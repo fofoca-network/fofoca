@@ -382,6 +382,16 @@ impl ServeBudget {
     }
 }
 
+/// The running fast round of one channel: the peer we ask, when we last
+/// asked, and our heads and change count at that ask.
+#[derive(Debug)]
+struct Round {
+    peer: String,
+    at: Instant,
+    heads: u64,
+    changes: usize,
+}
+
 /// A peer whose heads showed it is ahead of us.
 #[derive(Debug, Clone)]
 struct Waiting {
@@ -400,9 +410,8 @@ struct Waiting {
 /// frames that reach its unicast inbox.
 #[derive(Debug, Default)]
 pub(crate) struct FastRounds {
-    /// The running round per channel: the peer we ask, when we last asked,
-    /// and with which of our heads.
-    rounds: HashMap<Channel, (String, Instant, u64)>,
+    /// The running round per channel.
+    rounds: HashMap<Channel, Round>,
     /// Per channel, the peers whose heads showed they are ahead of us. A
     /// round can die with no progress (a request or its answer is lost, or its
     /// peer refuses us), and nothing else would ask them before the tick.
@@ -413,27 +422,59 @@ impl FastRounds {
     const MIN_INTERVAL: Duration = Duration::from_millis(FAST_ROUND_MIN_INTERVAL_MS);
     const ACTIVE: Duration = Duration::from_millis(FAST_ROUND_ACTIVE_MS);
 
-    /// The peer of the running round may be asked at once with new heads: the
-    /// answer we just applied moved them, and the heads that close its answer
-    /// are the cue to go on. The same heads wait [`FAST_ROUND_MIN_INTERVAL_MS`],
-    /// so a peer that advertises heads nobody can hold costs one small frame
-    /// per interval. Another peer starts a round only when the running one
-    /// went quiet for [`FAST_ROUND_ACTIVE_MS`], the longer of the two times.
-    fn may_ask(&self, peer: &str, channel: Channel, heads: u64, now: Instant) -> bool {
-        self.rounds
-            .get(&channel)
-            .is_none_or(|(round_peer, at, asked_heads)| {
-                let quiet = now.duration_since(*at);
-                if round_peer == peer {
-                    *asked_heads != heads || quiet >= Self::MIN_INTERVAL
-                } else {
-                    quiet >= Self::ACTIVE
-                }
-            })
+    /// The peer of the running round may be asked at once once a full answer
+    /// landed since the last ask: the heads that close an answer are the cue
+    /// to go on. New heads alone are not, because two answers can be in
+    /// flight at once and our heads move with every frame of either; asking
+    /// on each ran two chains of asks at two serves per round. Otherwise the
+    /// round waits [`FAST_ROUND_MIN_INTERVAL_MS`] or the retry tick, 400 to
+    /// 800 ms, so a peer that advertises heads nobody can hold costs one small
+    /// frame per interval. A holder with a smaller resend budget never sends a
+    /// full answer, so each of its rounds takes that wait. Another peer starts
+    /// a round only when the running one went quiet for
+    /// [`FAST_ROUND_ACTIVE_MS`].
+    fn may_ask(
+        &self,
+        peer: &str,
+        channel: Channel,
+        heads: u64,
+        changes: usize,
+        now: Instant,
+    ) -> bool {
+        self.rounds.get(&channel).is_none_or(|round| {
+            let quiet = now.duration_since(round.at);
+            if round.peer == peer {
+                let answered = changes.saturating_sub(round.changes) >= antientropy_max_resend();
+                (round.heads != heads && answered) || quiet >= Self::MIN_INTERVAL
+            } else {
+                quiet >= Self::ACTIVE
+            }
+        })
     }
 
-    fn note_asked(&mut self, peer: String, channel: Channel, heads: u64, now: Instant) {
-        self.rounds.insert(channel, (peer, now, heads));
+    fn note_asked(
+        &mut self,
+        peer: String,
+        channel: Channel,
+        heads: u64,
+        changes: usize,
+        now: Instant,
+    ) {
+        self.rounds.insert(
+            channel,
+            Round {
+                peer,
+                at: now,
+                heads,
+                changes,
+            },
+        );
+    }
+
+    /// Our heads when we last asked for `channel`, if a round ran.
+    #[cfg(test)]
+    pub(crate) fn asked_heads(&self, channel: Channel) -> Option<u64> {
+        self.rounds.get(&channel).map(|round| round.heads)
     }
 
     fn note_ahead(
@@ -486,8 +527,8 @@ impl FastRounds {
         let ahead = self.ahead.get_mut(&channel)?;
         ahead.retain(|peer| !holds(&peer.heads) && Self::fresh(peer, now));
         let round = self.rounds.get(&channel);
-        if round.is_some_and(|(_, at, _)| {
-            now.duration_since(*at) < Duration::from_millis(FAST_ROUND_RETRY_MS)
+        if round.is_some_and(|round| {
+            now.duration_since(round.at) < Duration::from_millis(FAST_ROUND_RETRY_MS)
         }) {
             return None;
         }
@@ -495,12 +536,9 @@ impl FastRounds {
             .iter()
             .filter(|peer| reachable(&peer.author))
             .collect();
-        let round_index = round.and_then(|(round_peer, _, _)| {
-            candidates
-                .iter()
-                .position(|peer| &peer.pubkey == round_peer)
-        });
-        let progress = round.is_none_or(|(_, _, asked_heads)| *asked_heads != ours);
+        let round_index =
+            round.and_then(|round| candidates.iter().position(|peer| peer.pubkey == round.peer));
+        let progress = round.is_none_or(|round| round.heads != ours);
         let pick = match round_index {
             Some(index) if progress => candidates.get(index),
             Some(index) => candidates.get((index + 1) % candidates.len()),
@@ -516,7 +554,7 @@ impl FastRounds {
     pub(crate) fn active(&self, channel: Channel, now: Instant) -> bool {
         self.rounds
             .get(&channel)
-            .is_some_and(|(_, at, _)| now.duration_since(*at) < Self::ACTIVE)
+            .is_some_and(|round| now.duration_since(round.at) < Self::ACTIVE)
     }
 }
 
@@ -543,10 +581,13 @@ async fn ask_back(
         body.heads,
         now,
     );
-    if state
-        .fast_rounds
-        .may_ask(&digest.pubkey, channel, heads_key_of(state, channel), now)
-    {
+    if state.fast_rounds.may_ask(
+        &digest.pubkey,
+        channel,
+        heads_key_of(state, channel),
+        state.doc(channel).change_count(),
+        now,
+    ) {
         ask(channel, &digest.pubkey, &digest.author, state, ctx).await;
     } else {
         tracing::debug!(me = %ctx.author, peer = %digest.author, ?channel, "a peer is ahead, but a fast round waits");
@@ -632,9 +673,10 @@ async fn ask(
     {
         return false;
     }
+    let changes = state.doc(channel).change_count();
     state
         .fast_rounds
-        .note_asked(pubkey.to_owned(), channel, ours_key, now);
+        .note_asked(pubkey.to_owned(), channel, ours_key, changes, now);
     tracing::debug!(me = %ctx.author, peer = %author, ?channel, "asked a peer that is ahead for state directly (fast round)");
     true
 }
@@ -778,7 +820,7 @@ mod budget_tests {
     use crate::protocol::{Channel, Nickname};
     use crate::testing::nick;
     use crate::util::clock::Instant;
-    use crate::util::tuning::ANTIENTROPY_SERVES_PER_WINDOW;
+    use crate::util::tuning::{ANTIENTROPY_SERVES_PER_WINDOW, antientropy_max_resend};
 
     fn key() -> (String, Channel, Plane) {
         ("asker".to_owned(), Channel::State, Plane::Unicast)
@@ -837,7 +879,7 @@ mod budget_tests {
             alice_heads.clone(),
             now,
         );
-        rounds.note_asked("alice".to_owned(), channel, 1, now);
+        rounds.note_asked("alice".to_owned(), channel, 1, 0, now);
         let never_held = |_: &[String]| false;
         let all_reachable = |_: &Nickname| true;
         let moved = 2;
@@ -910,7 +952,7 @@ mod budget_tests {
         state.meshed = true;
         state
             .fast_rounds
-            .note_asked("holder".to_owned(), Channel::State, 1, Instant::now());
+            .note_asked("holder".to_owned(), Channel::State, 1, 0, Instant::now());
         let (mesh, author) = (MeshId::from("test"), nick("late"));
 
         let before = state.idle.broadcasts;
@@ -965,36 +1007,44 @@ mod budget_tests {
     }
 
     #[test]
-    fn a_fast_round_waits_only_for_the_same_heads() {
+    fn a_fast_round_waits_for_a_full_answer_or_the_interval() {
         let now = Instant::now();
+        let full = antientropy_max_resend();
         let mut rounds = FastRounds::default();
         let state = Channel::State;
-        assert!(rounds.may_ask("holder", state, 1, now));
-        rounds.note_asked("holder".to_owned(), state, 1, now);
+        assert!(rounds.may_ask("holder", state, 1, 0, now));
+        rounds.note_asked("holder".to_owned(), state, 1, 0, now);
         assert!(rounds.active(state, now));
         assert!(!rounds.active(Channel::Meta, now));
         assert!(
-            !rounds.may_ask("holder", state, 1, now),
+            !rounds.may_ask("holder", state, 1, 0, now),
             "the same heads at once"
         );
-        assert!(rounds.may_ask("holder", state, 2, now), "new heads at once");
         assert!(
-            !rounds.may_ask("other", state, 2, now),
+            !rounds.may_ask("holder", state, 2, 5, now),
+            "new heads after a partial answer wait"
+        );
+        assert!(
+            rounds.may_ask("holder", state, 2, full, now),
+            "new heads after a full answer at once"
+        );
+        assert!(
+            !rounds.may_ask("other", state, 2, full, now),
             "another peer while the round runs"
         );
         assert!(
-            rounds.may_ask("other", Channel::Meta, 2, now),
+            rounds.may_ask("other", Channel::Meta, 2, full, now),
             "another channel"
         );
         let later = now + Duration::from_millis(250);
         assert!(
-            rounds.may_ask("holder", state, 1, later),
+            rounds.may_ask("holder", state, 1, 0, later),
             "the same heads after the interval"
         );
         let quiet = now + Duration::from_secs(2);
         assert!(!rounds.active(state, quiet));
         assert!(
-            rounds.may_ask("other", state, 2, quiet),
+            rounds.may_ask("other", state, 2, full, quiet),
             "another peer once the round is quiet"
         );
     }

@@ -299,6 +299,12 @@ impl MeshDoc {
         self.doc.get_heads().iter().map(encode_hash).collect()
     }
 
+    /// How many changes this document holds, the internal genesis included.
+    #[must_use]
+    pub fn change_count(&self) -> usize {
+        self.applied.len()
+    }
+
     /// The signed frames for changes a peer with heads `have` is missing, newest
     /// causal frontier first, capped at `max`. Undecodable heads are ignored (we
     /// then over-serve, never under-serve). The genesis change has no frame and
