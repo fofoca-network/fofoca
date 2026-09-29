@@ -1248,6 +1248,19 @@ async fn handle_peer_info(
     if peer_id == ctx.rendezvous_id {
         return;
     }
+    // The only binding a digest's answer may follow: this signer proved it
+    // owns `peer_id`. A `PeerInfo` arrives many times, so a known pair is not
+    // checked again.
+    if let (Some(signer), Some(proof)) = (
+        crate::transport::endpoint_proof::signer_bytes(&message.pubkey),
+        parsed["proof"].as_str(),
+    ) && state.proven_endpoints.get(&signer) != Some(peer_id)
+        && crate::transport::endpoint_proof::verifies(peer_id, ctx.mesh, &signer, proof)
+    {
+        state
+            .proven_endpoints
+            .insert(signer, peer_id, &state.linked_endpoints);
+    }
     // Remember every advertised peer for the rendezvous-independent
     // re-bridge, and register its address once. Unconditional on link
     // state — a `PeerInfo` normally arrives over an already-formed link,
@@ -1787,6 +1800,73 @@ mod first_contact_tests {
                 sink: &self.sink,
             }
         }
+    }
+
+    /// A `PeerInfo` binds its signer to its endpoint only with that endpoint's
+    /// proof over that signer. Bob's proof is public on gossip, so a frame that
+    /// carries it but is signed by another key must bind nothing.
+    #[tokio::test]
+    async fn a_peer_info_binds_its_signer_only_with_the_endpoints_proof() {
+        use crate::protocol::identity::encode_pubkey;
+        use crate::protocol::message::MessageBody;
+        use crate::protocol::peer_addr::endpoint_addr_to_json;
+        use crate::transport::endpoint_proof::{sign, signer_bytes};
+
+        let node = Node::spawn().await;
+        let ctx = node.ctx();
+        let bob_endpoint_key = iroh::SecretKey::generate();
+        let bob_endpoint = bob_endpoint_key.public();
+        let bob = Identity::generate();
+        let stranger = Identity::generate();
+        let bob_signer = signer_bytes(&encode_pubkey(&bob.public())).expect("a 32-byte key");
+        let peer_info = |proof: Option<&str>, signed_by: &Identity| {
+            let mut json = endpoint_addr_to_json(&iroh::EndpointAddr::new(bob_endpoint));
+            if let Some(proof) = proof {
+                json["proof"] = serde_json::Value::String(proof.to_owned());
+            }
+            let body = MessageBody::new(json.to_string()).expect("an address body");
+            Message::new_peer_info(&node.mesh, &nick("bob"), body).signed(signed_by)
+        };
+        let bobs_proof = sign(&bob_endpoint_key, &node.mesh, &bob_signer);
+
+        let mut state = fresh_state();
+        super::handle_peer_info(
+            &peer_info(Some(&bobs_proof), &stranger),
+            bytes::Bytes::new(),
+            &mut state,
+            &ctx,
+        )
+        .await;
+        let stranger_signer =
+            signer_bytes(&encode_pubkey(&stranger.public())).expect("a 32-byte key");
+        assert_eq!(
+            state.proven_endpoints.get(&stranger_signer),
+            None,
+            "bob's proof, another signer"
+        );
+
+        super::handle_peer_info(
+            &peer_info(None, &bob),
+            bytes::Bytes::new(),
+            &mut state,
+            &ctx,
+        )
+        .await;
+        assert_eq!(state.proven_endpoints.get(&bob_signer), None, "no proof");
+
+        super::handle_peer_info(
+            &peer_info(Some(&bobs_proof), &bob),
+            bytes::Bytes::new(),
+            &mut state,
+            &ctx,
+        )
+        .await;
+        assert_eq!(
+            state.proven_endpoints.get(&bob_signer),
+            Some(bob_endpoint),
+            "bob's proof, bob's frame"
+        );
+        node.endpoint.close().await;
     }
 
     /// The tie-break defers the first dial to the lower endpoint id. A second

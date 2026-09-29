@@ -525,7 +525,7 @@ impl FastRounds {
         now: Instant,
         ours: u64,
         holds: impl Fn(&[String]) -> bool,
-        reachable: impl Fn(&Nickname) -> bool,
+        reachable: impl Fn(&str) -> bool,
     ) -> Option<(String, Nickname)> {
         let ahead = self.ahead.get_mut(&channel)?;
         ahead.retain(|peer| !holds(&peer.heads) && Self::fresh(peer, now));
@@ -537,7 +537,7 @@ impl FastRounds {
         }
         let candidates: Vec<&Waiting> = ahead
             .iter()
-            .filter(|peer| reachable(&peer.author))
+            .filter(|peer| reachable(&peer.pubkey))
             .collect();
         let round_index =
             round.and_then(|round| candidates.iter().position(|peer| peer.pubkey == round.peer));
@@ -622,10 +622,10 @@ pub(crate) async fn resume_fast_rounds(state: &mut EventLoopState, ctx: &Handler
             .filter(|peer| state.doc(channel).holds_heads(&peer.heads))
             .map(|peer| peer.heads.as_slice())
             .collect();
-        let reachable: Vec<&Nickname> = ahead
+        let reachable: Vec<&str> = ahead
             .iter()
-            .filter(|peer| crate::transport::unicast_answer_target(&peer.author, state).is_some())
-            .map(|peer| &peer.author)
+            .filter(|peer| crate::transport::unicast_answer_target(&peer.pubkey, state).is_some())
+            .map(|peer| peer.pubkey.as_str())
             .collect();
         let ours = heads_key_of(state, channel);
         let target = state.fast_rounds.retry_target(
@@ -633,7 +633,7 @@ pub(crate) async fn resume_fast_rounds(state: &mut EventLoopState, ctx: &Handler
             now,
             ours,
             |heads| held.contains(&heads),
-            |author| reachable.contains(&author),
+            |pubkey| reachable.contains(&pubkey),
         );
         let Some((pubkey, author)) = target else {
             continue;
@@ -654,7 +654,7 @@ async fn ask(
     state: &mut EventLoopState,
     ctx: &HandlerCtx<'_>,
 ) -> bool {
-    let Some(eid) = crate::transport::unicast_answer_target(author, state) else {
+    let Some(eid) = crate::transport::unicast_answer_target(pubkey, state) else {
         return false;
     };
     let origin = DigestOrigin {
@@ -728,7 +728,7 @@ pub(crate) async fn handle_state_digest(
     let now = Instant::now();
     let heads = heads_key(message);
     let serve = |plane| (message.pubkey.clone(), channel, plane);
-    let target = crate::transport::unicast_answer_target(&message.author, state);
+    let target = crate::transport::unicast_answer_target(&message.pubkey, state);
     let plane = if target.is_some() {
         Plane::Unicast
     } else {
@@ -758,7 +758,7 @@ pub(crate) async fn handle_state_digest(
         .and_then(|ours| ours.serialize().ok())
         .map(Bytes::from);
     let fallback = match target {
-        None => Some("asker is not a linked neighbor with a direct path"),
+        None => Some("asker has no proven endpoint that is a linked neighbor with a direct path"),
         Some(eid)
             if state
                 .unicast_pool
@@ -822,7 +822,7 @@ mod budget_tests {
     use std::time::Duration;
 
     use super::{FastRounds, Plane, ServeBudget};
-    use crate::protocol::{Channel, Nickname};
+    use crate::protocol::Channel;
     use crate::testing::nick;
     use crate::util::clock::Instant;
     use crate::util::tuning::{ANTIENTROPY_SERVES_PER_WINDOW, antientropy_max_resend};
@@ -886,13 +886,13 @@ mod budget_tests {
         );
         rounds.note_asked("alice".to_owned(), channel, 1, 0, now);
         let never_held = |_: &[String]| false;
-        let all_reachable = |_: &Nickname| true;
+        let all_reachable = |_: &str| true;
         let moved = 2;
         let pick = |fast: &mut FastRounds,
                     at,
                     ours,
                     holds: &dyn Fn(&[String]) -> bool,
-                    reachable: &dyn Fn(&Nickname) -> bool| {
+                    reachable: &dyn Fn(&str) -> bool| {
             fast.retry_target(channel, at, ours, holds, reachable)
                 .map(|(pubkey, _)| pubkey)
         };
@@ -914,7 +914,7 @@ mod budget_tests {
             Some("early"),
             "no progress since the last ask: the next peer"
         );
-        let alice_away = |nick: &Nickname| nick.as_str() != "alice";
+        let alice_away = |pubkey: &str| pubkey != "alice";
         assert_eq!(
             pick(&mut rounds, quiet, moved, &never_held, &alice_away).as_deref(),
             Some("early"),

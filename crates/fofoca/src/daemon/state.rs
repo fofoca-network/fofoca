@@ -164,6 +164,12 @@ pub struct EventLoopState {
     /// addresses — so the re-bridge no longer depends on the rendezvous.
     /// Bounded FIFO (cap `KNOWN_ENDPOINTS_CAP`) so it can't grow without limit.
     pub(crate) known_endpoints: BoundedFifoSet<EndpointId>,
+    /// The endpoint each signing key proved in its `PeerInfo`: the only
+    /// point-to-point target an anti-entropy answer may take, since a
+    /// nickname is a label any signer can claim.
+    pub(crate) proven_endpoints: crate::transport::endpoint_proof::ProvenEndpoints,
+    /// Our own `PeerInfo` proof, made once: it is the same for the session.
+    pub(crate) peer_info_proof: Option<String>,
     /// Per-endpoint re-link throttle: caps re-dialing + re-flooding a peer
     /// learned via `PeerInfo` to once per window. Tracked *across*
     /// `NeighborDown` (unlike `linked_endpoints`), so a flapping/unstable peer
@@ -628,6 +634,10 @@ impl EventLoopState {
             path_watchers: HashMap::new(),
             path_kinds: HashMap::new(),
             known_endpoints: BoundedFifoSet::new(KNOWN_ENDPOINTS_CAP),
+            proven_endpoints: crate::transport::endpoint_proof::ProvenEndpoints::new(
+                KNOWN_ENDPOINTS_CAP,
+            ),
+            peer_info_proof: None,
             relink: Cooldown::new(RELINK_COOLDOWN),
             peerinfo: Cooldown::new(RELINK_COOLDOWN),
             peerinfo_flooded_at: None,
@@ -817,6 +827,7 @@ impl EventLoopState {
     /// connection, which outlives a gossip link but not the peer.
     pub(crate) fn forget_peer_endpoint(&mut self, nick: &str) -> Option<EndpointAddr> {
         let addr = self.peer_endpoints.remove(nick)?;
+        self.proven_endpoints.forget_endpoint(addr.id);
         self.direct.remove(&addr.id);
         self.path_watchers.remove(&addr.id);
         self.path_kinds.remove(&addr.id);

@@ -136,18 +136,19 @@ fn route(msg: &Message, state: &EventLoopState) -> Route {
     }
 }
 
-/// Where an answer to `asker`'s state digest can go point-to-point: its
-/// endpoint, when it is a linked gossip neighbor with a usable path. Linked,
-/// because every holder that hears a digest answers it, and one answer is up
-/// to a whole resend budget of frames: the asker's link count bounds how many
-/// answers reach its unicast inbox. Linked also proves the address; a digest
-/// must never make us dial an address a `PeerInfo` merely claimed. `None`
-/// means answer as before, on gossip.
-pub(crate) fn unicast_answer_target(
-    asker: &Nickname,
-    state: &EventLoopState,
-) -> Option<EndpointId> {
-    let eid = directed_endpoint(asker, state)?;
+/// Where an answer to the digest signed by `signer` (its hex `pubkey`) can go
+/// point-to-point: the endpoint that key proved in its `PeerInfo`, when it is
+/// a linked gossip neighbor with a usable path. Proven, because a nickname is
+/// a label any signer can claim, and one answer is up to a whole resend budget
+/// of frames aimed at whoever holds that endpoint. Linked, because every
+/// holder that hears a digest answers it: the asker's link count bounds how
+/// many answers reach its unicast inbox. `None` means answer on gossip.
+pub(crate) fn unicast_answer_target(signer: &str, state: &EventLoopState) -> Option<EndpointId> {
+    let signer = crate::transport::endpoint_proof::signer_bytes(signer)?;
+    let eid = state
+        .proven_endpoints
+        .get(&signer)
+        .filter(|eid| state.rendezvous_id != Some(*eid))?;
     (state.linked_endpoints.contains(&eid) && !held(eid, state)).then_some(eid)
 }
 
@@ -744,11 +745,11 @@ mod tests {
     fn a_digest_answer_goes_point_to_point_only_to_a_linked_neighbor() {
         use super::unicast_answer_target;
         let bob = endpoint_id(1);
+        let bob_key = "bb".repeat(32);
+        let carol_key = "cc".repeat(32);
         let linked = || {
             let mut state = fresh_state();
-            state
-                .peer_endpoints
-                .insert(nick("bob"), iroh::EndpointAddr::new(bob));
+            prove(&mut state, &bob_key, bob);
             state
                 .direct
                 .insert(bob, crate::daemon::state::DirectState::Direct);
@@ -756,33 +757,51 @@ mod tests {
             state
         };
 
-        assert_eq!(unicast_answer_target(&nick("bob"), &linked()), Some(bob));
+        assert_eq!(unicast_answer_target(&bob_key, &linked()), Some(bob));
         assert_eq!(
-            unicast_answer_target(&nick("carol"), &linked()),
+            unicast_answer_target(&carol_key, &linked()),
             None,
             "no known endpoint"
         );
         let mut rendezvous = linked();
         rendezvous.rendezvous_id = Some(bob);
         assert_eq!(
-            unicast_answer_target(&nick("bob"), &rendezvous),
+            unicast_answer_target(&bob_key, &rendezvous),
             None,
             "the rendezvous pseudo-node"
         );
         let mut held = linked();
         held.direct.remove(&bob);
         assert_eq!(
-            unicast_answer_target(&nick("bob"), &held),
+            unicast_answer_target(&bob_key, &held),
             None,
             "no proven direct path on a lookup-only relay"
         );
         let mut unlinked = linked();
         unlinked.linked_endpoints.remove(&bob);
         assert_eq!(
-            unicast_answer_target(&nick("bob"), &unlinked),
+            unicast_answer_target(&bob_key, &unlinked),
             None,
             "known but not a gossip neighbor"
         );
+    }
+
+    /// Record, as a verified `PeerInfo` proof would, that the signing key
+    /// `pubkey` (hex) owns `endpoint`.
+    fn prove(state: &mut EventLoopState, pubkey: &str, endpoint: EndpointId) {
+        let signer = crate::transport::endpoint_proof::signer_bytes(pubkey).expect("a 32-byte key");
+        let linked = state.linked_endpoints.clone();
+        state.proven_endpoints.insert(signer, endpoint, &linked);
+    }
+
+    /// [`prove`] for the key of `identity`.
+    fn prove_identity(
+        state: &mut EventLoopState,
+        identity: &crate::protocol::identity::Identity,
+        endpoint: EndpointId,
+    ) {
+        let pubkey = crate::protocol::identity::encode_pubkey(&identity.public());
+        prove(state, &pubkey, endpoint);
     }
 
     /// What a `HandlerCtx` borrows, kept apart from the state so a test can
@@ -886,6 +905,7 @@ mod tests {
         let (bob_endpoint, _bob_sender) = loopback_node().await;
         let (net, mut state, frames) = holder(bob_endpoint.addr(), 3).await;
         state.linked_endpoints.insert(bob_endpoint.id());
+        let bob_id = bob_endpoint.id();
         let received = tokio::spawn(async move {
             let conn = bob_endpoint
                 .accept()
@@ -901,6 +921,7 @@ mod tests {
             (got, bob_endpoint, conn)
         });
         let asker = crate::protocol::identity::Identity::generate();
+        prove_identity(&mut state, &asker, bob_id);
         let digest = digest(&net.mesh, Channel::State, &serde_json::json!([]), &asker);
 
         let answered = crate::gossip::antientropy::handle_state_digest(
@@ -922,6 +943,32 @@ mod tests {
         assert_eq!(got, expected, "every frame, in order");
     }
 
+    /// A nickname is a label any signer can put on a digest, so it must not
+    /// pick the point-to-point target: a digest signed by a key that proved no
+    /// endpoint is answered on gossip, even when a linked peer has that
+    /// nickname. Otherwise any member could aim answers at a victim.
+    #[tokio::test]
+    async fn a_digest_from_a_key_with_no_proven_endpoint_is_answered_on_gossip() {
+        use crate::gossip::antientropy::{Answered, handle_state_digest};
+        use crate::protocol::Channel;
+
+        let (bob_endpoint, _bob_sender) = loopback_node().await;
+        let (net, mut state, _frames) = holder(bob_endpoint.addr(), 3).await;
+        state.linked_endpoints.insert(bob_endpoint.id());
+        let stranger = crate::protocol::identity::Identity::generate();
+        let posing_as_bob = digest(&net.mesh, Channel::State, &serde_json::json!([]), &stranger);
+
+        let answered =
+            handle_state_digest(Channel::State, &posing_as_bob, &mut state, &net.ctx()).await;
+        assert_eq!(
+            answered,
+            Answered {
+                unicast: 0,
+                broadcast: 3
+            }
+        );
+    }
+
     /// One serve per asker, channel and plane per window: a new node sends a
     /// digest pair for every peer it sees, all with the same heads, and every
     /// holder hears each one. The re-ask at the asker's first real-peer link
@@ -935,6 +982,7 @@ mod tests {
         let (net, mut state, _frames) = holder(bob_endpoint.addr(), 3).await;
         let ctx = net.ctx();
         let asker = crate::protocol::identity::Identity::generate();
+        prove_identity(&mut state, &asker, bob_endpoint.id());
         let empty = serde_json::json!([]);
         let state_digest = digest(&net.mesh, Channel::State, &empty, &asker);
         let meta_digest = digest(&net.mesh, Channel::Meta, &empty, &asker);
@@ -1006,6 +1054,7 @@ mod tests {
         state.linked_endpoints.insert(bob_addr.id);
         let ctx = net.ctx();
         let bob = crate::protocol::identity::Identity::generate();
+        prove_identity(&mut state, &bob, bob_addr.id);
         let ahead = digest(
             &net.mesh,
             Channel::State,
@@ -1067,6 +1116,7 @@ mod tests {
         state.linked_endpoints.insert(unreachable.id);
         let ctx = net.ctx();
         let asker = crate::protocol::identity::Identity::generate();
+        prove_identity(&mut state, &asker, unreachable.id);
         let behind = digest(&net.mesh, Channel::State, &serde_json::json!([]), &asker);
 
         let first = handle_state_digest(Channel::State, &behind, &mut state, &ctx).await;
@@ -1227,8 +1277,10 @@ mod tests {
         let (bob_endpoint, _bob_sender) = loopback_node().await;
         let (net, mut state, frames) = holder(bob_endpoint.addr(), 3).await;
         state.linked_endpoints.insert(bob_endpoint.id());
+        let bob_id = bob_endpoint.id();
         let received = read_frames(bob_endpoint, 4);
         let asker = crate::protocol::identity::Identity::generate();
+        prove_identity(&mut state, &asker, bob_id);
         let digest = digest(&net.mesh, Channel::State, &serde_json::json!([]), &asker);
 
         crate::gossip::antientropy::handle_state_digest(
@@ -1267,6 +1319,7 @@ mod tests {
         let (bob_endpoint, _bob_sender) = loopback_node().await;
         let (net, mut state, _none) = holder(bob_endpoint.addr(), 0).await;
         let bob = crate::protocol::identity::Identity::generate();
+        prove_identity(&mut state, &bob, bob_endpoint.id());
         let now = crate::util::clock::Instant::now();
 
         let own = serde_json::json!(state.doc(Channel::State).heads());

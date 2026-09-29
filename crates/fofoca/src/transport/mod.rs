@@ -22,6 +22,7 @@
 mod accept;
 mod admission;
 mod direct_gossip;
+pub(crate) mod endpoint_proof;
 #[cfg(feature = "host")]
 pub(crate) mod ipc;
 pub(crate) mod path;
