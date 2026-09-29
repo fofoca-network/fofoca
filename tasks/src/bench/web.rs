@@ -35,7 +35,7 @@ pub(crate) enum Engine {
 
 /// The driver behind one tab.
 enum Driver {
-    Chrome(cdp::Browser),
+    Chrome(Box<cdp::Browser>),
     Safari(webdriver::Session),
 }
 
@@ -74,7 +74,7 @@ struct Tab {
 impl Tab {
     fn open(engine: Engine, server: &Static, page: &str) -> Result<Self, Skip> {
         let page_obj = match engine {
-            Engine::Chrome => Driver::Chrome(cdp::Browser::launch()?),
+            Engine::Chrome => Driver::Chrome(Box::new(cdp::Browser::launch()?)),
             Engine::Safari => Driver::Safari(webdriver::Session::open("safari-tp", SAFARI_TP)?),
         };
         page_obj.navigate(&format!("{}/{page}", server.url));

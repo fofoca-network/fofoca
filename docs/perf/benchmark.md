@@ -28,7 +28,7 @@ does not set the throughput.
 - Every cell asserts the path that carried it (`webrtc` / `ip` /
   `data-channel`), so a cell cannot quietly measure the wrong lane.
 - Browser cells run each tab in its own browser process: Chrome for
-  Testing over CDP (`agent-browse`), and Safari Technology Preview over
+  Testing over CDP, and Safari Technology Preview over
   W3C WebDriver, the same client the e2e suites use. This runner ferries the
   SDP between tabs. Host-only ICE, no STUN.
 - STP needs *Settings ▸ Developer ▸ Allow remote automation* and a one-time

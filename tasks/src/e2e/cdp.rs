@@ -4,7 +4,6 @@
 //! axis is created inside the page either way, so no browser is short-changed
 //! by which transport drives it.
 
-use std::process::Command;
 use std::time::Duration;
 
 use crate::util::cdp::Browser;
@@ -21,16 +20,7 @@ pub(super) fn run(pressure: u32, timeout: Duration) -> Result<Harvest, Skip> {
     // one.
     let url = format!("{}/?pressure={pressure}", server::URL);
     browser.navigate(&url);
-
-    let published = Command::new("agent-browse")
-        .arg("wait")
-        .arg("--folder")
-        .arg(browser.folder())
-        .args(["--selector", super::DONE_SELECTOR])
-        .arg("--timeout")
-        .arg(timeout.as_millis().to_string())
-        .output()
-        .is_ok_and(|waited| waited.status.success());
+    let published = browser.wait_for(super::DONE_SELECTOR, timeout);
 
     Ok(Harvest {
         table: browser.evaluate(super::TABLE_EXPRESSION),

@@ -13,7 +13,7 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// One browser on a page, behind whichever driver reaches it.
 pub(crate) enum Page {
-    Cdp(cdp::Browser),
+    Cdp(Box<cdp::Browser>),
     WebDriver(webdriver::Session),
 }
 
