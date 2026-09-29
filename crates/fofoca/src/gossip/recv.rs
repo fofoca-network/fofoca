@@ -858,7 +858,11 @@ fn dispatch_channel(
     let ChannelEvent {
         channel, message, ..
     } = event;
+    let changes = state.doc(channel).change_count();
     ingest_channel_event(event, state.doc_mut(channel), ctx);
+    if state.doc(channel).change_count() > changes {
+        state.fast_rounds.note_change(channel, Instant::now());
+    }
     for key in state.doc_mut(channel).take_dropped() {
         state.seen.remove(&key);
     }

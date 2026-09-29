@@ -436,6 +436,8 @@ pub(crate) struct FastRounds {
     /// round can die with no progress (a request or its answer is lost, or its
     /// peer refuses us), and nothing else would ask them before the tick.
     ahead: HashMap<Channel, Vec<Waiting>>,
+    /// When a change last landed per channel: an answer's frames still arrive.
+    last_change: HashMap<Channel, Instant>,
 }
 
 impl FastRounds {
@@ -462,12 +464,12 @@ impl FastRounds {
         now: Instant,
     ) -> bool {
         self.rounds.get(&channel).is_none_or(|round| {
-            let quiet = now.duration_since(round.at);
             if round.peer == peer {
+                let quiet = now.duration_since(self.quiet_since(channel, round));
                 let answered = changes.saturating_sub(round.changes) >= antientropy_max_resend();
                 (round.heads != heads && answered) || quiet >= Self::MIN_INTERVAL
             } else {
-                quiet >= Self::ACTIVE
+                now.duration_since(round.at) >= Self::ACTIVE
             }
         })
     }
@@ -489,6 +491,24 @@ impl FastRounds {
                 changes,
             },
         );
+    }
+
+    /// A change landed on `channel`: an answer's frames are still arriving.
+    pub(crate) fn note_change(&mut self, channel: Channel, now: Instant) {
+        self.last_change.insert(channel, now);
+    }
+
+    /// Where a round's wait starts: its ask, or the last change that landed
+    /// after it, since under load an answer's frames arrive over more than the
+    /// wait and an ask sent meanwhile draws an answer that overlaps it. Capped
+    /// at [`FAST_ROUND_ACTIVE_MS`] after the ask, so live writes cannot hold a
+    /// stalled round; an answer slower than that overlaps again.
+    fn quiet_since(&self, channel: Channel, round: &Round) -> Instant {
+        let latest = self
+            .last_change
+            .get(&channel)
+            .map_or(round.at, |&changed| changed.max(round.at));
+        latest.min(round.at + Self::ACTIVE)
     }
 
     /// Our heads when we last asked for `channel`, if a round ran.
@@ -544,12 +564,14 @@ impl FastRounds {
         holds: impl Fn(&[String]) -> bool,
         reachable: impl Fn(&str) -> bool,
     ) -> Option<(String, Nickname)> {
+        let waiting = self.rounds.get(&channel).is_some_and(|round| {
+            now.duration_since(self.quiet_since(channel, round))
+                < Duration::from_millis(FAST_ROUND_RETRY_MS)
+        });
         let ahead = self.ahead.get_mut(&channel)?;
         ahead.retain(|peer| !holds(&peer.heads) && Self::fresh(peer, now));
         let round = self.rounds.get(&channel);
-        if round.is_some_and(|round| {
-            now.duration_since(round.at) < Duration::from_millis(FAST_ROUND_RETRY_MS)
-        }) {
+        if waiting {
             return None;
         }
         let candidates: Vec<&Waiting> = ahead
@@ -848,7 +870,10 @@ mod budget_tests {
     use crate::protocol::Channel;
     use crate::testing::nick;
     use crate::util::clock::Instant;
-    use crate::util::tuning::{ANTIENTROPY_SERVES_PER_WINDOW, antientropy_max_resend};
+    use crate::util::tuning::{
+        ANTIENTROPY_SERVES_PER_WINDOW, FAST_ROUND_ACTIVE_MS, FAST_ROUND_RETRY_MS,
+        antientropy_max_resend,
+    };
 
     fn key() -> (String, Channel, Plane) {
         ("asker".to_owned(), Channel::State, Plane::Unicast)
@@ -1032,6 +1057,73 @@ mod budget_tests {
         };
         let digest = state_digest(&state, origin, Channel::State).expect("a digest");
         assert_eq!(heads_key_of(&state, Channel::State), heads_key(&digest));
+    }
+
+    /// Under load an answer's frames arrive over more than the wait, and an
+    /// ask sent while they arrive draws an answer that overlaps it. The wait
+    /// counts from the last change that landed, not only from the ask.
+    #[test]
+    fn a_round_waits_while_an_answers_frames_still_arrive() {
+        let t0 = Instant::now();
+        let ms = Duration::from_millis;
+        let state = Channel::State;
+        let mut rounds = FastRounds::default();
+        rounds.note_ahead(
+            state,
+            "alice".to_owned(),
+            nick("alice"),
+            vec!["a".to_owned()],
+            t0,
+        );
+        rounds.note_asked("alice".to_owned(), state, 1, 0, t0);
+        rounds.note_change(state, t0 + ms(150));
+        assert!(
+            !rounds.may_ask("alice", state, 1, 0, t0 + ms(250)),
+            "the same heads 100 ms after a change"
+        );
+        rounds.note_change(state, t0 + ms(300));
+        let retry = |fast: &mut FastRounds, at| {
+            fast.retry_target(state, at, 1, |_| false, |_| true)
+                .map(|(pubkey, _)| pubkey)
+        };
+        assert_eq!(
+            retry(&mut rounds, t0 + ms(450)),
+            None,
+            "150 ms after a change"
+        );
+        assert_eq!(
+            retry(&mut rounds, t0 + ms(750)),
+            Some("alice".to_owned()),
+            "quiet for 450 ms"
+        );
+    }
+
+    /// A steady stream of changes, such as live writes, must not hold a stalled
+    /// round forever: the wait is capped at `FAST_ROUND_ACTIVE_MS` after the ask.
+    #[test]
+    fn the_wait_after_changes_is_capped() {
+        let t0 = Instant::now();
+        let ms = Duration::from_millis;
+        let state = Channel::State;
+        let mut rounds = FastRounds::default();
+        rounds.note_ahead(
+            state,
+            "alice".to_owned(),
+            nick("alice"),
+            vec!["a".to_owned()],
+            t0,
+        );
+        rounds.note_asked("alice".to_owned(), state, 1, 0, t0);
+        let later = t0 + ms(FAST_ROUND_ACTIVE_MS + FAST_ROUND_RETRY_MS);
+        let mut at = t0;
+        while at < later {
+            rounds.note_change(state, at);
+            at += ms(100);
+        }
+        let target = rounds
+            .retry_target(state, later, 1, |_| false, |_| true)
+            .map(|(pubkey, _)| pubkey);
+        assert_eq!(target, Some("alice".to_owned()));
     }
 
     #[test]
