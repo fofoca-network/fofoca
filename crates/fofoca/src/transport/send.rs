@@ -943,6 +943,39 @@ mod tests {
         assert_eq!(got, expected, "every frame, in order");
     }
 
+    /// The heads that close a point-to-point answer tell the receiver how far
+    /// the holder is; they are not a request. Answering them sent the holder
+    /// frames it had, and that answer closed with heads of its own: a loop
+    /// that cost a serve at each turn. The receiver only asks back.
+    #[tokio::test]
+    async fn the_heads_that_close_an_answer_draw_no_answer() {
+        use crate::gossip::antientropy::handle_state_digest;
+        use crate::protocol::Channel;
+
+        let (bob_endpoint, _bob_sender) = loopback_node().await;
+        let (net, mut state, _frames) = holder(bob_endpoint.addr(), 3).await;
+        state.linked_endpoints.insert(bob_endpoint.id());
+        let bob = crate::protocol::identity::Identity::generate();
+        prove_identity(&mut state, &bob, bob_endpoint.id());
+        let body = MessageBody::new(
+            serde_json::json!({ "heads": ["heads-we-do-not-hold"], "closing": true }).to_string(),
+        )
+        .expect("a JSON body");
+        let closing =
+            Message::new_channel_digest(&net.mesh, &nick("bob"), body, Channel::State).signed(&bob);
+
+        let answered = handle_state_digest(Channel::State, &closing, &mut state, &net.ctx()).await;
+        assert_eq!(
+            answered.unicast + answered.broadcast,
+            0,
+            "no frames for closing heads"
+        );
+        assert!(
+            state.fast_rounds.asked_heads(Channel::State).is_some(),
+            "bob is ahead, so we ask him back"
+        );
+    }
+
     /// A peer holds every change it signed, since a change's actor is its
     /// signer's key and a session key lives no longer than its document. So
     /// its own changes are never missing from it, even when it advertises
@@ -1348,7 +1381,10 @@ mod tests {
         assert_eq!(last.kind, MessageKind::StateDigest, "then a state digest");
         assert_eq!(
             last.body.as_str(),
-            serde_json::json!({ "heads": state.doc(Channel::State).heads() }).to_string(),
+            format!(
+                r#"{{"heads":{},"closing":true}}"#,
+                serde_json::json!(state.doc(Channel::State).heads())
+            ),
             "carrying the holder's heads"
         );
     }

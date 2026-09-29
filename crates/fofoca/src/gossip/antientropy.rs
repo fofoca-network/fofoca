@@ -89,9 +89,15 @@ struct DigestBody {
 /// (Base58 change hashes). Heads compactly represent the whole causal frontier,
 /// so a holder computes exactly what the sender is missing in one step — no
 /// windowing. Replaces the windowed [`DigestBody`] for these two channels.
+///
+/// `closing` marks the heads that end a point-to-point answer: information on
+/// how far the holder is, not a request. Left out when false, so a request's
+/// bytes and its heads key are what they always were.
 #[derive(Serialize, Deserialize)]
 struct HeadsBody {
     heads: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    closing: bool,
 }
 
 /// Broadcast an anti-entropy digest: an **open-ended newest** window (so
@@ -310,11 +316,22 @@ fn state_digest(
     origin: DigestOrigin<'_>,
     channel: Channel,
 ) -> Option<Message> {
+    heads_digest(state, origin, channel, false)
+}
+
+/// Our heads for `channel` as a digest frame, a request or, with `closing`,
+/// the end of an answer.
+fn heads_digest(
+    state: &EventLoopState,
+    origin: DigestOrigin<'_>,
+    channel: Channel,
+    closing: bool,
+) -> Option<Message> {
     if !state.overlay_reachable() {
         return None;
     }
     let heads = state.doc(channel).heads();
-    let body = super::json_body(&HeadsBody { heads })?;
+    let body = super::json_body(&HeadsBody { heads, closing })?;
     Some(
         Message::new_channel_digest(origin.mesh, origin.author, body, channel)
             .signed(&state.identity),
@@ -602,6 +619,7 @@ async fn ask_back(
 fn heads_key_of(state: &EventLoopState, channel: Channel) -> u64 {
     let heads = HeadsBody {
         heads: state.doc(channel).heads(),
+        closing: false,
     };
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     serde_json::to_string(&heads)
@@ -725,6 +743,9 @@ pub(crate) async fn handle_state_digest(
     ctx: &HandlerCtx<'_>,
 ) -> Answered {
     ask_back(channel, message, state, ctx).await;
+    if serde_json::from_str::<HeadsBody>(message.body.as_str()).is_ok_and(|body| body.closing) {
+        return Answered::default();
+    }
     let now = Instant::now();
     let heads = heads_key(message);
     let serve = |plane| (message.pubkey.clone(), channel, plane);
@@ -754,7 +775,7 @@ pub(crate) async fn handle_state_digest(
         mesh: ctx.mesh,
         author: ctx.author,
     };
-    let our_heads = state_digest(state, origin, channel)
+    let our_heads = heads_digest(state, origin, channel, true)
         .and_then(|ours| ours.serialize().ok())
         .map(Bytes::from);
     let fallback = match target {
@@ -1330,6 +1351,7 @@ mod tests {
             .collect();
         let json = serde_json::to_string(&HeadsBody {
             heads: heads.clone(),
+            closing: false,
         })
         .expect("serialize heads body");
         let back: HeadsBody = serde_json::from_str(&json).expect("round-trip");
