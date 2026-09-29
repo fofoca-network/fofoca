@@ -279,7 +279,7 @@ impl Native {
 
 /// One browser on the harness page, behind whichever driver reaches it.
 pub(super) enum Page {
-    Cdp(cdp::Browser),
+    Cdp(Box<cdp::Browser>),
     WebDriver(webdriver::Session),
 }
 
@@ -827,7 +827,7 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
 
 pub(super) fn launch_page(only: &str) -> Result<Page, Skip> {
     if "cft".contains(only) || only.contains("cft") {
-        return Ok(Page::Cdp(cdp::Browser::launch()?));
+        return Ok(Page::Cdp(Box::new(cdp::Browser::launch()?)));
     }
     for browser in super::browsers() {
         if !browser.name.contains(only) {
@@ -843,7 +843,7 @@ pub(super) fn launch_page(only: &str) -> Result<Page, Skip> {
             return Err(Skip(format!("not installed: {}", browser.binary)));
         }
         return match browser.backend {
-            super::Backend::Cdp => Ok(Page::Cdp(cdp::Browser::launch()?)),
+            super::Backend::Cdp => Ok(Page::Cdp(Box::new(cdp::Browser::launch()?))),
             super::Backend::WebDriver => Ok(Page::WebDriver(webdriver::Session::open(
                 browser.name,
                 &browser.binary,

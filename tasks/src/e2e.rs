@@ -188,22 +188,20 @@ struct Browser {
     ///
     /// It is *in-page* contention, not Chrome's `Emulation.setCPUThrottlingRate`.
     /// That was tried first and silently did nothing: the rate is scoped to the
-    /// CDP session that set it, and a one-shot `agent-browse cdp` call closes
-    /// that session before the page navigates. Measured with a 200-task chain:
+    /// CDP session that set it, and the backend then opened a new session per
+    /// call, which closed before the page navigated. Measured with a 200-task chain:
     /// 1234 ms unthrottled, 1358 ms at a nominal 20×. Eight cells had reported
     /// a throttle axis they never ran.
     pressures: &'static [u32],
 }
 
 fn browsers() -> Vec<Browser> {
-    let home = std::env::var("HOME").unwrap_or_default();
     vec![
         Browser {
             name: "chrome-cft",
             backend: Backend::Cdp,
-            binary: format!(
-                "{home}/.agent-browse/chrome/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"
-            ),
+            // Resolved (and downloaded on first use) by `cdp::chrome_for_testing`.
+            binary: String::new(),
             pressures: &[0, 2, 8],
         },
         Browser {
@@ -216,8 +214,7 @@ fn browsers() -> Vec<Browser> {
             // ~110 s and has never yet answered differently.
             pressures: &[0],
         },
-        // Any Chrome, driven through chromedriver: what a CI runner has, where
-        // there is no `agent-browse` and so no Chrome for Testing over CDP.
+        // Any Chrome, driven through chromedriver.
         // `CHROME_BIN` and `CHROMEDRIVER` name the two binaries.
         Browser {
             name: "chrome-ci",
@@ -367,13 +364,18 @@ pub(crate) fn run(args: &Args) -> TaskOutcome {
                 continue;
             }
 
-            if !PathBuf::from(&browser.binary).exists() {
+            let missing = match browser.backend {
+                Backend::Cdp => cdp::chrome_for_testing().err().map(|Skip(why)| why),
+                Backend::WebDriver => (!PathBuf::from(&browser.binary).exists())
+                    .then(|| format!("not installed: {}", browser.binary)),
+            };
+            if let Some(detail) = missing {
                 rows.push(Row {
                     browser: browser.name,
                     profile: profile.to_string(),
                     pressure: "-".to_owned(),
                     verdict: Verdict::Skipped,
-                    detail: format!("not installed: {}", browser.binary),
+                    detail,
                 });
                 continue;
             }
