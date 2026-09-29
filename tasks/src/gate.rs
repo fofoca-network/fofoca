@@ -107,7 +107,7 @@ pub(crate) const STEPS: &[Step] = &[
     Step {
         kind: Kind::Lint,
         scope: Scope::Crate("fofoca-iroh-webrtc-transport"),
-        args: &["--features", "native", "--all-targets"],
+        args: &["--features", "native,bench", "--all-targets"],
     },
     // `--all-targets` is what the first row has and the `--all-features` check
     // row lacks, so without this one the `mesh` feature's e2e suites are
@@ -138,13 +138,14 @@ pub(crate) const STEPS: &[Step] = &[
     Step {
         kind: Kind::Check,
         scope: Scope::Crate("fofoca-iroh-webrtc-transport"),
-        args: &["--features", "native", "--all-targets"],
+        args: &["--features", "native,bench", "--all-targets"],
     },
-    // These crates are reachable on wasm32 and between them that is a
+    // Seven crates are reachable on wasm32 and between them that is a
     // substantial amount of code nothing else compiles: `fofoca-chunks`'s
     // IndexedDB backend, the whole `web` backend of the WebRTC transport, the
-    // browser socket of the Nostr client, the portable half of the engine, `fofoca-netplay`'s simulation, and
-    // `fofoca-pipe`'s wire contract.
+    // browser socket of the Nostr client, the portable half of the engine,
+    // `fofoca-netplay`'s simulation, `fofoca-stream`'s byte streams, and
+    // `fofoca-wasm`, the browser peer.
     // Without these rows that code rots silently, and the `#[expect(...)]`
     // attributes inside it are never lint-checked either.
     // `wasm-simd` only changes blake3's codegen, so checking with it on costs
@@ -157,7 +158,7 @@ pub(crate) const STEPS: &[Step] = &[
     Step {
         kind: Kind::WasmCheck,
         scope: Scope::Crate("fofoca-iroh-webrtc-transport"),
-        args: &["--features", "web"],
+        args: &["--features", "web,bench"],
     },
     Step {
         kind: Kind::WasmCheck,
@@ -189,15 +190,11 @@ pub(crate) const STEPS: &[Step] = &[
         scope: Scope::Crate("fofoca-netplay"),
         args: &["--no-default-features"],
     },
-    // `fofoca-pipe` is the wire contract a tab and a terminal share. If it stops
-    // compiling for wasm32 the browser package cannot be built at all, and that
-    // package is its own cargo workspace, out of `-p`'s reach — so this row is
-    // the only place the breakage is caught from inside the workspace. No
-    // feature args: the crate deliberately has none, so there is nothing to
-    // turn off.
+    // `fofoca-stream` runs unchanged in a tab, where a producer's accept side
+    // and a consumer's dial both live; the browser package needs it to build.
     Step {
         kind: Kind::WasmCheck,
-        scope: Scope::Crate("fofoca-pipe"),
+        scope: Scope::Crate("fofoca-stream"),
         args: &[],
     },
     // The browser peer itself — `packages/fofoca-wasm`'s Rust half. wasm32 is
@@ -206,6 +203,12 @@ pub(crate) const STEPS: &[Step] = &[
     Step {
         kind: Kind::WasmCheck,
         scope: Scope::Crate("fofoca-wasm"),
+        args: &[],
+    },
+    // The browser side of `cargo task benchmark`, a cdylib like the peer.
+    Step {
+        kind: Kind::WasmCheck,
+        scope: Scope::Crate("fofoca-bench-wasm"),
         args: &[],
     },
     // Clippy, not just check. The `web` backend had never been linted before
@@ -218,7 +221,7 @@ pub(crate) const STEPS: &[Step] = &[
     Step {
         kind: Kind::WasmClippy,
         scope: Scope::Crate("fofoca-iroh-webrtc-transport"),
-        args: &["--features", "web"],
+        args: &["--features", "web,bench"],
     },
     Step {
         kind: Kind::WasmClippy,
@@ -237,12 +240,17 @@ pub(crate) const STEPS: &[Step] = &[
     },
     Step {
         kind: Kind::WasmClippy,
-        scope: Scope::Crate("fofoca-pipe"),
+        scope: Scope::Crate("fofoca-stream"),
         args: &[],
     },
     Step {
         kind: Kind::WasmClippy,
         scope: Scope::Crate("fofoca-wasm"),
+        args: &[],
+    },
+    Step {
+        kind: Kind::WasmClippy,
+        scope: Scope::Crate("fofoca-bench-wasm"),
         args: &[],
     },
     Step {
@@ -266,11 +274,20 @@ pub(crate) const STEPS: &[Step] = &[
         scope: Scope::Crate("fofoca-iroh-webrtc-transport"),
         args: &["--features", "native"],
     },
-    // `iroh-test-utils` is off by default and no row above reaches a test target
-    // with it on, so the relay-policy proofs — `tests/relay_lookup_only_*.rs`
-    // and the webrtc graft tests — were never even compiled. `--no-run`: two of
-    // them are red on the pinned iroh revs (issue #2) and the rest want a
-    // network of their own, so compiling is the part that belongs in a gate.
+    // Not covered by the workspace row: the runner's page helpers, and their
+    // tests, are behind the `mesh` and `bench` features, and `bench` is the
+    // lighter of the two.
+    Step {
+        kind: Kind::Test,
+        scope: Scope::Crate("tasks"),
+        args: &["--features", "bench"],
+    },
+    // The workspace row already runs the relay-policy proofs
+    // (`tests/relay_lookup_only_*.rs`, `tests/mesh_transport_lists.rs`):
+    // fofoca-stream's dev-dependency on fofoca
+    // (`crates/fofoca-stream/Cargo.toml`) turns on `iroh-test-utils`, and cargo
+    // unifies features across the workspace. This row compiles them without
+    // that help, so they cannot rot if fofoca-stream drops the feature.
     Step {
         kind: Kind::Test,
         scope: Scope::Crate("fofoca"),

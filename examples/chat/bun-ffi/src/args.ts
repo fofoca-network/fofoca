@@ -1,6 +1,6 @@
 /**
  * The command line. Exactly one way in — a topic, a mesh id, or a create —
- * because `fofoca_open` treats "neither selector" as create and a chat that
+ * because `fofoca_mesh_open` treats "neither selector" as create and a chat that
  * silently creates a loopback mesh of one hears nobody, forever.
  */
 
@@ -21,7 +21,8 @@ export const USAGE = `usage: bun src/main.ts <how to reach the mesh> [options]
 
   options:
     --nick <string>       nickname (default: random word-word)
-    --transport <list>    what payload may ride: p2p (default) or p2p,relay
+    --transport <list>    what payload may ride: udp,webrtc (default), webrtc,
+                          or either with relay
                           (part of the mesh id, so every member must pass the
                           same list; relay needs relay in --lookup)
     --relay-url <url>     custom relay ladder, repeatable (which relay, nothing

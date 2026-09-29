@@ -19,8 +19,9 @@ bun run start --id <base58> --nick bo          # and join it by id
 `--lookup mdns,dht,relay,nostr` (any subset, `--create` only) says how members
 find each other; none is a loopback mesh. `--relay-url <url>` (repeatable)
 swaps in a custom relay ladder on `--topic` and `--create`, `--nostr-url <url>`
-(repeatable) does the same for the Nostr relays, and `--transport p2p,relay`
-lets payload fall back to the relay. All are part of the mesh id, so every
+(repeatable) does the same for the Nostr relays, and `--transport
+udp,webrtc,relay` lets payload fall back to the relay. All are part of the mesh
+id, so every
 member must pass the same values; by default the relay stays a lookup and
 payload never rides it.
 

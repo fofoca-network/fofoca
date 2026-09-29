@@ -2,7 +2,8 @@
 //!
 //! - [`deliver`] — the single cross-plane send decision: a broadcast rides
 //!   gossip, a directed message goes over the **unicast** point-to-point QUIC
-//!   channel only (`send`).
+//!   channel only (`send`). [`deliver_in_background`] takes the same decision but
+//!   never waits on a dial, for callers on the event loop.
 //! - The unicast plane machinery: the per-peer connection pool (`pool`) and
 //!   the inbound acceptor (`accept`). Distinct from `link` (a gossip
 //!   active-view neighbor) and from `Reach::Direct` (a gossip-overlay
@@ -21,9 +22,10 @@
 mod accept;
 mod admission;
 mod direct_gossip;
+pub(crate) mod endpoint_proof;
 #[cfg(feature = "host")]
 pub(crate) mod ipc;
-mod path;
+pub(crate) mod path;
 mod pool;
 pub(crate) mod probe;
 // The JSEP exchange that fills `lookup::TransportHandles::webrtc`. Portable:
@@ -45,7 +47,7 @@ mod send;
 pub(crate) mod sender;
 
 pub(crate) use accept::UnicastAcceptor;
-pub(crate) use admission::SignalAdmission;
+pub use admission::SignalAdmission;
 pub(crate) use direct_gossip::DirectOnlyGossip;
 #[cfg(feature = "blob")]
 pub(crate) use path::{PROBE_DEADLINE, refuse_relayed};
@@ -53,9 +55,9 @@ pub(crate) use path::{RELAY_REFUSED, payload_allowed_on};
 pub(crate) use pool::UnicastPool;
 pub(crate) use send::HeldForDirect;
 pub use send::Lane;
-pub use send::deliver;
 pub(crate) use send::lane_for;
-pub(crate) use send::send_best_effort;
+pub use send::{deliver, deliver_in_background};
+pub(crate) use send::{send_best_effort, unicast_answer_target};
 pub use sender::MeshSender;
 pub use webrtc::MAX_DIRECT_PEERS;
 pub(crate) use webrtc::{IceProfile, MESH_WEBRTC_SIGNAL_ALPN, WebRtcSignalAcceptor};

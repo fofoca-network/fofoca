@@ -131,7 +131,7 @@ async fn a_relayless_webrtc_endpoint_binds() {
     let transports = TransportHandles {
         webrtc: Some(hub),
         opts: TransportOpts {
-            ip: false,
+            udp: false,
             relay: false,
             webrtc: true,
             multihop: false,
@@ -147,4 +147,16 @@ async fn a_relayless_webrtc_endpoint_binds() {
         "a browser with no relay advertises no address"
     );
     endpoint.close().await;
+}
+
+/// A tab has no UDP socket, whatever the mesh's list allows. The paths a node
+/// runs come from `within`, so it must say so there: code that reads
+/// `TransportOpts::udp` then needs no browser special case.
+#[wasm_bindgen_test]
+fn a_tab_runs_no_udp_path() {
+    use fofoca::net::TransportOpts;
+    use fofoca::protocol::TransportPolicy;
+    let paths = TransportOpts::default().within(&TransportPolicy::default());
+    assert!(!paths.udp, "a tab reads as having UDP: {paths:?}");
+    assert!(paths.webrtc, "the data channel stays");
 }

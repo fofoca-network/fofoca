@@ -12,14 +12,12 @@
  *   const char *lookup;      // offset 32
  *   const char *transport;   // offset 40
  *   const char *relay_urls;  // offset 48
- *   int disable_ip;          // offset 56
- *   int disable_webrtc;      // offset 60
- *   size_t max_peers;        // offset 64
- *   const char *nostr_urls;  // offset 72
- * } fofoca_opts;             // 80 bytes
+ *   size_t max_peers;        // offset 56
+ *   const char *nostr_urls;  // offset 64
+ * } fofoca_opts;             // 72 bytes
  * ```
  *
- * 64-bit little-endian only, the same scope `frame.ts` claims for the same
+ * 64-bit little-endian only, the same scope `msg.ts` claims for the same
  * reason.
  */
 
@@ -32,24 +30,22 @@ const NAME_OFFSET = 24
 const LOOKUP_OFFSET = 32
 const TRANSPORT_OFFSET = 40
 const RELAY_URLS_OFFSET = 48
-const DISABLE_IP_OFFSET = 56
-const DISABLE_WEBRTC_OFFSET = 60
-const MAX_PEERS_OFFSET = 64
-const NOSTR_URLS_OFFSET = 72
+const MAX_PEERS_OFFSET = 56
+const NOSTR_URLS_OFFSET = 64
 
-export const OPTS_BYTES = 80
+export const OPTS_BYTES = 72
 
 const LITTLE_ENDIAN = new Uint8Array(new Uint32Array([1]).buffer)[0] === 1
 
 const encoder = new TextEncoder()
 
 export interface EncodedOpts {
-  /** The struct itself, to pass as the `fofoca_open` argument. */
+  /** The struct itself, to pass as the `fofoca_mesh_open` argument. */
   readonly struct: Uint8Array
   /**
    * The NUL-terminated string buffers whose addresses the struct embeds.
    *
-   * The caller MUST keep a reference to this array until `fofoca_open`
+   * The caller MUST keep a reference to this array until `fofoca_mesh_open`
    * returns: nothing else roots these buffers, and a GC between encode and
    * call would leave the struct pointing at freed memory.
    */
@@ -63,6 +59,23 @@ function terminated(value: string): Uint8Array {
   return bytes
 }
 
+/** Writes a string's address at an offset (NULL for `null`), rooting its buffer. */
+function stringField(
+  view: DataView,
+  keepAlive: Uint8Array[],
+  pointerOf: (buffer: Uint8Array) => bigint,
+): (offset: number, value: string | null) => void {
+  return (offset, value) => {
+    if (value === null) {
+      view.setBigUint64(offset, 0n, LITTLE_ENDIAN)
+      return
+    }
+    const bytes = terminated(value)
+    keepAlive.push(bytes)
+    view.setBigUint64(offset, pointerOf(bytes), LITTLE_ENDIAN)
+  }
+}
+
 /**
  * Build the struct. `pointerOf` is injected because taking a buffer's address
  * is the one loader-specific step, and injecting it keeps the layout testable
@@ -73,15 +86,7 @@ export function encodeOpts(opts: WireOpts, pointerOf: (buffer: Uint8Array) => bi
   const view = new DataView(struct.buffer)
   const keepAlive: Uint8Array[] = []
 
-  const field = (offset: number, value: string | null) => {
-    if (value === null) {
-      view.setBigUint64(offset, 0n, LITTLE_ENDIAN)
-      return
-    }
-    const bytes = terminated(value)
-    keepAlive.push(bytes)
-    view.setBigUint64(offset, pointerOf(bytes), LITTLE_ENDIAN)
-  }
+  const field = stringField(view, keepAlive, pointerOf)
 
   field(MESH_OFFSET, opts.mesh)
   field(TOPIC_OFFSET, opts.topic)
@@ -90,10 +95,42 @@ export function encodeOpts(opts: WireOpts, pointerOf: (buffer: Uint8Array) => bi
   field(LOOKUP_OFFSET, opts.lookup)
   field(TRANSPORT_OFFSET, opts.transport)
   field(RELAY_URLS_OFFSET, opts.relayUrls)
-  view.setInt32(DISABLE_IP_OFFSET, opts.disableIp ? 1 : 0, LITTLE_ENDIAN)
-  view.setInt32(DISABLE_WEBRTC_OFFSET, opts.disableWebrtc ? 1 : 0, LITTLE_ENDIAN)
   view.setBigUint64(MAX_PEERS_OFFSET, BigInt(opts.maxPeers), LITTLE_ENDIAN)
   field(NOSTR_URLS_OFFSET, opts.nostrUrls)
 
+  return { struct, keepAlive }
+}
+
+/**
+ * `fofoca_stream_opts`, for `fofoca_streams_bind`, under the same rules as
+ * `fofoca_opts`: the same comma lists.
+ *
+ * ```c
+ * typedef struct {
+ *   const char *lookup;      // offset  0
+ *   const char *transport;   // offset  8
+ *   const char *relay_urls;  // offset 16
+ * } fofoca_stream_opts;      // 24 bytes
+ * ```
+ */
+export interface WireStreamOpts {
+  readonly lookup: string | null
+  readonly transport: string | null
+  readonly relayUrls: string | null
+}
+
+export const STREAM_OPTS_BYTES = 24
+
+export function encodeStreamOpts(
+  opts: WireStreamOpts,
+  pointerOf: (buffer: Uint8Array) => bigint,
+): EncodedOpts {
+  const struct = new Uint8Array(STREAM_OPTS_BYTES)
+  const view = new DataView(struct.buffer)
+  const keepAlive: Uint8Array[] = []
+  const field = stringField(view, keepAlive, pointerOf)
+  field(0, opts.lookup)
+  field(8, opts.transport)
+  field(16, opts.relayUrls)
   return { struct, keepAlive }
 }

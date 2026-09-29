@@ -19,3 +19,20 @@ pub use crate::protocol::peer_addr::{endpoint_addr_from_json, endpoint_addr_to_j
 /// once here and again in each frontend, and the UI's copy drifted from the
 /// one that was enforced.
 pub use crate::transport::MAX_DIRECT_PEERS;
+
+/// A direct lane to one peer, without a mesh: the `WebRTC` endpoint, both
+/// halves of the JSEP round, and the gate that holds payload until iroh
+/// selects a non-relay path. The mesh uses the same pieces; `fofoca-stream`
+/// is the second caller.
+pub mod direct {
+    pub use crate::lookup::build_peer_webrtc;
+    pub use crate::transport::path::{PROBE_DEADLINE, refuse_unless_direct, wait_direct};
+    pub use crate::transport::webrtc::{
+        IceProfile, MESH_WEBRTC_SIGNAL_ALPN, WebRtcSignalAcceptor, dial_signal, pair_needs_lane,
+    };
+    pub use crate::transport::{MAX_DIRECT_PEERS, SignalAdmission};
+    pub use fofoca_iroh_webrtc_transport::WebRtcHandle;
+    /// Tests only: take UDP away from every connection in the process.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    pub use fofoca_iroh_webrtc_transport::block_ip_paths;
+}

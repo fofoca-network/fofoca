@@ -1,18 +1,18 @@
 //! `cargo task e2e --suite mesh` — the native↔browser matrix.
 //!
 //! One local plain-HTTP relay both sides can reach, one in-process native
-//! peer (`fofoca_pipe`), one real browser on the harness page
+//! peer (`fofoca::membership`), one real browser on the harness page
 //! (`packages/fofoca-wasm/harness`), driven cell by cell:
 //!
 //! - **policy** — the mesh's `relay_transport`, on or off;
 //! - **native transports** — everything / WebRTC only / relay only, to force
 //!   the punch, the data channel, and the refusal in turn;
 //! - **join mode** — both derive from a topic, the browser joins the id the
-//!   native side minted, or the browser opens the topic first.
-//!
+//!   native side minted, or the browser opens the topic first;
 //! - **discovery** — the relay, or Nostr as the only lookup: no iroh relay
 //!   at all, so discovery and JSEP ride an in-process Nostr relay. A topic
-//!   always uses every lookup, so these cells join by id.
+//!   always uses every lookup, so these cells join by id, and one of them
+//!   pairs two tabs with no native member.
 //!
 //! Every linked cell must move payload **both ways** on every lane —
 //! broadcast, directed, state merge — and agree on the roster. The one
@@ -26,16 +26,20 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use crate::TaskOutcome;
+use crate::util::cdp;
+use crate::util::page::{rand_token, wait_ready};
+use crate::util::webdriver;
 use crate::util::{output, repo_root, wait_for};
 
-use super::{Args, Skip, build, cdp, webdriver};
+use fofoca::membership;
+use fofoca::protocol::{Lookup, Transport};
+
+use super::page::{Page, call_page, urlencode};
+use super::{Args, Skip, build};
 
 /// A linked pair has to survive the beacon claim (~8 s), a WebRTC
 /// negotiation or a hole punch, and one alive-tick retry.
 const LINK_TIMEOUT: Duration = Duration::from_mins(4);
-/// The accept gate holds a relayed connection for 15 s; this outlasts the
-/// hold plus one heal-tick retry, so a link would have had every chance.
-const REFUSAL_WINDOW: Duration = Duration::from_secs(40);
 const PAYLOAD_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -44,11 +48,14 @@ enum Policy {
     RelayTransport,
 }
 
+/// The direct paths in the mesh's transport list. Mesh-wide, so the browser
+/// and the native side run the same ones.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum NativeTransports {
-    Default,
+enum Paths {
+    UdpAndWebRtc,
     WebRtcOnly,
-    RelayOnly,
+    /// No data channel: a browser has no path of its own.
+    UdpOnly,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -75,28 +82,27 @@ enum JoinMode {
 struct Cell {
     discovery: Discovery,
     policy: Policy,
-    native: NativeTransports,
+    paths: Paths,
     join: JoinMode,
 }
 
 impl Cell {
-    /// The one cell that must not link: no direct path can exist and the
-    /// relay may not carry payload.
+    /// The one cell with no mesh to link in: the browser has no direct path
+    /// and the relay may not carry payload, so the tab refuses the mesh.
     fn expects_link(&self) -> bool {
-        !(self.policy == Policy::LookupOnly && self.native == NativeTransports::RelayOnly)
+        !(self.policy == Policy::LookupOnly && self.paths == Paths::UdpOnly)
     }
 
-    /// A cell that fails for a known reason outside what it tests. It still
-    /// runs: a pass is reported, so the entry is removed once it is fixed.
-    fn known_failure(&self) -> Option<&'static str> {
-        (self.discovery == Discovery::Relay
-            && self.policy == Policy::LookupOnly
-            && self.native == NativeTransports::WebRtcOnly
-            && self.join == JoinMode::IdFromNative)
-            .then_some(
-                "the native peer's gossip link to its own co-hosted beacon selects the relay \
-                 path, not the attached data channel, and the beacon refuses it",
-            )
+    fn transports(&self) -> Vec<Transport> {
+        let mut transports = match self.paths {
+            Paths::UdpAndWebRtc => vec![Transport::Udp, Transport::WebRtc],
+            Paths::WebRtcOnly => vec![Transport::WebRtc],
+            Paths::UdpOnly => vec![Transport::Udp],
+        };
+        if self.policy == Policy::RelayTransport {
+            transports.push(Transport::Relay);
+        }
+        transports
     }
 
     fn label(&self) -> String {
@@ -110,10 +116,10 @@ impl Cell {
                 Policy::LookupOnly => "lookup-only",
                 Policy::RelayTransport => "relay-transport",
             },
-            match self.native {
-                NativeTransports::Default => "native-all",
-                NativeTransports::WebRtcOnly => "native-webrtc",
-                NativeTransports::RelayOnly => "native-relay-only",
+            match self.paths {
+                Paths::UdpAndWebRtc => "udp+webrtc",
+                Paths::WebRtcOnly => "webrtc",
+                Paths::UdpOnly => "udp",
             },
             match self.join {
                 JoinMode::Topic => "topic",
@@ -128,11 +134,7 @@ impl Cell {
 fn cells(quick: bool) -> Vec<Cell> {
     let mut cells = Vec::new();
     for policy in [Policy::LookupOnly, Policy::RelayTransport] {
-        for native in [
-            NativeTransports::Default,
-            NativeTransports::WebRtcOnly,
-            NativeTransports::RelayOnly,
-        ] {
+        for paths in [Paths::UdpAndWebRtc, Paths::WebRtcOnly, Paths::UdpOnly] {
             for join in [
                 JoinMode::Topic,
                 JoinMode::IdFromNative,
@@ -141,19 +143,20 @@ fn cells(quick: bool) -> Vec<Cell> {
                 cells.push(Cell {
                     discovery: Discovery::Relay,
                     policy,
-                    native,
+                    paths,
                     join,
                 });
             }
         }
     }
-    // Nostr alone: no relay, so no relay transport and no relay-only native.
-    for native in [NativeTransports::Default, NativeTransports::WebRtcOnly] {
+    // Nostr alone: no relay, so no relay transport, and a browser always has
+    // the data channel.
+    for paths in [Paths::UdpAndWebRtc, Paths::WebRtcOnly] {
         for join in [JoinMode::IdFromNative, JoinMode::IdBrowserFirst] {
             cells.push(Cell {
                 discovery: Discovery::NostrOnly,
                 policy: Policy::LookupOnly,
-                native,
+                paths,
                 join,
             });
         }
@@ -161,21 +164,20 @@ fn cells(quick: bool) -> Vec<Cell> {
     cells.push(Cell {
         discovery: Discovery::NostrOnly,
         policy: Policy::LookupOnly,
-        native: NativeTransports::Default,
+        paths: Paths::UdpAndWebRtc,
         join: JoinMode::BrowserPair,
     });
     if quick {
         // The cells that cover every mechanism once: both policies on the
-        // default transports, the WebRTC-only lane, the refusal, and Nostr
+        // default transports, the WebRTC-only mesh, the refusal, and Nostr
         // alone for a native and a browser pair.
         cells.retain(|cell| match cell.discovery {
             Discovery::Relay => {
                 cell.join == JoinMode::Topic
-                    && (cell.native == NativeTransports::Default
-                        || cell.policy == Policy::LookupOnly)
+                    && (cell.paths == Paths::UdpAndWebRtc || cell.policy == Policy::LookupOnly)
             }
             Discovery::NostrOnly => {
-                cell.native == NativeTransports::Default
+                cell.paths == Paths::UdpAndWebRtc
                     && matches!(cell.join, JoinMode::IdFromNative | JoinMode::BrowserPair)
             }
         });
@@ -243,26 +245,26 @@ fn drain_logs() -> String {
 
 // ── the native peer ─────────────────────────────────────────────────────
 
-/// The in-process side of a cell: a live pipe session plus everything a
-/// check reads — inbound frames, surfaced events, the roster on demand.
+/// The in-process side of a cell: a live membership plus everything a check
+/// reads — inbound messages, surfaced events, the roster on demand.
 struct Native {
-    session: fofoca_pipe::Session,
+    membership: membership::Membership,
     events: tokio::sync::mpsc::UnboundedReceiver<String>,
     seen_events: Vec<serde_json::Value>,
-    seen_frames: Vec<fofoca_pipe::Inbound>,
+    seen_msgs: Vec<membership::Inbound>,
 }
 
 impl Native {
-    async fn open(opts: &fofoca_pipe::Opts) -> Result<Self, Skip> {
-        let (sink, events) = fofoca_pipe::json_sink();
-        let session = fofoca_pipe::join(opts, sink)
+    async fn open(opts: &membership::Opts) -> Result<Self, Skip> {
+        let (sink, events) = membership::json_sink();
+        let membership = membership::join(opts, sink)
             .await
             .map_err(|error| Skip(format!("native peer failed to open: {error:#}")))?;
         Ok(Self {
-            session,
+            membership,
             events,
             seen_events: Vec::new(),
-            seen_frames: Vec::new(),
+            seen_msgs: Vec::new(),
         })
     }
 
@@ -272,8 +274,8 @@ impl Native {
                 self.seen_events.push(event);
             }
         }
-        while let Ok(frame) = self.session.inbound.try_recv() {
-            self.seen_frames.push(frame);
+        while let Ok(msg) = self.membership.inbound.try_recv() {
+            self.seen_msgs.push(msg);
         }
     }
 
@@ -285,79 +287,42 @@ impl Native {
         })
     }
 
-    fn saw_frame(&mut self, text: &str, directed: bool) -> bool {
+    fn saw_msg(&mut self, text: &str, directed: bool) -> bool {
         self.pump();
-        self.seen_frames
+        self.seen_msgs
             .iter()
-            .any(|frame| frame.directed == directed && frame.bytes == text.as_bytes())
+            .any(|msg| msg.directed == directed && msg.text == text)
     }
 
     async fn request<T>(
         &self,
-        build: impl FnOnce(tokio::sync::oneshot::Sender<T>) -> fofoca_pipe::Request,
+        build: impl FnOnce(tokio::sync::oneshot::Sender<T>) -> membership::Request,
     ) -> Result<T, String> {
-        self.session.request(build).await
+        self.membership.request(build).await
     }
 
     async fn roster_json(&self) -> String {
-        self.request(|reply| fofoca_pipe::Request::Peers { reply })
+        self.request(|reply| membership::Request::Peers { reply })
             .await
             .unwrap_or_default()
     }
 
     async fn send(&self, to: Option<&str>, text: &str) -> Result<(), String> {
-        let to = fofoca_pipe::parse_to(to).map_err(|error| error.to_string())?;
-        let body = fofoca_pipe::data_body(text.as_bytes()).map_err(|error| error.to_string())?;
-        self.request(|reply| fofoca_pipe::Request::Send {
-            tag: fofoca_pipe::data_tag(),
-            to,
-            body,
-            reply,
-        })
-        .await?
+        let to = membership::parse_to(to).map_err(|error| error.to_string())?;
+        let body = membership::msg_body(text).map_err(|error| error.to_string())?;
+        self.request(|reply| membership::Request::Send { to, body, reply })
+            .await?
     }
 
     async fn state_merge(&self, merge: serde_json::Value) -> Result<(), String> {
-        self.request(|reply| fofoca_pipe::Request::StateMerge { merge, reply })
+        self.request(|reply| membership::Request::StateMerge { merge, reply })
             .await?
     }
 
     async fn state_json(&self) -> String {
-        self.request(|reply| fofoca_pipe::Request::StateJson { reply })
+        self.request(|reply| membership::Request::StateJson { reply })
             .await
             .unwrap_or_default()
-    }
-}
-
-// ── the browser page ────────────────────────────────────────────────────
-
-/// One browser on the harness page, behind whichever driver reaches it.
-pub(super) enum Page {
-    Cdp(cdp::Browser),
-    WebDriver(webdriver::Session),
-}
-
-impl Page {
-    pub(super) fn navigate(&self, url: &str) {
-        match self {
-            Self::Cdp(browser) => browser.navigate(url),
-            Self::WebDriver(session) => session.navigate(url),
-        }
-    }
-
-    /// Evaluate a JS expression (no `return`), reading its value as a string.
-    pub(super) fn evaluate(&self, expression: &str) -> String {
-        match self {
-            Self::Cdp(browser) => browser.evaluate(expression),
-            Self::WebDriver(session) => session.execute(&format!("return ({expression});")),
-        }
-    }
-
-    fn version(&self) -> String {
-        match self {
-            Self::Cdp(browser) => browser.version(),
-            Self::WebDriver(session) => session.version(),
-        }
     }
 }
 
@@ -387,7 +352,8 @@ async fn native_send_with_retry(
 
 async fn check_payload_lanes(page: &Page, native: &mut Native) -> Result<(), CellFailure> {
     let fail = |message: String| CellFailure(message);
-    let frames_text = || page.evaluate("(document.getElementById('frames')||{}).textContent||''");
+    let messages_text =
+        || page.evaluate("(document.getElementById('messages')||{}).textContent||''");
 
     // ── broadcast both ways ─────────────────────────────────────────
     native_send_with_retry(native, None, "native-broadcast")
@@ -395,14 +361,14 @@ async fn check_payload_lanes(page: &Page, native: &mut Native) -> Result<(), Cel
         .map_err(|error| fail(format!("native broadcast refused: {error}")))?;
     call_page(page, "harness", "send(null, 'browser-broadcast')").map_err(&fail)?;
     let broadcast_both = wait_for(PAYLOAD_TIMEOUT, Duration::from_millis(500), || {
-        (frames_text().contains("native-broadcast") && native.saw_frame("browser-broadcast", false))
+        (messages_text().contains("native-broadcast") && native.saw_msg("browser-broadcast", false))
             .then_some(())
     });
     if broadcast_both.is_none() {
         return Err(fail(format!(
             "a broadcast did not arrive on both sides (browser got native's: {}, native got browser's: {})",
-            frames_text().contains("native-broadcast"),
-            native.saw_frame("browser-broadcast", false),
+            messages_text().contains("native-broadcast"),
+            native.saw_msg("browser-broadcast", false),
         )));
     }
 
@@ -412,12 +378,12 @@ async fn check_payload_lanes(page: &Page, native: &mut Native) -> Result<(), Cel
         .map_err(|error| fail(format!("native directed send refused: {error}")))?;
     call_page(page, "harness", "send('native', 'browser-directed')").map_err(&fail)?;
     let directed_both = wait_for(PAYLOAD_TIMEOUT, Duration::from_millis(500), || {
-        (frames_text().contains("native-directed") && native.saw_frame("browser-directed", true))
+        (messages_text().contains("native-directed") && native.saw_msg("browser-directed", true))
             .then_some(())
     });
     if directed_both.is_none() {
         return Err(fail(
-            "a directed frame did not arrive on both sides".to_owned(),
+            "a directed message did not arrive on both sides".to_owned(),
         ));
     }
 
@@ -448,36 +414,6 @@ async fn check_payload_lanes(page: &Page, native: &mut Native) -> Result<(), Cel
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
-}
-
-/// A page object's promise-returning controls (`window.harness`,
-/// `window.chat`), awaited via a completion flag the driver polls — neither
-/// backend can await a JS promise directly.
-pub(super) fn call_page(page: &Page, object: &str, call: &str) -> Result<(), String> {
-    let token = format!("call{}", rand_token());
-    let expression = format!(
-        "window.{token}='pending',window.{object}.{call}.then(()=>window.{token}='ok',(e)=>window.{token}='error: '+e),'started'"
-    );
-    let started = page.evaluate(&expression);
-    if started != "started" {
-        return Err(format!("{object} call {call} did not start: {started:?}"));
-    }
-    let outcome = wait_for(PAYLOAD_TIMEOUT, Duration::from_millis(250), || {
-        let state = page.evaluate(&format!("window.{token}"));
-        (state != "pending").then_some(state)
-    })
-    .ok_or_else(|| format!("{object} call {call} never settled"))?;
-    if outcome == "ok" {
-        return Ok(());
-    }
-    Err(format!("{object} call {call} failed: {outcome}"))
-}
-
-pub(super) fn rand_token() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|since| since.subsec_nanos().into())
-        .unwrap_or_default()
 }
 
 // ── the served page ─────────────────────────────────────────────────────
@@ -514,7 +450,7 @@ impl BunServer {
             url: format!("http://127.0.0.1:{port}"),
         };
         let up = wait_for(Duration::from_secs(30), Duration::from_millis(250), || {
-            super::server::reachable(&server.url).then_some(())
+            crate::util::reachable(&server.url).then_some(())
         });
         if up.is_none() {
             return Err(Skip(format!("the {what} server never came up")));
@@ -523,7 +459,7 @@ impl BunServer {
     }
 }
 
-pub(super) use super::webdriver::free_port;
+pub(super) use crate::util::webdriver::free_port;
 
 // ── one cell ────────────────────────────────────────────────────────────
 
@@ -535,42 +471,26 @@ impl fmt::Display for CellFailure {
     }
 }
 
-fn native_opts(cell: &Cell, urls: &Urls, selector: NativeSelector<'_>) -> fofoca_pipe::Opts {
-    let mut opts = fofoca_pipe::Opts::default();
+fn native_opts(cell: &Cell, urls: &Urls, selector: NativeSelector<'_>) -> membership::Opts {
+    let mut opts = membership::Opts::default();
     match selector {
         NativeSelector::Topic(topic) => opts.topic = Some(topic.to_owned()),
         NativeSelector::Id(id) => opts.mesh = Some(id.to_owned()),
-        NativeSelector::Create => {}
+        // A topic always uses every lookup; a create names its own, and the
+        // relay lists below need theirs among them.
+        NativeSelector::Create => {
+            opts.lookup = vec![match cell.discovery {
+                Discovery::Relay => Lookup::Relay,
+                Discovery::NostrOnly => Lookup::Nostr,
+            }];
+        }
     }
     opts.nick = Some("native".to_owned());
     match cell.discovery {
-        Discovery::Relay => {
-            opts.lookup = vec![fofoca_pipe::Lookup::Relay];
-            opts.relay_urls = vec![urls.relay.clone()];
-        }
-        Discovery::NostrOnly => {
-            opts.lookup = vec![fofoca_pipe::Lookup::Nostr];
-            opts.nostr_urls = vec![urls.nostr.clone()];
-        }
+        Discovery::Relay => opts.relay_urls = vec![urls.relay.clone()],
+        Discovery::NostrOnly => opts.nostr_urls = vec![urls.nostr.clone()],
     }
-    opts.transport = match cell.policy {
-        Policy::RelayTransport => vec![fofoca_pipe::Transport::P2p, fofoca_pipe::Transport::Relay],
-        Policy::LookupOnly => vec![fofoca_pipe::Transport::P2p],
-    };
-    opts.paths = match cell.native {
-        NativeTransports::Default => fofoca_pipe::PathFlags {
-            ip: true,
-            webrtc: true,
-        },
-        NativeTransports::WebRtcOnly => fofoca_pipe::PathFlags {
-            ip: false,
-            webrtc: true,
-        },
-        NativeTransports::RelayOnly => fofoca_pipe::PathFlags {
-            ip: false,
-            webrtc: false,
-        },
-    };
+    opts.transport = cell.transports();
     opts
 }
 
@@ -594,18 +514,41 @@ fn page_url(base: &str, cell: &Cell, urls: &Urls, selector: &str, nick: &str) ->
     };
     format!(
         "{base}/?{selector}&nick={nick}&{meeting}&transport={}&log=fofoca=debug,iroh_gossip=debug",
-        match cell.policy {
-            Policy::RelayTransport => "p2p,relay",
-            Policy::LookupOnly => "p2p",
-        },
+        cell.transports()
+            .into_iter()
+            .map(Transport::as_str)
+            .collect::<Vec<_>>()
+            .join(","),
     )
 }
 
-pub(super) fn urlencode(raw: &str) -> String {
-    raw.replace('%', "%25")
-        .replace('&', "%26")
-        .replace('+', "%2B")
-        .replace('#', "%23")
+/// The refusal cell: the tab must refuse a mesh it could carry no payload in,
+/// and say why, rather than join and sit unlinked.
+fn refused_by_the_tab(
+    cell: &Cell,
+    urls: &Urls,
+    harness: &BunServer,
+    page: &Page,
+    topic: &str,
+) -> Result<String, CellFailure> {
+    page.navigate(&page_url(
+        &harness.url,
+        cell,
+        urls,
+        &format!("topic={topic}"),
+        "browser",
+    ));
+    let failed = wait_for(Duration::from_secs(30), Duration::from_millis(500), || {
+        let failed = page_text(page, "failed");
+        (!failed.is_empty()).then_some(failed)
+    })
+    .ok_or_else(|| CellFailure("the tab opened a mesh it has no path in".to_owned()))?;
+    if !failed.contains(fofoca::runtime::BROWSER_HAS_NO_PATH) {
+        return Err(CellFailure(format!(
+            "the tab failed for another reason: {failed}"
+        )));
+    }
+    Ok("refused by the tab".to_owned())
 }
 
 /// The line the offering side logs when a session's offer and answer rode
@@ -618,19 +561,16 @@ fn page_text(page: &Page, id: &str) -> String {
     ))
 }
 
+/// Every console line the tab mirrored, not only the tail `#log` shows.
+fn page_log(page: &Page) -> String {
+    page.evaluate("(window.harnessLog||[]).join('\\n')")
+}
+
 /// Wait for the harness page to open its mesh, or say why it did not.
 fn wait_page_ready(page: &Page) -> Result<(), CellFailure> {
-    let fail = |message: String| CellFailure(message);
-    let ready = wait_for(Duration::from_secs(30), Duration::from_millis(500), || {
-        let failed = page_text(page, "failed");
-        if !failed.is_empty() {
-            return Some(Err(failed));
-        }
-        let ready = page.evaluate("document.getElementById('ready')?'1':'0'");
-        (ready == "1").then_some(Ok(()))
-    })
-    .ok_or_else(|| fail("the harness page never became ready".to_owned()))?;
-    ready.map_err(|error| fail(format!("the harness page failed to open the mesh: {error}")))
+    let ready = wait_ready(page, Duration::from_secs(30), Duration::from_millis(500))
+        .ok_or_else(|| CellFailure("the harness page never became ready".to_owned()))?;
+    ready.map_err(|error| CellFailure(format!("the harness page failed to open the mesh: {error}")))
 }
 
 /// Mint a mesh id on the native side and leave it, so a browser can be the
@@ -639,9 +579,9 @@ async fn mint_id(cell: &Cell, urls: &Urls) -> Result<String, CellFailure> {
     let minted = Native::open(&native_opts(cell, urls, NativeSelector::Create))
         .await
         .map_err(|Skip(reason)| CellFailure(reason))?;
-    let id = minted.session.node.mesh_id().to_string();
+    let id = minted.membership.node.mesh_id().to_string();
     minted
-        .session
+        .membership
         .node
         .leave()
         .await
@@ -656,9 +596,9 @@ async fn open_pair(
     urls: &Urls,
     harness: &BunServer,
     page: &Page,
+    topic: &str,
 ) -> Result<Native, CellFailure> {
     let fail = |message: String| CellFailure(message);
-    let topic = format!("mesh-matrix-{}", rand_token());
     let (native, selector) = match cell.join {
         JoinMode::Topic | JoinMode::TopicBrowserFirst => {
             let selector = format!("topic={topic}");
@@ -670,7 +610,7 @@ async fn open_pair(
                 // claim and the native side usually won it anyway. The tab's
                 // console mirrors INFO lines into `#log`; wait for its word.
                 let claimed = wait_for(Duration::from_mins(1), Duration::from_millis(500), || {
-                    page.evaluate("(document.getElementById('log')||{}).textContent||''")
+                    page_text(page, "log")
                         .contains("beacon role active")
                         .then_some(())
                 });
@@ -678,7 +618,7 @@ async fn open_pair(
                     return Err(fail("the tab never claimed the beacon".to_owned()));
                 }
             }
-            let native = Native::open(&native_opts(cell, urls, NativeSelector::Topic(&topic)))
+            let native = Native::open(&native_opts(cell, urls, NativeSelector::Topic(topic)))
                 .await
                 .map_err(|Skip(reason)| fail(reason))?;
             (native, selector)
@@ -687,7 +627,7 @@ async fn open_pair(
             let native = Native::open(&native_opts(cell, urls, NativeSelector::Create))
                 .await
                 .map_err(|Skip(reason)| fail(reason))?;
-            let id = native.session.node.mesh_id().to_string();
+            let id = native.membership.node.mesh_id().to_string();
             (
                 native,
                 format!("mesh={urlencoded}", urlencoded = urlencode(&id)),
@@ -726,7 +666,6 @@ async fn open_pair(
         }
         page.navigate(&page_url(&harness.url, cell, urls, &selector, "browser"));
     }
-
     Ok(native)
 }
 
@@ -737,49 +676,27 @@ async fn run_cell(
     page: &Page,
 ) -> Result<String, CellFailure> {
     let fail = |message: String| CellFailure(message);
+    let topic = format!("mesh-matrix-{}", rand_token());
     drain_logs();
 
-    let mut native = open_pair(cell, urls, harness, page).await?;
+    if !cell.expects_link() {
+        return refused_by_the_tab(cell, urls, harness, page, &topic);
+    }
 
-    // The page must open the mesh — even the refusal cell (the mesh opens;
-    // the *pair* never links).
+    let mut native = open_pair(cell, urls, harness, page, &topic).await?;
     wait_page_ready(page)?;
 
     // ── link expectation ────────────────────────────────────────────
-    let browser_sees_native = || {
-        page.evaluate("(document.getElementById('peers')||{}).textContent||''")
-            .contains("\"native\"")
-    };
-    if cell.expects_link() {
-        let linked = wait_for(LINK_TIMEOUT, Duration::from_secs(1), || {
-            (native.saw_event("joined", "browser") && browser_sees_native()).then_some(())
-        });
-        if linked.is_none() {
-            return Err(fail(format!(
-                "the pair never linked (native saw browser: {}, browser saw native: {})",
-                native.saw_event("joined", "browser"),
-                browser_sees_native(),
-            )));
-        }
-    } else {
-        tokio::time::sleep(REFUSAL_WINDOW).await;
-        if native.saw_event("joined", "browser") || browser_sees_native() {
-            return Err(fail(
-                "a relay-only pair linked although the relay is lookup only".to_owned(),
-            ));
-        }
-        // Whichever side holds the beacon does the refusing: native-first
-        // cells log it natively, browser-first cells log it in the tab.
-        let logs = drain_logs();
-        let browser_log = page.evaluate("(document.getElementById('log')||{}).textContent||''");
-        if !logs.contains("relay-only path refused")
-            && !browser_log.contains("relay-only path refused")
-        {
-            return Err(fail(
-                "the pair stayed unlinked but the engine never logged the refusal".to_owned(),
-            ));
-        }
-        return Ok("held apart, refusal logged".to_owned());
+    let browser_sees_native = || page_text(page, "peers").contains("\"native\"");
+    let linked = wait_for(LINK_TIMEOUT, Duration::from_secs(1), || {
+        (native.saw_event("joined", "browser") && browser_sees_native()).then_some(())
+    });
+    if linked.is_none() {
+        return Err(fail(format!(
+            "the pair never linked (native saw browser: {}, browser saw native: {})",
+            native.saw_event("joined", "browser"),
+            browser_sees_native(),
+        )));
     }
 
     // ── lanes: wait for the pair's own direct session ───────────────
@@ -810,7 +727,7 @@ async fn run_cell(
 
     if cell.discovery == Discovery::NostrOnly
         && !logs_contain(NOSTR_ATTACH)
-        && !page_text(page, "log").contains(NOSTR_ATTACH)
+        && !page_log(page).contains(NOSTR_ATTACH)
     {
         return Err(fail(format!(
             "the pair linked, but neither side logged `{NOSTR_ATTACH}`"
@@ -832,14 +749,14 @@ async fn run_cell(
 }
 
 /// A page's send, retried inside the payload window. The first directed
-/// frame can race the pair's own session, like the native side's.
+/// message can race the pair's own session, like the native side's.
 fn page_send_with_retry(page: &Page, to: Option<&str>, text: &str) -> Result<(), CellFailure> {
     let to = to.map_or_else(|| "null".to_owned(), |nick| format!("'{nick}'"));
     let call = format!("send({to}, '{text}')");
     let deadline = std::time::Instant::now() + PAYLOAD_TIMEOUT;
     loop {
         match call_page(page, "harness", &call) {
-            Ok(()) => return Ok(()),
+            Ok(_) => return Ok(()),
             Err(error) if std::time::Instant::now() >= deadline => {
                 return Err(CellFailure(error));
             }
@@ -885,17 +802,15 @@ async fn run_browser_pair(
         page_send_with_retry(from, None, &broadcast)?;
         page_send_with_retry(from, Some(nick), &directed)?;
         let arrived = wait_for(PAYLOAD_TIMEOUT, Duration::from_millis(500), || {
-            let frames = page_text(to, "frames");
-            (frames.contains(&broadcast) && frames.contains(&directed)).then_some(())
+            let messages = page_text(to, "messages");
+            (messages.contains(&broadcast) && messages.contains(&directed)).then_some(())
         });
         if arrived.is_none() {
-            return Err(fail(format!("{nick} never got both frames")));
+            return Err(fail(format!("{nick} never got both messages")));
         }
     }
 
-    if !page_text(first, "log").contains(NOSTR_ATTACH)
-        && !page_text(second, "log").contains(NOSTR_ATTACH)
-    {
+    if !page_log(first).contains(NOSTR_ATTACH) && !page_log(second).contains(NOSTR_ATTACH) {
         return Err(fail(format!(
             "the tabs linked, but neither logged `{NOSTR_ATTACH}`"
         )));
@@ -969,7 +884,7 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
         ),
     );
 
-    let only = args.only.clone().unwrap_or_else(|| "cft".to_owned());
+    let only = args.page_browser().to_owned();
     // `MESH_CELL=<substring>` narrows the sweep to matching cell labels —
     // for iterating on one failing cell without paying for the rest.
     let cell_filter = std::env::var("MESH_CELL").ok();
@@ -1004,21 +919,44 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
             runtime.block_on(run_cell(cell, &urls, &harness, &page))
         };
         match outcome {
-            Ok(detail) if cell.known_failure().is_some() => output::caution(
-                "fixed?",
-                &format!(
-                    "{}  {detail} (listed as a known failure: remove the entry)",
-                    cell.label()
-                ),
-            ),
             Ok(detail) => output::status("ok", &format!("{}  {detail}", cell.label())),
-            Err(CellFailure(reason)) if let Some(known) = cell.known_failure() => {
-                output::caution("known", &format!("{}  {reason} ({known})", cell.label()));
-            }
             Err(CellFailure(reason)) => {
                 failures += 1;
                 output::failure("FAILED", &format!("{}  {reason}", cell.label()));
-                dump_failure(cell, &page);
+                // The whole native log plus the browser's DOM state, to a
+                // file — twenty lines of tail answered nothing twice.
+                let logs = drain_logs();
+                let browser = [
+                    (
+                        "failed",
+                        "(document.getElementById('failed')||{}).textContent||''",
+                    ),
+                    (
+                        "peers",
+                        "(document.getElementById('peers')||{}).textContent||''",
+                    ),
+                    (
+                        "events",
+                        "(document.getElementById('events')||{}).textContent||''",
+                    ),
+                    (
+                        "messages",
+                        "(document.getElementById('messages')||{}).textContent||''",
+                    ),
+                    ("console", "(window.harnessLog||[]).join('\\n')"),
+                ]
+                .map(|(name, expr)| {
+                    format!(
+                        "\u{2500}\u{2500} browser {name} \u{2500}\u{2500}\n{}\n",
+                        page.evaluate(expr)
+                    )
+                });
+                let dump = repo_root().join("target").join(format!(
+                    "mesh-cell-{}.log",
+                    cell.label().replace([' ', '/'], "_")
+                ));
+                let _ = std::fs::write(&dump, format!("{}\n{logs}", browser.join("\n")));
+                output::detail(&format!("full log: {}", dump.display()));
             }
         }
         output::detail(&page.version());
@@ -1030,60 +968,25 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
     Ok(())
 }
 
-/// Why a cell failed, kept past the run.
-fn dump_failure(cell: &Cell, page: &Page) {
-    // The whole native log plus the browser's DOM state, to a
-    // file — twenty lines of tail answered nothing twice.
-    let logs = drain_logs();
-    let browser = [
-        (
-            "failed",
-            "(document.getElementById('failed')||{}).textContent||''",
-        ),
-        (
-            "peers",
-            "(document.getElementById('peers')||{}).textContent||''",
-        ),
-        (
-            "events",
-            "(document.getElementById('events')||{}).textContent||''",
-        ),
-        (
-            "frames",
-            "(document.getElementById('frames')||{}).textContent||''",
-        ),
-        (
-            "console",
-            "(document.getElementById('log')||{}).textContent||''",
-        ),
-    ]
-    .map(|(name, expr)| {
-        format!(
-            "\u{2500}\u{2500} browser {name} \u{2500}\u{2500}\n{}\n",
-            page.evaluate(expr)
-        )
-    });
-    let dump = repo_root().join("target").join(format!(
-        "mesh-cell-{}.log",
-        cell.label().replace([' ', '/'], "_")
-    ));
-    let _ = std::fs::write(&dump, format!("{}\n{logs}", browser.join("\n")));
-    output::detail(&format!("full log: {}", dump.display()));
-}
-
 pub(super) fn launch_page(only: &str) -> Result<Page, Skip> {
     if "cft".contains(only) || only.contains("cft") {
-        return Ok(Page::Cdp(cdp::Browser::launch()?));
+        return Ok(Page::Cdp(Box::new(cdp::Browser::launch()?)));
     }
     for browser in super::browsers() {
         if !browser.name.contains(only) {
             continue;
         }
+        if browser.binary.is_empty() {
+            return Err(Skip(format!(
+                "{}: set $CHROME_BIN and $CHROMEDRIVER to run it",
+                browser.name
+            )));
+        }
         if !PathBuf::from(&browser.binary).exists() {
             return Err(Skip(format!("not installed: {}", browser.binary)));
         }
         return match browser.backend {
-            super::Backend::Cdp => Ok(Page::Cdp(cdp::Browser::launch()?)),
+            super::Backend::Cdp => Ok(Page::Cdp(Box::new(cdp::Browser::launch()?))),
             super::Backend::WebDriver => Ok(Page::WebDriver(webdriver::Session::open(
                 browser.name,
                 &browser.binary,

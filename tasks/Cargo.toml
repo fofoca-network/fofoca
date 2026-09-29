@@ -13,7 +13,7 @@ publish = false
 # the commands that are a single foreground call. Anything whose child has to
 # outlive the call — the harness server, the drivers — uses
 # `std::process::Command` directly so it can be killed on drop.
-clap = { version = "4", features = ["derive"] }
+clap = { workspace = true }
 xshell = "0.2"
 # Cargo's `--message-format=json` for artifact discovery, and the WebDriver
 # wire format. Both already in `Cargo.lock` via the workspace entries.
@@ -25,6 +25,9 @@ serde_json = { workspace = true }
 # feature kept — it is `send_json`/`read_json`, and hand-rolling those against
 # `serde_json` was most of what made the original `curl | jq` runner painful.
 ureq = { version = "3", default-features = false, features = ["json"] }
+# The CDP backend's one `WebSocket` to the page. Plain `ws://` to 127.0.0.1
+# only, so no TLS stack.
+tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 # Cargo-style status output, so a long sweep reads like the cargo invocations
 # around it rather than like a shell script.
 anstyle = "1"
@@ -32,11 +35,15 @@ anstream = "0.6"
 # The `mesh` feature's deps: the mesh and chat suites run a real native peer
 # in-process and a local relay, so the runner depends on the engine it drives.
 fofoca = { path = "../crates/fofoca", features = ["iroh-test-utils"], optional = true }
-fofoca-pipe = { path = "../crates/fofoca-pipe", optional = true }
 # The in-process Nostr relay the Nostr-only cells meet on.
 fofoca-nostr = { path = "../crates/fofoca-nostr", features = ["test-relay"], optional = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"], optional = true }
 tracing-subscriber = { workspace = true, optional = true }
+# The `bench` feature's deps: the native cells of `cargo task benchmark` stand
+# up real iroh endpoints over the WebRTC transport — the transport alone, not
+# the engine. iroh is reached through the transport's re-export, never named
+# here (the workspace rule: only `fofoca` names `iroh`).
+fofoca-iroh-webrtc-transport = { path = "../crates/fofoca-iroh-webrtc-transport", features = ["native", "bench"], optional = true }
 
 [features]
 # The mesh and chat e2e suites need the engine and its test relay. Off by
@@ -44,7 +51,10 @@ tracing-subscriber = { workspace = true, optional = true }
 # into `fofoca` (`tasks` is a workspace member, and cargo takes the union of
 # every selected package's features); `cargo task e2e --suite mesh|chat`
 # re-runs itself with this on.
-mesh = ["dep:fofoca", "dep:fofoca-pipe", "dep:fofoca-nostr", "dep:tokio", "dep:tracing-subscriber"]
+mesh = ["dep:fofoca", "dep:fofoca-nostr", "dep:tokio", "dep:tracing-subscriber"]
+# The throughput benchmark's native halves. Same re-exec pattern; a lighter
+# closure than `mesh`, since it needs the transport and not the engine.
+bench = ["dep:fofoca-iroh-webrtc-transport", "dep:tokio"]
 
 [lints]
 workspace = true

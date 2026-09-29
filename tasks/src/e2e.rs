@@ -14,7 +14,8 @@ use std::time::Duration;
 use clap::{Args as ClapArgs, ValueEnum};
 
 use crate::TaskOutcome;
-use crate::util::output;
+use crate::util::webdriver::{Driver, SAFARI_TP};
+use crate::util::{Skip, json_to_string, output};
 
 pub(crate) mod build;
 mod cdp;
@@ -23,7 +24,11 @@ mod chat;
 mod loopback;
 #[cfg(feature = "mesh")]
 mod mesh;
+#[cfg(feature = "mesh")]
+mod page;
 mod server;
+#[cfg(feature = "mesh")]
+mod stream;
 mod webdriver;
 
 use server::Harness;
@@ -58,6 +63,9 @@ const FAILED_SCRIPT: &str =
 #[derive(ClapArgs)]
 pub(crate) struct Args {
     /// Only browsers whose name contains this (e.g. `cft`, `chrome`, `safari`).
+    /// The suites that drive one tab (`stream`, `chat`, `mesh`) take the first
+    /// match, so name one browser there: `cft`, `chrome-ci`, `chrome-151`,
+    /// `safari`, `safari-tp`. Without it they open `safari-tp`.
     #[arg(long)]
     only: Option<String>,
     /// Only this build profile (`release`, `release-slow`). Each one is a
@@ -85,6 +93,14 @@ pub(crate) struct Args {
 }
 
 impl Args {
+    /// The one browser a suite that drives a single tab opens: `--only`, or
+    /// Safari Technology Preview, the next `WebKit`, where a browser-only
+    /// regression shows first.
+    #[cfg(feature = "mesh")]
+    fn page_browser(&self) -> &str {
+        self.only.as_deref().unwrap_or("safari-tp")
+    }
+
     fn profiles(&self) -> Vec<Profile> {
         if self.quick {
             return vec![Profile::Release];
@@ -120,6 +136,10 @@ enum Suite {
     /// The chat example end to end: the native terminal chat in robot mode
     /// against the browser chat page, over a local relay.
     Chat,
+    /// A stream end to end: the `fofoca-stream` CLI against the stream web
+    /// page, over a local relay: bytes in on one side, the same bytes out on
+    /// the other, each side as producer once.
+    Stream,
 }
 
 /// Which wasm build a cell runs.
@@ -171,22 +191,20 @@ struct Browser {
     ///
     /// It is *in-page* contention, not Chrome's `Emulation.setCPUThrottlingRate`.
     /// That was tried first and silently did nothing: the rate is scoped to the
-    /// CDP session that set it, and a one-shot `agent-browse cdp` call closes
-    /// that session before the page navigates. Measured with a 200-task chain:
+    /// CDP session that set it, and the backend then opened a new session per
+    /// call, which closed before the page navigated. Measured with a 200-task chain:
     /// 1234 ms unthrottled, 1358 ms at a nominal 20×. Eight cells had reported
     /// a throttle axis they never ran.
     pressures: &'static [u32],
 }
 
 fn browsers() -> Vec<Browser> {
-    let home = std::env::var("HOME").unwrap_or_default();
     vec![
         Browser {
             name: "chrome-cft",
             backend: Backend::Cdp,
-            binary: format!(
-                "{home}/.agent-browse/chrome/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"
-            ),
+            // Resolved (and downloaded on first use) by `cdp::chrome_for_testing`.
+            binary: String::new(),
             pressures: &[0, 2, 8],
         },
         Browser {
@@ -199,17 +217,30 @@ fn browsers() -> Vec<Browser> {
             // ~110 s and has never yet answered differently.
             pressures: &[0],
         },
+        // Any Chrome, driven through chromedriver.
+        // `CHROME_BIN` and `CHROMEDRIVER` name the two binaries.
+        Browser {
+            name: "chrome-ci",
+            backend: Backend::WebDriver,
+            binary: std::env::var("CHROME_BIN").unwrap_or_default(),
+            pressures: &[0],
+        },
         Browser {
             name: "safari",
             backend: Backend::WebDriver,
             binary: "/Applications/Safari.app/Contents/MacOS/Safari".to_owned(),
             pressures: &[0],
         },
+        // The next WebKit, driven by its own safaridriver, which needs its own
+        // `sudo … safaridriver --enable` once.
+        Browser {
+            name: "safari-tp",
+            backend: Backend::WebDriver,
+            binary: SAFARI_TP.to_owned(),
+            pressures: &[0],
+        },
     ]
 }
-
-/// A cell that could not run at all, with a reason a reader can act on.
-struct Skip(String);
 
 /// What a cell's page published.
 struct Harvest {
@@ -258,10 +289,10 @@ fn run_engine_suite(args: &Args) -> TaskOutcome {
     if !args.list {
         build::check_tooling()?;
     }
-    if args.suite == Suite::Mesh {
-        mesh::run(args)
-    } else {
-        chat::run(args)
+    match args.suite {
+        Suite::Mesh => mesh::run(args),
+        Suite::Stream => stream::run(args),
+        Suite::Chat | Suite::Matrix | Suite::Loopback => chat::run(args),
     }
 }
 
@@ -270,38 +301,18 @@ fn run_engine_suite(args: &Args) -> TaskOutcome {
 /// build; a plain `--workspace` build never sees `iroh-test-utils`.
 #[cfg(not(feature = "mesh"))]
 fn run_engine_suite(_: &Args) -> TaskOutcome {
-    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    output::status("Rerunning", "with `--features mesh` (the engine suites)");
-    let status = std::process::Command::new(cargo)
-        .current_dir(crate::util::repo_root())
-        .args([
-            "run",
-            "--quiet",
-            "--package",
-            "tasks",
-            "--features",
-            "mesh",
-            "--",
-        ])
-        .args(std::env::args_os().skip(1))
-        .status()
-        .map_err(|error| format!("could not re-run cargo: {error}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("the engine suite failed: {status}").into())
-    }
+    crate::util::reexec_with_feature("mesh", "the engine suites", false)
 }
 
 pub(crate) fn run(args: &Args) -> TaskOutcome {
-    if matches!(args.suite, Suite::Mesh | Suite::Chat) {
+    if matches!(args.suite, Suite::Mesh | Suite::Chat | Suite::Stream) {
         return run_engine_suite(args);
     }
 
     let env = if args.list {
         BTreeMap::new()
     } else {
-        build::wasm_env()?
+        crate::util::wasm::wasm_env()?
     };
     if !args.list {
         build::check_tooling()?;
@@ -310,14 +321,14 @@ pub(crate) fn run(args: &Args) -> TaskOutcome {
     // The fast suite reports per-test through the runner rather than through a
     // published table, so it takes its own path and returns here.
     if args.suite == Suite::Loopback {
-        let chrome = browsers()
-            .into_iter()
-            .find(|browser| browser.name == "chrome-cft")
-            .ok_or("no Chrome-for-Testing entry to run the fast suite on")?;
-        return loopback::run(&chrome.binary, &env);
+        let chrome = crate::util::cdp::chrome_for_testing().map_err(|Skip(why)| why)?;
+        return loopback::run(&chrome.to_string_lossy(), &env);
     }
 
     let mut rows = Vec::new();
+    // Resolved once and only when a cell will run: the lookup can download
+    // Chrome for Testing, and `--list` must launch and fetch nothing.
+    let mut chrome_for_testing: Option<Result<PathBuf, String>> = None;
 
     for profile in args.profiles() {
         // Built lazily and once per profile: a `--only` that matches nothing in
@@ -333,13 +344,24 @@ pub(crate) fn run(args: &Args) -> TaskOutcome {
                 continue;
             }
 
-            if !PathBuf::from(&browser.binary).exists() {
+            let missing = match browser.backend {
+                Backend::Cdp if args.list => None,
+                Backend::Cdp => chrome_for_testing
+                    .get_or_insert_with(|| {
+                        crate::util::cdp::chrome_for_testing().map_err(|Skip(why)| why)
+                    })
+                    .clone()
+                    .err(),
+                Backend::WebDriver => (!PathBuf::from(&browser.binary).exists())
+                    .then(|| format!("not installed: {}", browser.binary)),
+            };
+            if let Some(detail) = missing {
                 rows.push(Row {
                     browser: browser.name,
                     profile: profile.to_string(),
                     pressure: "-".to_owned(),
                     verdict: Verdict::Skipped,
-                    detail: format!("not installed: {}", browser.binary),
+                    detail,
                 });
                 continue;
             }
@@ -403,7 +425,7 @@ fn run_cell(browser: &Browser, wasm: &Path, pressure: u32) -> Result<Harvest, Sk
     match browser.backend {
         Backend::Cdp => cdp::run(pressure, CELL_TIMEOUT),
         Backend::WebDriver => {
-            let driver = webdriver::Driver::start(browser.name)?;
+            let driver = Driver::start(browser.name)?;
             webdriver::run(
                 &driver,
                 browser.name,
@@ -495,12 +517,4 @@ fn summarise(rows: &[Row], listing: bool) {
 /// `data-failed` as a number, or `None` when the page never published one.
 fn normalise_failed(raw: &str) -> Option<u32> {
     raw.trim().parse().ok()
-}
-
-/// `Runtime.evaluate` and `execute/sync` both hand back a JSON value; a string
-/// result should read as its contents, not as a quoted literal.
-fn json_to_string(value: &serde_json::Value) -> String {
-    value
-        .as_str()
-        .map_or_else(|| value.to_string(), str::to_owned)
 }

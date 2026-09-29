@@ -106,7 +106,7 @@ async fn spawn(topic: &str, nick: &str, relay: &TestRelay, sink: Arc<Joined>) ->
             endpoint: None,
             protocols: Vec::new(),
             transports: TransportOpts {
-                ip: true,
+                udp: true,
                 relay: false,
                 webrtc: true,
                 multihop: false,

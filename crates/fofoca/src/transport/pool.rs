@@ -4,7 +4,7 @@
 //! and with a short dial budget so a send to an unreachable peer fails fast
 //! rather than stalling the event loop.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -26,7 +26,7 @@ use crate::util::cooldown::Cooldown;
 /// and an unreachable peer should surface as an error now, not stall the
 /// caller. The addressee's `EndpointAddr` is already registered with the
 /// endpoint (`add_peer_addr`), so a reachable peer resolves well inside this.
-const DIAL_TIMEOUT: Duration = Duration::from_secs(3);
+pub(crate) const DIAL_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// After a failed dial the endpoint goes on cooldown: further cold sends to it
 /// error immediately instead of re-dialing. The dial blocks the event loop, so
@@ -69,6 +69,16 @@ struct PoolInner {
     /// before dialing, and a warm hit inside never dials, but both mean the
     /// caller was willing to.
     dial_attempts: AtomicU64,
+    /// Endpoints with a background dial in flight, so that concurrent cold
+    /// sends to one peer share one dial instead of racing their own. Only
+    /// [`UnicastPool::dial_and_send_in_background`] reads it: an inline dial
+    /// through [`UnicastPool::warm_or_dial`] does not.
+    dialing: std::sync::Mutex<HashSet<EndpointId>>,
+    /// Each peer's full address, from its `PeerInfo`. Dialed instead of the
+    /// bare id so the relay is in the address book before the handshake:
+    /// iroh opens a connection's relay path only then, and with it a UDP loss
+    /// has a backup path to fall to rather than none.
+    addrs: std::sync::Mutex<HashMap<EndpointId, EndpointAddr>>,
     /// `TransportPolicy::relay`. Off, a send on a connection whose selected
     /// path is the relay is refused; the connection stays pooled, since iroh
     /// may still punch a direct path on it.
@@ -96,6 +106,8 @@ impl UnicastPool {
                 conns: Mutex::new(HashMap::new()),
                 dial_failures: Mutex::new(Cooldown::new(DIAL_FAILURE_COOLDOWN)),
                 dial_attempts: AtomicU64::new(0),
+                dialing: std::sync::Mutex::new(HashSet::new()),
+                addrs: std::sync::Mutex::new(HashMap::new()),
                 relay_transport,
             }),
         }
@@ -112,6 +124,8 @@ impl UnicastPool {
                 conns: Mutex::new(HashMap::new()),
                 dial_failures: Mutex::new(Cooldown::new(DIAL_FAILURE_COOLDOWN)),
                 dial_attempts: AtomicU64::new(0),
+                dialing: std::sync::Mutex::new(HashSet::new()),
+                addrs: std::sync::Mutex::new(HashMap::new()),
                 relay_transport: false,
             }),
         }
@@ -149,6 +163,46 @@ impl UnicastPool {
         WarmSend::Sent
     }
 
+    /// Whether UDP to `eid` is selected within [`PATH_SELECT_TIMEOUT`], on the
+    /// pooled connection, dialed if there is none. A gossip link can form with
+    /// no pooled connection at all, so the synchronous read below cannot
+    /// answer for a pair that linked through the rendezvous.
+    pub(crate) async fn udp_won(&self, eid: EndpointId) -> bool {
+        match self.warm_or_dial(eid).await {
+            Ok(conn) => super::path::wait_ip(&conn, PATH_SELECT_TIMEOUT).await,
+            Err(_) => false,
+        }
+    }
+
+    /// Remember `addr` as the address to dial its peer at.
+    pub(crate) fn note_addr(&self, addr: &EndpointAddr) {
+        if let Ok(mut addrs) = self.inner.addrs.lock() {
+            addrs.insert(addr.id, addr.clone());
+        }
+    }
+
+    /// The open pooled connection to `eid`, for the path watcher. A contended
+    /// lock reads as none; the next alive tick asks again.
+    pub(crate) fn connection(&self, eid: EndpointId) -> Option<Connection> {
+        self.inner.conns.try_lock().ok().and_then(|conns| {
+            conns
+                .get(&eid)
+                .filter(|conn| conn.close_reason().is_none())
+                .cloned()
+        })
+    }
+
+    /// Whether the pooled connection to `eid` is on a selected UDP path.
+    /// Synchronous for the event loop's offer decisions: a contended lock, or
+    /// no pooled connection, reads as `false`, so the node offers.
+    pub(crate) fn selected_is_ip(&self, eid: EndpointId) -> bool {
+        self.inner.conns.try_lock().is_ok_and(|conns| {
+            conns.get(&eid).is_some_and(|conn| {
+                conn.close_reason().is_none() && super::path::selected_is_ip(conn)
+            })
+        })
+    }
+
     /// The pooled connection to `eid`, if one is open.
     async fn warm(&self, eid: EndpointId) -> Option<Connection> {
         let conns = self.inner.conns.lock().await;
@@ -163,6 +217,132 @@ impl UnicastPool {
     #[cfg(test)]
     pub(crate) fn dial_attempts(&self) -> u64 {
         self.inner.dial_attempts.load(Ordering::Relaxed)
+    }
+
+    /// Start a [`Self::dial_and_send`] to `eid` on a spawned task, and return
+    /// whether one was started. `false` when `eid` is on the dial-failure
+    /// cooldown, or when a background dial to it is already in flight; this
+    /// frame is then not sent, and the caller can try again later.
+    pub(crate) async fn dial_and_send_in_background(&self, eid: EndpointId, bytes: Bytes) -> bool {
+        if self
+            .inner
+            .dial_failures
+            .lock()
+            .await
+            .on_cooldown(&eid, Instant::now())
+        {
+            return false;
+        }
+        if !self
+            .inner
+            .dialing
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(eid)
+        {
+            return false;
+        }
+        let in_flight = InFlightDial {
+            pool: self.clone(),
+            eid,
+        };
+        n0_future::task::spawn(async move {
+            if let Err(error) = in_flight.pool.dial_and_send(eid, bytes).await {
+                tracing::debug!(target: LOG_TARGET, %eid, %error, "background send not delivered");
+            }
+            drop(in_flight);
+        });
+        true
+    }
+
+    /// Send `frames` to `eid` in order, from one spawned task: one stream per
+    /// frame, in sequence. [`Self::dial_and_send_in_background`] takes one
+    /// frame, and while its dial is in flight every further call for the same
+    /// peer is refused, so a batch sent that way loses all but its first frame
+    /// to a cold peer. A warm connection takes a batch at once, even with
+    /// another batch to the same peer still going: a node sends its state and
+    /// meta digests back to back, so a holder answers it twice at once. A cold
+    /// peer is dialed first, and only one dial to it runs at a time. Returns
+    /// `false`, sending nothing, when the warm connection's path may not carry
+    /// payload, or `eid` is cold and on the dial-failure cooldown or already
+    /// being dialed. `true` means handed off, not delivered: a dial, path or
+    /// write failure after it is only logged, and a write can succeed into a
+    /// connection that died silently.
+    pub(crate) async fn send_batch_in_background(
+        &self,
+        eid: EndpointId,
+        frames: Vec<Bytes>,
+    ) -> bool {
+        if let Some(conn) = self.warm(eid).await {
+            if !payload_allowed_on(&conn, self.inner.relay_transport) {
+                return false;
+            }
+            let pool = self.clone();
+            n0_future::task::spawn(async move {
+                pool.send_batch(eid, &conn, &frames).await;
+            });
+            return true;
+        }
+        if self
+            .inner
+            .dial_failures
+            .lock()
+            .await
+            .on_cooldown(&eid, Instant::now())
+        {
+            return false;
+        }
+        if !self
+            .inner
+            .dialing
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(eid)
+        {
+            return false;
+        }
+        let in_flight = InFlightDial {
+            pool: self.clone(),
+            eid,
+        };
+        n0_future::task::spawn(async move {
+            let pool = &in_flight.pool;
+            let conn = match pool.warm_or_dial(eid).await {
+                Ok(conn) => conn,
+                Err(error) => {
+                    tracing::debug!(target: LOG_TARGET, %eid, %error, "batch not delivered: no connection");
+                    return;
+                }
+            };
+            if !pool.inner.relay_transport && !wait_direct(&conn, PATH_SELECT_TIMEOUT).await {
+                tracing::debug!(target: LOG_TARGET, %eid, "batch not delivered: {RELAY_REFUSED}");
+                return;
+            }
+            pool.send_batch(eid, &conn, &frames).await;
+        });
+        true
+    }
+
+    /// Write `frames` to `conn` one stream at a time, in order, stopping and
+    /// dropping the connection at the first write error.
+    async fn send_batch(&self, eid: EndpointId, conn: &Connection, frames: &[Bytes]) {
+        for bytes in frames {
+            if let Err(error) = send_one(conn, bytes).await {
+                tracing::debug!(target: LOG_TARGET, %eid, %error, "batch cut short; dropping the connection");
+                self.inner.conns.lock().await.remove(&eid);
+                return;
+            }
+        }
+    }
+
+    /// Put `eid` on the dial-failure cooldown, as a failed dial does.
+    #[cfg(test)]
+    pub(crate) async fn note_dial_failure(&self, eid: EndpointId) {
+        self.inner
+            .dial_failures
+            .lock()
+            .await
+            .note(eid, Instant::now());
     }
 
     /// Ensure a connection to `eid` (reusing a warm one or dialing inline) and
@@ -213,7 +393,14 @@ impl UnicastPool {
         {
             bail!("unicast dial on cooldown after a recent failure");
         }
-        match dial(&endpoint, eid).await {
+        let addr = self
+            .inner
+            .addrs
+            .lock()
+            .ok()
+            .and_then(|addrs| addrs.get(&eid).cloned())
+            .unwrap_or_else(|| EndpointAddr::new(eid));
+        match dial(&endpoint, addr).await {
             Ok(conn) => {
                 self.inner.dial_failures.lock().await.forget(&eid);
                 self.inner.conns.lock().await.insert(eid, conn.clone());
@@ -241,19 +428,37 @@ impl UnicastPool {
             conn.close(0u32.into(), b"peer left");
         }
         self.inner.dial_failures.lock().await.forget(&eid);
+        // A rejoin may come back at another address; its `PeerInfo` notes it.
+        if let Ok(mut addrs) = self.inner.addrs.lock() {
+            addrs.remove(&eid);
+        }
+    }
+}
+
+/// An endpoint's entry in the in-flight dial set, removed on drop: a dial that
+/// panics or is dropped with its runtime must not leave the peer marked in
+/// flight, which would refuse every later background send to it.
+struct InFlightDial {
+    pool: UnicastPool,
+    eid: EndpointId,
+}
+
+impl Drop for InFlightDial {
+    fn drop(&mut self) {
+        self.pool
+            .inner
+            .dialing
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.eid);
     }
 }
 
 /// Dial `eid` on the unicast ALPN within [`DIAL_TIMEOUT`]. The endpoint already
 /// knows the peer's address (registered via `add_peer_addr`), so a bare-id
 /// `EndpointAddr` resolves through the endpoint's address book + lookups.
-async fn dial(endpoint: &Endpoint, eid: EndpointId) -> Result<Connection> {
-    match n0_future::time::timeout(
-        DIAL_TIMEOUT,
-        endpoint.connect(EndpointAddr::new(eid), UNICAST_ALPN),
-    )
-    .await
-    {
+async fn dial(endpoint: &Endpoint, addr: EndpointAddr) -> Result<Connection> {
+    match n0_future::time::timeout(DIAL_TIMEOUT, endpoint.connect(addr, UNICAST_ALPN)).await {
         Ok(Ok(conn)) => Ok(conn),
         Ok(Err(error)) => Err(anyhow::anyhow!("{error}")),
         Err(_) => bail!("unicast dial timed out after {DIAL_TIMEOUT:?}"),
@@ -307,6 +512,103 @@ mod tests {
             failures.len(),
             1,
             "the stale entry is dropped, not retained"
+        );
+    }
+
+    /// The offer decision reads the pooled connection synchronously: a UDP
+    /// connection reads `true`, while a busy lock or an unknown peer reads
+    /// `false`, so the node offers rather than wrongly skipping the race.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_pooled_udp_connection_reads_as_udp_selected() {
+        use iroh::endpoint::Connection;
+        use iroh::protocol::{AcceptError, ProtocolHandler, Router};
+
+        #[derive(Debug, Clone)]
+        struct Hold;
+        impl ProtocolHandler for Hold {
+            async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
+                conn.closed().await;
+                Ok(())
+            }
+        }
+        let bind = || async {
+            iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+                .relay_mode(iroh::RelayMode::Disabled)
+                .bind()
+                .await
+                .expect("bind a loopback endpoint")
+        };
+        let server = bind().await;
+        let router = Router::builder(server.clone())
+            .accept(super::super::UNICAST_ALPN, Hold)
+            .spawn();
+        let client = bind().await;
+        crate::lookup::add_peer_addr(&client, server.addr()).expect("register the server");
+        let pool = super::UnicastPool::new(client.clone(), false);
+
+        assert!(!pool.selected_is_ip(server.id()), "nothing pooled yet");
+        pool.warm_or_dial(server.id()).await.expect("dial");
+        let started = Instant::now();
+        while !pool.selected_is_ip(server.id()) {
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "udp never selected"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let held = pool.inner.conns.lock().await;
+        assert!(
+            !pool.selected_is_ip(server.id()),
+            "a busy lock reads as not selected"
+        );
+        drop(held);
+
+        router.shutdown().await.expect("shutdown");
+        client.close().await;
+    }
+
+    /// A background dial that ends early — dropped with its runtime here, the
+    /// same unwinding a panic in the dial gives — must still clear its
+    /// in-flight entry, or every later cold send to that peer is refused.
+    #[test]
+    fn a_background_dial_dropped_mid_flight_clears_its_in_flight_entry() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        let silent = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind a silent socket");
+        let bob = iroh::SecretKey::generate().public();
+        let pool = runtime.block_on(async {
+            let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+                .relay_mode(iroh::RelayMode::Disabled)
+                .bind()
+                .await
+                .expect("bind a loopback endpoint");
+            let bob_addr = iroh::EndpointAddr::from_parts(
+                bob,
+                [iroh::TransportAddr::Ip(
+                    silent.local_addr().expect("silent addr"),
+                )],
+            );
+            crate::lookup::add_peer_addr(&endpoint, bob_addr).expect("register bob");
+            let pool = super::UnicastPool::new(endpoint, false);
+            assert!(
+                pool.dial_and_send_in_background(bob, bytes::Bytes::new())
+                    .await
+            );
+            tokio::task::yield_now().await;
+            pool
+        });
+
+        drop(runtime);
+
+        let still_in_flight = pool.inner.dialing.lock().expect("lock").contains(&bob);
+        let cleanup = tokio::runtime::Runtime::new().expect("a cleanup runtime");
+        let _entered = cleanup.enter();
+        drop(pool);
+        assert!(
+            !still_in_flight,
+            "the dropped dial left {bob} marked in flight"
         );
     }
 

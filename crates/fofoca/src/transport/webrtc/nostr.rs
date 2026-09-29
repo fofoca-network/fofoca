@@ -323,8 +323,8 @@ pub(crate) mod discovery {
             return;
         };
         let mut hello = nostr.signal(SignalKind::Hello);
-        hello.webrtc = state.own_needs_lane;
-        if !state.own_needs_lane {
+        hello.webrtc = !state.local_udp_transport;
+        if state.local_udp_transport {
             hello.addrs = ctx
                 .endpoint
                 .addr()
@@ -389,7 +389,7 @@ pub(crate) mod discovery {
             return HelloAction::Graft;
         }
         let addr = hello_addr(hello);
-        if !hello.webrtc && !crate::transport::webrtc::pair_needs_lane(state, peer, &addr) {
+        if !hello.webrtc && !crate::transport::webrtc::peer_needs_lane(state, peer, &addr) {
             // No addresses from a peer with IP means it has not found its own
             // yet; its next `Hello` is a second or two away.
             if addr.is_empty() || state.direct.get(&peer) == Some(&DirectState::Pending) {
@@ -444,7 +444,7 @@ pub(crate) mod discovery {
                 if let Some(nostr) = state.nostr.as_ref() {
                     let mut wake = nostr.signal(SignalKind::Hello);
                     wake.to = Some(peer);
-                    wake.webrtc = state.own_needs_lane;
+                    wake.webrtc = !state.local_udp_transport;
                     nostr.send(&wake);
                 }
             }

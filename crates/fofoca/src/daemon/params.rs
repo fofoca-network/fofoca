@@ -342,6 +342,7 @@ mod topic_derivation_tests {
                 issuer_pubkey: None,
                 transport: TransportPolicy {
                     relay_transport: true,
+                    ..TransportPolicy::default()
                 },
             },
         )
@@ -361,6 +362,7 @@ mod topic_derivation_tests {
             issuer_pubkey: None,
             transport: TransportPolicy {
                 relay_transport: true,
+                ..TransportPolicy::default()
             },
         };
         assert!(derive_topic_mesh_config("standup", config).is_err());

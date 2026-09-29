@@ -78,13 +78,14 @@ struct Inner {
 
 /// The one place a `WebRTC` negotiation slot is granted, for both roles.
 #[derive(Debug, Clone)]
-pub(crate) struct SignalAdmission {
+pub struct SignalAdmission {
     inner: Arc<Mutex<Inner>>,
     cap: usize,
 }
 
 impl SignalAdmission {
-    pub(crate) fn new(cap: usize) -> Self {
+    #[must_use]
+    pub fn new(cap: usize) -> Self {
         Self {
             inner: Arc::new(Mutex::new(Inner {
                 inflight: HashMap::new(),
@@ -172,11 +173,15 @@ impl SignalAdmission {
         }
     }
 
+    /// Whether a round with `peer` holds a slot right now, in either role.
+    pub(crate) fn negotiating(&self, peer: EndpointId) -> bool {
+        self.lock().inflight.contains_key(&peer)
+    }
+
     fn release(&self, peer: EndpointId) {
         self.lock().inflight.remove(&peer);
     }
 
-    #[cfg(test)]
     pub(crate) fn in_flight(&self) -> usize {
         self.lock().inflight.len()
     }

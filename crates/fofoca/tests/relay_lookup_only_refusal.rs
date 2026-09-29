@@ -118,7 +118,10 @@ async fn spawn(
             },
             password: None,
             issuer_pubkey: None,
-            transport: TransportPolicy { relay_transport },
+            transport: TransportPolicy {
+                relay_transport,
+                ..TransportPolicy::default()
+            },
         },
     )
     .expect("derive a relay-only mesh");
@@ -134,7 +137,7 @@ async fn spawn(
             endpoint: None,
             protocols: Vec::new(),
             transports: TransportOpts {
-                ip: false,
+                udp: false,
                 relay: true,
                 webrtc: false,
                 multihop: false,

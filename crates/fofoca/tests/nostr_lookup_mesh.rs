@@ -135,7 +135,7 @@ async fn spawn_on(
             endpoint: None,
             protocols: Vec::new(),
             transports: TransportOpts {
-                ip,
+                udp: ip,
                 relay: false,
                 webrtc: true,
                 multihop: false,

@@ -146,6 +146,17 @@ pub struct EventLoopState {
     /// the real loop installs its channel.
     pub(crate) direct_proven:
         tokio::sync::mpsc::UnboundedSender<crate::transport::probe::DirectOutcome>,
+    /// Where a path watcher reports a change of the selected path to a peer
+    /// the race covers (`transport::probe::on_path_change`).
+    pub(crate) path_changes:
+        tokio::sync::mpsc::UnboundedSender<crate::transport::probe::PathChange>,
+    /// The pooled connection each watched peer's watcher follows, by stable
+    /// id (`None` while its dial runs), so a replaced connection gets a fresh
+    /// watcher and a stale one's reports are dropped.
+    pub(crate) path_watchers: HashMap<EndpointId, Option<usize>>,
+    /// The last selected path kind each watcher reported, for the alive
+    /// tick's nudge of peers riding `WebRTC`.
+    pub(crate) path_kinds: HashMap<EndpointId, crate::transport::probe::PathKind>,
     /// Re-bridge memory: every peer `EndpointId` we've ever linked to,
     /// kept *across* `NeighborDown` (unlike `linked_endpoints`). When a
     /// node loses all links because the rendezvous/relay is unreachable,
@@ -153,6 +164,12 @@ pub struct EventLoopState {
     /// addresses — so the re-bridge no longer depends on the rendezvous.
     /// Bounded FIFO (cap `KNOWN_ENDPOINTS_CAP`) so it can't grow without limit.
     pub(crate) known_endpoints: BoundedFifoSet<EndpointId>,
+    /// The endpoint each signing key proved in its `PeerInfo`: the only
+    /// point-to-point target an anti-entropy answer may take, since a
+    /// nickname is a label any signer can claim.
+    pub(crate) proven_endpoints: crate::transport::endpoint_proof::ProvenEndpoints,
+    /// Our own `PeerInfo` proof, made once: it is the same for the session.
+    pub(crate) peer_info_proof: Option<String>,
     /// Per-endpoint re-link throttle: caps re-dialing + re-flooding a peer
     /// learned via `PeerInfo` to once per window. Tracked *across*
     /// `NeighborDown` (unlike `linked_endpoints`), so a flapping/unstable peer
@@ -175,6 +192,14 @@ pub struct EventLoopState {
     /// When each author's digest was last served. Keyed on the pubkey rather
     /// than the nickname, which an author picks freely.
     digest_serves: Cooldown<String>,
+    /// When each asker's state or meta digest was last served, per plane. A
+    /// new node sends a digest pair for every peer it sees, all with the same
+    /// heads, and every holder hears each one; the plane is in the key so the
+    /// asker's re-ask at its first real-peer link, answered point-to-point,
+    /// is not refused by the gossip answer before it.
+    pub(crate) state_digest_serves: crate::gossip::antientropy::ServeBudget,
+    /// This node's own fast rounds of state digests while it backfills.
+    pub(crate) fast_rounds: crate::gossip::antientropy::FastRounds,
     /// Membership layer: the peer roster. Nickname-keyed set of
     /// other peers, feeding the state file's `peer_count`
     /// (`peers.len() + 1`). Excludes self. Driven by
@@ -268,11 +293,6 @@ pub struct EventLoopState {
     /// session — true for a webrtc-shaped node on a lookup-only mesh; see
     /// `transport::webrtc::rendezvous_graftable`.
     pub(crate) rendezvous_graft_needs_session: bool,
-    /// This node has no IP transport (a browser, or IP turned off), so every
-    /// peer reaches it over a data channel. Said out loud in our `PeerInfo`
-    /// rather than inferred from our address: with no relay either, that
-    /// address is empty, which reads as "unknown", not "browser".
-    pub(crate) own_needs_lane: bool,
     /// Peers whose `PeerInfo` said they need a data channel. The shape of a
     /// peer's address says the same only when it carries a relay.
     pub(crate) lane_peers: HashSet<EndpointId>,
@@ -293,6 +313,11 @@ pub struct EventLoopState {
     /// Hold the wide relay set until then: the end of the last offer round,
     /// plus a cooldown.
     pub(crate) nostr_wide_until: Option<Instant>,
+    /// Whether this node runs IP transports (`TransportOpts::ip`, and never
+    /// on wasm). The local half of every `WebRTC` lane decision — read from
+    /// here, not from the endpoint address, which is empty whenever the relay
+    /// link is down.
+    pub(crate) local_udp_transport: bool,
     /// Set once we've broadcast our arrival (`joined` + `PeerInfo`).
     /// The announce is deferred to the first `NeighborUp` so it isn't
     /// lost into an unconnected overlay; subsequent neighbors only get
@@ -365,6 +390,10 @@ pub struct EventLoopState {
     /// rival started within seconds of us; later rounds run the steady
     /// jittered cadence.
     pub(crate) rival_recheck_rounds: u32,
+    /// Consecutive due sheds held back because a data-channel peer depends
+    /// on this beacon; see `beacon_arm::defer_shed`. Cleared by a shed and by a
+    /// fresh claim (`beacon_arm::schedule_rival_recheck`).
+    pub(crate) rival_recheck_deferrals: u32,
     /// Recently-seen message ids, for duplicate suppression. Gossip
     /// (GRAFT/repair, topology churn, our own re-broadcasts, anti-entropy
     /// re-sends, the rendezvous double-path) can deliver the same message
@@ -621,13 +650,22 @@ impl EventLoopState {
             direct: HashMap::new(),
             relay_transport: false,
             direct_proven: tokio::sync::mpsc::unbounded_channel().0,
+            path_changes: tokio::sync::mpsc::unbounded_channel().0,
+            path_watchers: HashMap::new(),
+            path_kinds: HashMap::new(),
             known_endpoints: BoundedFifoSet::new(KNOWN_ENDPOINTS_CAP),
+            proven_endpoints: crate::transport::endpoint_proof::ProvenEndpoints::new(
+                KNOWN_ENDPOINTS_CAP,
+            ),
+            peer_info_proof: None,
             relink: Cooldown::new(RELINK_COOLDOWN),
             peerinfo: Cooldown::new(RELINK_COOLDOWN),
             peerinfo_flooded_at: None,
             digest_serves: Cooldown::new(Duration::from_secs(
                 fofoca_util::tuning::ANTIENTROPY_SERVE_COOLDOWN_SECS,
             )),
+            state_digest_serves: crate::gossip::antientropy::ServeBudget::default(),
+            fast_rounds: crate::gossip::antientropy::FastRounds::default(),
             peers: HashSet::new(),
             last_seen: HashMap::new(),
             peer_endpoints: HashMap::new(),
@@ -643,7 +681,6 @@ impl EventLoopState {
             rendezvous_offer_fallback: false,
             rendezvous_probe_read_free: false,
             rendezvous_graft_needs_session: false,
-            own_needs_lane: false,
             lane_peers: HashSet::new(),
             has_rendezvous: true,
             nostr: None,
@@ -653,6 +690,7 @@ impl EventLoopState {
             hellos_sent: 0,
             nostr_width: 0,
             nostr_wide_until: None,
+            local_udp_transport: true,
             announced: false,
             meshed: false,
             unicast_pool: crate::transport::UnicastPool::disconnected(),
@@ -666,6 +704,7 @@ impl EventLoopState {
             reclaim_until: None,
             next_rival_recheck: None,
             rival_recheck_rounds: 0,
+            rival_recheck_deferrals: 0,
             seen: BoundedFifoSet::new(SEEN_IDS_CAP),
             pending_outbound: BoundedQueue::new(PENDING_OUTBOUND_CAP),
             #[cfg(feature = "host")]
@@ -817,10 +856,13 @@ impl EventLoopState {
     /// connection, which outlives a gossip link but not the peer.
     pub(crate) fn forget_peer_endpoint(&mut self, nick: &str) -> Option<EndpointAddr> {
         let addr = self.peer_endpoints.remove(nick)?;
+        self.proven_endpoints.forget_endpoint(addr.id);
         self.direct.remove(&addr.id);
         self.lane_peers.remove(&addr.id);
         self.nostr_seen.remove(&addr.id);
         self.nostr_poked.remove(&addr.id);
+        self.path_watchers.remove(&addr.id);
+        self.path_kinds.remove(&addr.id);
         Some(addr)
     }
 
@@ -1837,6 +1879,23 @@ mod tests {
         );
         assert!(state.direct.is_empty());
         assert!(state.forget_peer_endpoint("bob").is_none());
+    }
+
+    // A departed peer read as riding WebRTC was nudged on every alive tick.
+    #[test]
+    fn forgetting_a_peer_endpoint_drops_its_path_watch() {
+        let mut state = fresh_state();
+        let bob = endpoint_id(1);
+        state
+            .peer_endpoints
+            .insert(nick("bob"), iroh::EndpointAddr::new(bob));
+        state.path_watchers.insert(bob, Some(7));
+        state
+            .path_kinds
+            .insert(bob, crate::transport::probe::PathKind::WebRtc);
+        state.forget_peer_endpoint("bob");
+        assert!(state.path_watchers.is_empty());
+        assert!(state.path_kinds.is_empty());
     }
 
     // `arms_reclaim` fires on any peer loss while the mesh is beaconless, and

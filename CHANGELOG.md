@@ -15,24 +15,53 @@ published to a registry; pin it with
   native and in the browser, so a mesh whose only lookup is `nostr` forms
   with no iroh relay. `fofoca-nostr` is the relay client. A custom relay
   list is `nostr_urls` / `nostrUrls` / `--nostr-url`; it is part of the id.
-
-- `fofoca-wasm`: the browser peer, the byte pipe as a wasm-bindgen class,
-  with `packages/fofoca-wasm` as its JS backend and a driverless harness
-  page. `cargo task wasm-peer` builds it.
-- A custom relay ladder (`relay_urls` / `relayUrls` / `--relay-url`) and the
-  per-node path switches (`paths.ip`, `paths.webrtc`; `disable_ip` /
-  `disable_webrtc` in C) on every create surface. The ladder is mixed into a
-  derived topic id, so every member must pass the same list.
+- Native pairs race WebRTC against UDP on a `udp,webrtc` mesh. A session
+  that attaches after UDP won is detached, and the far side drops its half
+  at once. A path watcher races the pair again when UDP is lost, and detaches
+  the session when UDP returns; while a pair rides WebRTC it nudges iroh each
+  alive tick to try the UDP punch again.
+- `fofoca-stream`: 1-1 byte streams addressed by a hash. A producer creates a
+  stream and hands its hash to one consumer. The bytes ride a direct QUIC path
+  or a WebRTC data channel by default, the relay only when the stream's
+  `transport` allows it, never gossip, and the consumer paces the producer.
+  A second consumer is refused (`Refused::Taken`), and a producer dropped
+  before it closes abandons the stream (`Refused::Abandoned`).
+  `close_or_abandon` ends the stream if a consumer has claimed it and
+  abandons it otherwise. It builds for wasm32, so a tab can produce as well
+  as read.
+- The `fofoca-stream` binary (`crates/fofoca-stream-cli`): stdin to one
+  reader, or a hash's stream to stdout. It prints the hash, and with
+  `--web-url` the page URL with the hash in its fragment.
+- `packages/fofoca-stream-web`: the stream's web page, a static build. `#<hash>`
+  reads a stream; no fragment produces one. It registers `stream_write`,
+  `stream_close`, `stream_read` and `stream_status` as WebMCP tools, with the
+  same functions on `window.stream`.
+- Byte streams in the C ABI, ten calls: `fofoca_streams_bind`,
+  `fofoca_streams_bind_for`, `fofoca_streams_close`, `fofoca_stream_create`,
+  `fofoca_stream_hash`, `fofoca_stream_write`, `fofoca_stream_close`,
+  `fofoca_stream_open`, `fofoca_stream_read` and `fofoca_reader_close`, with a
+  32-byte `fofoca_stream_opts` (`encodeStreamOpts` in `packages/fofoca-ffi`).
+- `fofoca::membership`: the gossip mesh embedding, moved into the engine from
+  `fofoca-pipe`. `join` returns a `Membership` that sends and receives whole
+  text messages (`msg`). `MAX_MSG` (1408 bytes) is the worst-case bound;
+  `msg_fits` says whether a given text fits.
+- `fofoca-wasm`: the browser peer, with `fofoca::membership` and the byte
+  streams as wasm-bindgen classes, and `packages/fofoca-wasm` as its JS
+  backend (`join` for a mesh, `bindStreams` / `bindStreamsFor` for streams).
+  `cargo task build-wasm` builds it.
+- A custom relay ladder (`relay_urls` / `relayUrls` / `--relay-url`) on every
+  create surface. The ladder is mixed into a derived topic id, so every
+  member must pass the same list.
 - `fofoca_protocol::Lookup` and `Transport`, the entries of the `lookup` and
   `transport` lists every create surface takes, with `LookupSet::from_lookups`,
   `TransportPolicy::from_transports` and `MeshConfig::resolve` behind them, so
   a consumer parses the two lists and applies the cross-rules with no code of
   its own.
-- `cargo task e2e --suite mesh` and `--suite chat`: a real native peer and a
-  real browser tab on a local plain-HTTP relay, swept over the relay policy,
-  the native transport set and the join mode. Behind the `mesh` feature of
-  `tasks`, and local-only for now.
-- `Session::request` on the pipe, and one config path for every topic.
+- `cargo task e2e --suite mesh`, `--suite chat` and `--suite stream`: a real
+  native peer and a real browser tab on a local plain-HTTP relay. The mesh
+  suite sweeps the relay policy, the native transport set and the join mode;
+  the stream suite streams bytes both ways between the binary and the page.
+  Behind the `mesh` feature of `tasks`, and local-only for now.
 
 ### Changed
 
@@ -40,26 +69,47 @@ published to a registry; pin it with
   uses Nostr too (`LookupOpts::public_preset`), and the lookups are mixed
   into the id. The id format gains two lookup flag bits, and a decoder
   refuses a lookup bit it does not know.
-- **Breaking (C ABI):** `fofoca_opts` is now 80 bytes: the five discovery
+- **Breaking (C ABI):** the mesh calls are `fofoca_mesh_*`, and a mesh sends
+  and receives whole text messages with `fofoca_msg_send` and
+  `fofoca_msg_recv` into an 80-byte `fofoca_msg`. A message too big for the
+  receive buffer stays queued, and the call returns -2. `fofoca_open`,
+  `fofoca_send`, `fofoca_send_eof`, `fofoca_recv`, `fofoca_frame` and
+  `fofoca_max_chunk` are gone (`fofoca_max_msg` replaces the last). mallorca
+  must rebuild against the new `include/fofoca.h`.
+- **Breaking:** the browser peer, `fofoca-api` and the chats send `msg`
+  messages over `fofoca::membership` instead of `fofoca-pipe`'s numbered
+  byte frames. A peer on the old wire cannot read them.
+- **Breaking (TS):** `fofoca-api`'s `Mesh` sends and receives whole text
+  messages. `send` takes a `string` only (was `string | Uint8Array`),
+  `sendEof` is gone, and `maxChunk` is `maxMsg`. A `Message` is
+  `{ from, text, directed }`: `bytes` and `eof` are gone, and `text` is
+  always set. The backend seam's `BackendFrame` is `BackendMsg`, and
+  `BackendSink.frame` is `BackendSink.msg`.
+- **Breaking (C ABI):** `fofoca_opts` is now 72 bytes: the five discovery
   ints (`is_public`, `mdns`, `dht`, `relay_lookup`, `relay_transport`) are
   replaced by two comma-list strings, `lookup` and `transport`, ahead of
-  `relay_urls`, and `disable_ip` / `disable_webrtc` follow. `nostr_urls`
-  comes last, at offset 72, after `max_peers`. A consumer
+  `relay_urls`. `nostr_urls` comes last, at offset 64, after `max_peers`.
+  A consumer
   compiled against the old header keeps passing the old struct and the
   engine reads it wrong — there is no version field to catch that, so relink
   against the new `include/fofoca.h`. The layout is pinned by a compile-time
   assert in `fofoca-ffi` and by `packages/fofoca-ffi`'s encoder test.
 - **Breaking:** every create surface names three mesh-wide choices apart,
   one concept each. `lookup` (`lookup: ['mdns', 'dht', 'relay']`, any
-  subset) is how members find each other. `transport` (`['p2p']` or
-  `['p2p', 'relay']`) is what payload may ride. `relay_urls` is which relay.
+  subset) is how members find each other. `transport` (`['udp', 'webrtc',
+  'relay']`, any subset with `udp` or `webrtc`; `['udp', 'webrtc']` when
+  empty) is what payload may ride. `relay_urls` is which relay.
   The `public`, `mdns`, `dht`, `relay_lookup` and `relay_transport` booleans
   are gone; `public: true` is spelled `lookup: ['mdns', 'dht', 'relay', 'nostr']`, and
   naming no lookup is a loopback mesh. A ladder no longer implies the relay
   lookup: both it and `'relay'` in `transport` need `'relay'` in `lookup`,
-  and a config that breaks either rule is rejected before any network. The
-  per-node switches are `paths` (was `transports`), so "transport" means
-  only the mesh-wide policy. In the wasm JSON every old field is an error,
+  and a config that breaks either rule is rejected before any network. A
+  list without `'udp'` (a WebRTC-only mesh) needs `'relay'` or `'nostr'` in
+  `lookup` as well, because they are the only paths its WebRTC offers can
+  take. The
+  mesh id decides every path: there are no per-node path switches, and a
+  browser refuses a mesh whose list has neither `'webrtc'` nor `'relay'`.
+  In the wasm JSON every old field is an error,
   not a silent no-op. `fofoca_protocol::resolve_lookups` lost its `public`
   parameter. `TransportOpts.relay` keeps its name — it is per-node
   capability, not the mesh policy.
@@ -68,9 +118,32 @@ published to a registry; pin it with
   caller-supplied ladder reached the encoder unbounded before: past 255
   rungs it panicked, and between 17 and 255 it minted an id no member could
   decode.
+- The chat example lives in `examples/chat/rust` (package `chat`).
+- A node without UDP needs the relay: `'relay'` in `lookup`, and a relay
+  transport on the node. A browser always has no UDP, so a tab now refuses
+  a mesh with no relay lookup at join, and a stream node refuses it at bind.
+  A native node meets this rule only when its own paths leave out UDP.
 
 ### Fixed
 
+- A stream rides the relay only if both lists allow it. A consumer whose own
+  `transport` list left out `'relay'` still streamed over the relay when the
+  producer's list allowed it.
+- A dial that learned a WebRTC address after iroh had selected the relay
+  path stayed on the relay: its Initials went only to the selected path, and
+  the custom-transport path was never opened. The pinned iroh fork now fans
+  Initials out and opens such paths (fofoca-network/iroh#2, pinned at its
+  squash commit `66003af`).
+- A beacon holder sheds its rendezvous periodically to re-arbitrate with a
+  possible same-id co-host. It now waits, up to three rounds, while a
+  data-channel peer depends on that beacon: a browser reaches the mesh
+  through the rendezvous and has no second path, so the shed emptied its
+  roster mid-transfer.
+- A node judged its own need for the `WebRTC` lane from its endpoint address,
+  which is empty in a browser whenever the relay link is down; empty read as
+  "has IP", so a tab that was the lower id skipped the lane for a native peer
+  and stayed relay-only. The pair decision and the rendezvous offer now use
+  the node's own transport set (`EventLoopState::local_ip_transport`).
 - A negotiated WebRTC session is registered as a transport address, so a
   bare-id dial migrates onto it instead of being refused on the relay.
 - An offer from a peer we already hold a session with detaches the old
@@ -89,6 +162,9 @@ published to a registry; pin it with
 
 ### Removed
 
+- **Breaking:** `fofoca-pipe`, the byte pipe over gossip. Byte streams are
+  `fofoca-stream`, over a direct path by default; the mesh embedding is
+  `fofoca::membership`. The v0.6.0 tag keeps the crate.
 - **Breaking:** the `fofoca-blobs` crate, and with it the workspace's only
   OPFS store backend. `fofoca-chunks` is the store: chunks prove content,
   where blobs' bao outboards proved placement. No known consumer imported

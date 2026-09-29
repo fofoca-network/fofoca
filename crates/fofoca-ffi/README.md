@@ -17,13 +17,16 @@ the other.
   `fofoca_close`.
 - Every entry point catches panics, so an engine panic returns an error
   code instead of unwinding across `extern "C"`.
-- `fofoca_opts` takes comma-separated lists, one concept each:
+- `fofoca_opts` takes four comma-separated lists, one concept each:
   `lookup` (`"mdns,dht,relay,nostr"`, any subset) is how members find each
-  other, `transport` (`"p2p"` or `"p2p,relay"`) is what payload may ride,
-  `relay_urls` is which relay (NULL for the default ladder), and
-  `nostr_urls` is which Nostr relays (NULL for the pinned list). Leave
-  `transport` NULL and every byte of data goes peer to peer.
-  `disable_ip` / `disable_webrtc` switch this node's own paths off.
+  other, `transport` (`"udp,webrtc,relay"`, any subset with `udp` or
+  `webrtc`) is what payload may ride, `relay_urls` is which relay (NULL for
+  the default ladder), and `nostr_urls` is which Nostr relays (NULL for the
+  pinned list). `relay` in `transport` needs `relay` in `lookup`, because the
+  relay carries the payload. A list without `udp` needs `relay` or `nostr`
+  in `lookup`, because one of them carries the WebRTC handshake. Leave
+  `transport` NULL and every byte of data goes peer to peer, over UDP or a
+  WebRTC data channel.
 
 Test with `cargo test -p fofoca-ffi`. CI builds the staticlib and makes
 sure that every function in the header is exported.

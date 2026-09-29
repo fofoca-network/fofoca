@@ -44,7 +44,6 @@ pub(super) async fn shutdown<A: NodeDriver>(
     }
     ctx.sink
         .emit(NodeEvent::Info(format!("left {}", quit.leave_label)));
-    lifecycle::log_leaving(quit.name.as_str());
     // The `Left` rides gossip only — deliberately NOT mirrored over unicast
     // (unlike the meta retraction in `on_shutdown`): presence drives the
     // survivors' rendezvous fast-reclaim, and a `Left` that lands while a
@@ -56,6 +55,8 @@ pub(super) async fn shutdown<A: NodeDriver>(
         &Message::new_left(ctx.mesh, ctx.author).signed(&state.identity),
     )
     .await;
+    // After the broadcast, so peers get the `Left` even when logging fails.
+    lifecycle::log_leaving(quit.name.as_str());
     n0_future::time::sleep(Duration::from_millis(500)).await;
 }
 /// The mesh name (for the departure log line), the user-facing departure

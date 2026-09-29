@@ -9,9 +9,11 @@ use tokio::sync::{mpsc, watch};
 use crate::gossip::event::{NodeEvent, NodeSink};
 #[cfg(feature = "host")]
 use crate::lookup::build_peer_multihop;
-use crate::lookup::{add_peer_addr, build_mesh, relay_ladder, select_bootstrap_rung};
+use crate::lookup::{
+    StoppableTask, add_peer_addr, build_mesh, relay_ladder, select_bootstrap_rung,
+};
 use crate::protocol::crypto::Password;
-use crate::protocol::mesh::{LookupOpts, Mesh, MeshConfig, MeshName, RelayChoice};
+use crate::protocol::mesh::{LookupOpts, Mesh, MeshConfig, MeshName, NostrChoice, RelayChoice};
 use crate::protocol::{MeshId, Nickname};
 use crate::util::tuning::RELAY_RUNG_PROBE_SECS;
 
@@ -121,18 +123,26 @@ fn effective_cohost(
 /// is already out) and, if the first *reachable* rung differs from rung
 /// 0, publish it through `rung_tx`. Covers a rung-0-down-at-start for
 /// both creator and joiner; the joiner has no beacon self-monitor, so
-/// this is its only startup correction. No-op for an empty (private /
+/// this is its only startup correction. `None` for an empty (private /
 /// relay-disabled) ladder.
 fn spawn_startup_rung_confirmation(
     ladder: Vec<RelayUrl>,
     rung_tx: watch::Sender<Option<RelayUrl>>,
-) {
+) -> Option<StoppableTask> {
     if ladder.is_empty() {
-        return;
+        return None;
     }
-    n0_future::task::spawn(async move {
-        let confirmed =
-            select_bootstrap_rung(&ladder, Duration::from_secs(RELAY_RUNG_PROBE_SECS)).await;
+    Some(StoppableTask::spawn(|stopped| async move {
+        let confirmed = select_bootstrap_rung(
+            &ladder,
+            Duration::from_secs(RELAY_RUNG_PROBE_SECS),
+            Some(&stopped),
+        )
+        .await;
+        if stopped.has_changed().is_err() {
+            // A departure ended the walk: its `None` is not a verdict.
+            return;
+        }
         rung_tx.send_if_modified(|current| {
             if *current == confirmed {
                 false
@@ -141,7 +151,7 @@ fn spawn_startup_rung_confirmation(
                 true
             }
         });
-    });
+    }))
 }
 
 /// Pre-register `rendezvous_id`'s address so a cold joiner reaches it
@@ -329,9 +339,10 @@ pub struct SetupParams {
     /// endpoint race for the same queue. One Router owns accept; everything
     /// else registers here.
     pub protocols: Vec<(Vec<u8>, Box<dyn iroh::protocol::DynProtocolHandler>)>,
-    /// Which transports this instance may carry data on. `Default` is
-    /// everything; `TransportOpts::webrtc_only()` clears IP so a WebRTC-only
-    /// run cannot silently fall back. Never part of the mesh id — see the type.
+    /// This node's own paths, narrowed to the mesh's list in `setup_mesh`.
+    /// The shipped surfaces pass the default. Narrowing it by hand is the test
+    /// harness's lever to force a relay-only path. Never part of the mesh id —
+    /// see the type.
     pub transports: crate::lookup::TransportOpts,
     /// `--multihop`: register the multi-hop custom transport on the peer
     /// endpoint (a second underlay endpoint is stood up for hop-by-hop
@@ -355,6 +366,67 @@ impl std::fmt::Debug for SetupParams {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SetupParams").finish_non_exhaustive()
     }
+}
+
+/// Why a browser refuses a mesh with no relay lookup: one string, so a test
+/// can match the refusal without copying its text.
+pub const BROWSER_NEEDS_RELAY_LOOKUP: &str = "a browser cannot reach a peer in this mesh: it has no UDP, so it needs the relay (`relay` in lookup, and a relay transport on this node) or `nostr` in lookup";
+
+/// Why a browser refuses a mesh whose list leaves it no payload path.
+pub const BROWSER_HAS_NO_PATH: &str = "a browser cannot carry payload in this mesh: its transport list has neither `webrtc` nor `relay`";
+
+/// The paths this member runs: the mesh's transport list decides which direct
+/// paths exist, and a node can only have fewer.
+///
+/// # Errors
+/// A node that can never reach anyone: without UDP, one that
+/// [cannot signal](can_signal). On a browser, also a mesh [`refuse_in_browser`]
+/// refuses. Refused here rather than left as a member that links to nobody
+/// and says nothing. Whether a reachable node may carry payload in this mesh
+/// is the accept gate's call at runtime, not this one's.
+fn member_transports(
+    lookups: &LookupOpts,
+    transports: crate::lookup::TransportOpts,
+    policy: crate::protocol::TransportPolicy,
+) -> Result<crate::lookup::TransportOpts> {
+    let transports = transports.within(&policy);
+    #[cfg(target_arch = "wasm32")]
+    refuse_in_browser(lookups, policy, transports)?;
+    anyhow::ensure!(
+        transports.udp || can_signal(lookups, transports),
+        "this node has no UDP, so it needs the relay (`relay` in lookup, and a relay transport on this node) or `nostr` in lookup"
+    );
+    Ok(transports)
+}
+
+/// Whether this node can dial a relay: the lookup names one, and the node
+/// registers a relay transport. A node without UDP reaches a peer only through
+/// the relay, and a data channel's handshake crosses the relay too.
+fn reaches_relay(lookups: &LookupOpts, transports: crate::lookup::TransportOpts) -> bool {
+    lookups.relay_lookup != RelayChoice::Disabled && transports.relay
+}
+
+/// Whether a node without UDP has a path for the JSEP that opens its data
+/// channels: the relay, or Nostr, which needs no relay transport.
+fn can_signal(lookups: &LookupOpts, transports: crate::lookup::TransportOpts) -> bool {
+    reaches_relay(lookups, transports) || lookups.nostr != NostrChoice::Disabled
+}
+
+/// Whether a browser, which has no UDP, can run with these lookups and paths
+/// (already narrowed to `policy`).
+///
+/// # Errors
+/// A browser that [cannot signal](can_signal). Or a list that
+/// leaves both the data channel and relay payload out: nothing could carry
+/// its payload.
+pub fn refuse_in_browser(
+    lookups: &LookupOpts,
+    policy: crate::protocol::TransportPolicy,
+    transports: crate::lookup::TransportOpts,
+) -> Result<()> {
+    anyhow::ensure!(can_signal(lookups, transports), BROWSER_NEEDS_RELAY_LOOKUP);
+    anyhow::ensure!(transports.carry_without_udp(&policy), BROWSER_HAS_NO_PATH);
+    Ok(())
 }
 
 /// The kind-independent build inputs threaded into [`setup_create`] /
@@ -481,6 +553,7 @@ pub async fn setup_mesh(kind: SetupKind, params: SetupParams) -> Result<EventLoo
     mesh_config.validate()?;
     let lookups = mesh_config.lookups.clone();
     let relay_transport = mesh_config.transport.relay_transport;
+    let transports = member_transports(&lookups, transports, mesh_config.transport)?;
 
     // The off-loop rung channel: the backgrounded startup probe and the
     // beacon's liveness self-monitor publish a chosen rung here; the
@@ -558,7 +631,7 @@ pub async fn setup_mesh(kind: SetupKind, params: SetupParams) -> Result<EventLoo
     // Off the critical path: nothing below blocks `ready`, which `run` emits
     // once the IPC socket accepts. Confirm/correct the optimistic rung 0 in the
     // background (covers a joiner, which has no beacon self-monitor of its own).
-    spawn_startup_rung_confirmation(ladder, rung_tx);
+    let rung_probe = spawn_startup_rung_confirmation(ladder, rung_tx);
 
     Ok(EventLoopConfig {
         per_peer_gate,
@@ -580,13 +653,14 @@ pub async fn setup_mesh(kind: SetupKind, params: SetupParams) -> Result<EventLoo
         cohost: effective_cohost(rdv.has_rendezvous, cohost_override, cohost),
         rendezvous_params: rdv,
         rung_rx,
+        rung_probe,
         runtime_base,
         state_file,
         #[cfg(feature = "host")]
         multihop: multihop_handle,
         webrtc,
         webrtc_enabled: transports.webrtc,
-        has_ip_transport: transports.ip && !cfg!(target_arch = "wasm32"),
+        local_udp_transport: transports.udp,
         webrtc_admission,
         webrtc_ice,
         unicast_rx,
@@ -634,6 +708,7 @@ fn build_overlay(
             .then(|| (webrtc.clone(), admission.clone(), ice)),
         build.take_protocols(),
         build.relay_transport,
+        crate::transport::webrtc::local_needs_webrtc_lane(build.transports.udp),
     );
     (gossip, router, admission, ice)
 }
@@ -830,7 +905,7 @@ async fn setup_join(build: &SetupBuild<'_>, kind: SetupKind) -> Result<Assembled
     // it is attached.
     let needs_session = crate::transport::webrtc::node_graft_needs_session(
         build.relay_transport,
-        build.transports.ip,
+        build.transports.udp,
     );
     // A mesh with no rendezvous (Nostr only) has no bare id worth dialing.
     let bootstrap = if needs_session || !rdv.has_rendezvous {
@@ -875,4 +950,131 @@ async fn setup_join(build: &SetupBuild<'_>, kind: SetupKind) -> Result<Assembled
         webrtc_ice,
         topic_string,
     })
+}
+
+#[cfg(all(test, feature = "host"))]
+mod tests {
+    use std::time::Duration;
+
+    use crate::protocol::mesh::{LookupOpts, NostrChoice, RelayChoice, Transport, TransportPolicy};
+
+    // A browser has no UDP: it reaches a peer only through the relay, and a
+    // data channel's handshake crosses the relay too. `validate` accepts
+    // `udp,webrtc` with no relay lookup, because a native node can signal
+    // over UDP.
+    #[test]
+    fn a_browser_refuses_a_mesh_with_no_relay_lookup() {
+        let dht_only = LookupOpts {
+            mdns: false,
+            dht: true,
+            relay_lookup: RelayChoice::Disabled,
+            nostr: NostrChoice::Disabled,
+        };
+        let policy =
+            TransportPolicy::from_transports(&[Transport::Udp, Transport::WebRtc]).expect("valid");
+        let transports = crate::lookup::TransportOpts::default().within(&policy);
+        let error = super::refuse_in_browser(&dht_only, policy, transports)
+            .expect_err("no path to signal on");
+        assert_eq!(error.to_string(), super::BROWSER_NEEDS_RELAY_LOOKUP);
+
+        let relay = LookupOpts {
+            relay_lookup: RelayChoice::Pinned,
+            ..dht_only
+        };
+        super::refuse_in_browser(&relay, policy, transports).expect("the relay signals");
+    }
+
+    // Nostr carries the JSEP as the relay does, so a Nostr-only mesh has a
+    // path to signal on even with no relay transport on this node.
+    #[test]
+    fn nostr_alone_signals_for_a_node_without_udp() {
+        let nostr_only = LookupOpts {
+            nostr: NostrChoice::Pinned,
+            ..LookupOpts::loopback()
+        };
+        let policy =
+            TransportPolicy::from_transports(&[Transport::Udp, Transport::WebRtc]).expect("valid");
+        let no_relay = crate::lookup::TransportOpts {
+            relay: false,
+            ..crate::lookup::TransportOpts::webrtc_only()
+        };
+        super::refuse_in_browser(&nostr_only, policy, no_relay.within(&policy))
+            .expect("a browser signals over Nostr");
+        super::member_transports(&nostr_only, no_relay, policy)
+            .expect("a native node without UDP signals over Nostr");
+    }
+
+    // A native node without UDP signals its data channel over the relay, as a
+    // browser does. `validate` checks the mesh's list, not this node's own
+    // narrower paths.
+    #[test]
+    fn a_node_without_udp_refuses_a_mesh_with_no_relay_lookup() {
+        let dht_only = LookupOpts {
+            mdns: false,
+            dht: true,
+            relay_lookup: RelayChoice::Disabled,
+            nostr: NostrChoice::Disabled,
+        };
+        let policy =
+            TransportPolicy::from_transports(&[Transport::Udp, Transport::WebRtc]).expect("valid");
+        let webrtc_only = crate::lookup::TransportOpts::webrtc_only();
+        super::member_transports(&dht_only, webrtc_only, policy).expect_err("no path to signal on");
+        let relay = LookupOpts {
+            relay_lookup: RelayChoice::Pinned,
+            ..dht_only
+        };
+        super::member_transports(&relay, webrtc_only, policy).expect("the relay signals");
+    }
+
+    // The relay lookup names a relay, but only this node's relay transport
+    // can dial it: without one, a browser neither signals nor carries relay
+    // payload.
+    #[test]
+    fn a_browser_refuses_a_node_with_no_relay_transport() {
+        let lookups = LookupOpts {
+            mdns: false,
+            dht: false,
+            relay_lookup: RelayChoice::Pinned,
+            nostr: NostrChoice::Disabled,
+        };
+        let no_relay = |policy: &TransportPolicy| crate::lookup::TransportOpts {
+            relay: false,
+            ..crate::lookup::TransportOpts::default().within(policy)
+        };
+        let webrtc =
+            TransportPolicy::from_transports(&[Transport::Udp, Transport::WebRtc]).expect("valid");
+        super::refuse_in_browser(&lookups, webrtc, no_relay(&webrtc))
+            .expect_err("no relay to signal on");
+        let relay_payload =
+            TransportPolicy::from_transports(&[Transport::Udp, Transport::Relay]).expect("valid");
+        super::refuse_in_browser(&lookups, relay_payload, no_relay(&relay_payload))
+            .expect_err("no relay to carry payload");
+    }
+
+    use tokio::sync::watch;
+
+    use crate::testing::{errors_through_runtime_drop, silent_relay_rung};
+
+    /// Regression for `Endpoint dropped without calling Endpoint::close` on a
+    /// Ctrl-C in the first seconds of a run. The startup probe was detached,
+    /// so `Node::leave` had nothing to wait for: `main` returned while the
+    /// probe was still waiting for its relay, or still closing, and the runtime
+    /// drop took its endpoint down open.
+    #[test]
+    fn a_departure_during_the_startup_rung_probe_closes_its_endpoint() {
+        let (_silent, rung) = silent_relay_rung();
+
+        let errors = errors_through_runtime_drop(async {
+            let probe = super::spawn_startup_rung_confirmation(vec![rung], watch::channel(None).0)
+                .expect("a ladder to walk");
+            // Let the probe bind and start waiting for its relay.
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            probe.stop_and_wait().await;
+        });
+
+        assert!(
+            !errors.contains("Endpoint dropped without calling"),
+            "the startup rung probe's endpoint reached its drop open:\n{errors}"
+        );
+    }
 }

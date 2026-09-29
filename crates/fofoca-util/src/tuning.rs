@@ -587,23 +587,30 @@ pub const RENDEZVOUS_PROBE_ATTEMPTS: u32 = 3;
 /// starting up inside.
 pub const RENDEZVOUS_PROBE_RETRY_MS: u64 = 250;
 
-/// How long a departing member waits for its co-hosted rendezvous endpoint
-/// to close (`beacon::Rendezvous::shed_and_wait`).
+/// How long a departing member waits for its co-hosted rendezvous endpoint,
+/// and for an outstanding rival probe's endpoint, to close
+/// (`beacon::Rendezvous::shed_and_wait`, `beacon::RivalProbe::abort_and_close`).
 ///
-/// Bounded because shutdown must not hang on a relay that stopped answering:
-/// `Node::leave` allows the whole wind-down 3s and the `Left` propagation
-/// sleep already spends 500ms of it, so this has to fit in what is left with
-/// room to spare. Exceeding the bound abandons the endpoint exactly as it was
-/// abandoned before this wait existed — a fallback to the old behaviour, never
-/// worse than it.
+/// Bounded because shutdown must not hang on a relay that stopped answering.
+/// Exceeding the bound abandons the endpoint exactly as it was abandoned
+/// before this wait existed — a fallback to the old behaviour, never worse
+/// than it. [`NODE_LEAVE_SECS`] is derived from this, so the two cannot drift.
 ///
 /// **Not a round number picked for looks.** At 1s it timed out on a live
 /// three-peer share: an endpoint homed on two relay rungs spends most of a
 /// second shutting its relay actors down (measured ~770ms under
-/// `iroh=debug`), so a one-second budget sits on the edge and the ungraceful
-/// drop this exists to prevent came straight back. 2s clears the measured cost
-/// with headroom and still leaves ~500ms of `Node::leave`'s budget unspent.
-pub const RENDEZVOUS_CLOSE_SECS: u64 = 2;
+/// `iroh=debug`). At 2s it timed out on every departure that landed while a
+/// rival probe was still in its handshake: the probe's close frame is never
+/// acknowledged, so iroh's close waits out the QUIC drain, which it documents
+/// as "usually 3 seconds". 4s clears that with headroom.
+pub const RENDEZVOUS_CLOSE_SECS: u64 = 4;
+
+/// How long `Node::leave` waits for the event loop to wind down before it
+/// detaches it: the 500ms `Left` propagation sleep, then the endpoint closes,
+/// which run concurrently and so cost one [`RENDEZVOUS_CLOSE_SECS`], plus
+/// headroom. A shorter budget let `serve` return and drop the runtime while a
+/// close was still in flight, which aborts that close.
+pub const NODE_LEAVE_SECS: u64 = RENDEZVOUS_CLOSE_SECS + 2;
 
 /// Roster size (known live members) at or below which a *meshed* holder uses
 /// the brisk lone cadence ([`RIVAL_RECHECK_SECS`]) instead of the slow
@@ -633,6 +640,36 @@ pub const RIVAL_RECHECK_OFFSET_SPAN_SECS: u64 = 8;
 /// small crafted frame bought that from every member at once. Comfortably under
 /// [`ANTIENTROPY_INTERVAL_SECS`], so the honest cadence is never refused.
 pub const ANTIENTROPY_SERVE_COOLDOWN_SECS: u64 = 5;
+
+/// How many state digest answers one asker may get per channel on the unicast
+/// plane in one [`ANTIENTROPY_SERVE_COOLDOWN_SECS`] window; the same heads get
+/// an answer again only after [`FAST_ROUND_MIN_INTERVAL_MS`]. A backfilling
+/// node asks again as long as a peer's heads show it is behind (a fast round),
+/// so it needs several per window; eight answers of
+/// [`ANTIENTROPY_MAX_RESEND`] frames cover 512 changes, and still bound a node
+/// whose fast rounds misbehave.
+pub const ANTIENTROPY_SERVES_PER_WINDOW: usize = 8;
+
+/// The shortest time between two direct fast-round digests to one peer, for
+/// one channel. A peer that advertises heads nobody can hold then costs one
+/// small frame per interval.
+pub const FAST_ROUND_MIN_INTERVAL_MS: u64 = 200;
+
+/// How long after a direct fast-round digest a node holds back its own
+/// broadcast digests for that channel.
+pub const FAST_ROUND_ACTIVE_MS: u64 = 1000;
+
+/// How long a stalled fast round waits before it asks a peer that is still
+/// ahead again: a lost request, a lost answer, or a refusal costs this, not an
+/// anti-entropy tick. The reclaim timer drives the check, so this matches it.
+pub const FAST_ROUND_RETRY_MS: u64 = 400;
+
+/// How many peers a node remembers as ahead of it, per channel.
+pub const FAST_ROUND_AHEAD_MAX: usize = 16;
+
+/// How long a peer stays remembered as ahead after its heads last showed it:
+/// a peer whose heads we can never hold must not hold a place for ever.
+pub const FAST_ROUND_AHEAD_TTL_SECS: u64 = 60;
 
 /// `HyParView` **active view** capacity — the number of direct gossip neighbors
 /// (open QUIC links) each member maintains per topic. A mesh at or below this

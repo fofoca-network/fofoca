@@ -75,6 +75,8 @@ mod registry;
 mod liveness;
 #[cfg(any(feature = "native", feature = "web"))]
 mod selector;
+#[cfg(feature = "test-hooks")]
+pub use selector::block_ip_paths;
 mod signaling;
 
 pub use addr::{WEBRTC_TRANSPORT_ID, custom_addr, parse_custom_addr};
@@ -144,6 +146,9 @@ pub const DEFAULT_STUN_HOSTS: [&str; 2] = ["stun1.l.google.com:19302", "stun.clo
 pub(crate) fn should_log_drop(total: u64) -> bool {
     total == 1 || total.is_multiple_of(256)
 }
+
+#[cfg(all(feature = "bench", any(feature = "native", feature = "web")))]
+pub mod bench;
 
 #[cfg(feature = "native")]
 mod native;

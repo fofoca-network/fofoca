@@ -17,7 +17,7 @@ use super::LOG_TARGET;
 /// starts as soon as the connection has both sides' candidates, and a first
 /// round lands within seconds; a punch that has not landed by now is
 /// retried later rather than waited on.
-pub(crate) const PROBE_DEADLINE: Duration = Duration::from_secs(15);
+pub const PROBE_DEADLINE: Duration = Duration::from_secs(15);
 
 /// Close code an inbound gossip connection gets when the relay is lookup
 /// only and no direct path was selected within the deadline. Distinct from
@@ -32,6 +32,15 @@ pub(crate) fn selected_is_direct(conn: &Connection) -> bool {
         .iter()
         .find(iroh::endpoint::Path::is_selected)
         .is_some_and(|path| !path.is_relay())
+}
+
+/// Whether iroh's selected path to the remote is a direct UDP path: the race
+/// against `WebRTC` is won. `false` while no path is selected yet.
+pub(crate) fn selected_is_ip(conn: &Connection) -> bool {
+    conn.paths()
+        .iter()
+        .find(iroh::endpoint::Path::is_selected)
+        .is_some_and(|path| path.is_ip())
 }
 
 /// Whether payload may go out on `conn` under the mesh's transport policy.
@@ -51,11 +60,25 @@ pub(crate) const RELAY_REFUSED: &str =
 /// Wait until `conn`'s selected path is not the relay, or `deadline` passes.
 /// Every path event is a reason to re-read the path list: the event's own
 /// address may be stale by the time it is handled.
-pub(crate) async fn wait_direct(conn: &Connection, deadline: Duration) -> bool {
+pub async fn wait_direct(conn: &Connection, deadline: Duration) -> bool {
+    wait_selected(conn, deadline, selected_is_direct).await
+}
+
+/// [`wait_direct`] for a UDP path alone: whether UDP won the race against a
+/// `WebRTC` session within `deadline`.
+pub(crate) async fn wait_ip(conn: &Connection, deadline: Duration) -> bool {
+    wait_selected(conn, deadline, selected_is_ip).await
+}
+
+async fn wait_selected(
+    conn: &Connection,
+    deadline: Duration,
+    selected: fn(&Connection) -> bool,
+) -> bool {
     let mut events = conn.path_events();
     let proven = async {
         loop {
-            if selected_is_direct(conn) {
+            if selected(conn) {
                 return true;
             }
             if events.next().await.is_none() {
@@ -73,7 +96,7 @@ pub(crate) async fn wait_direct(conn: &Connection, deadline: Duration) -> bool {
 /// iroh to select a non-relay path, and on timeout close `conn` with
 /// `close_code` so the other end reads the cause. Returns whether payload
 /// may flow on `conn`.
-pub(crate) async fn refuse_unless_direct(
+pub async fn refuse_unless_direct(
     conn: &Connection,
     relay_transport: bool,
     deadline: Duration,

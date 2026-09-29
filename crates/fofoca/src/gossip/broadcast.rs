@@ -266,13 +266,25 @@ pub fn unicast_farewell(state: &EventLoopState, bytes: &Bytes) {
 pub(crate) async fn broadcast_peer_info(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
     state.peerinfo_flooded_at = Some(crate::util::clock::Instant::now());
     let our_addr = ctx.endpoint.addr();
-    let addr_data = serde_json::to_string(&crate::protocol::peer_addr::peer_info_to_json(
+    let proof = state
+        .peer_info_proof
+        .get_or_insert_with(|| {
+            crate::transport::endpoint_proof::sign(
+                ctx.endpoint.secret_key(),
+                ctx.mesh,
+                state.identity.public().as_bytes(),
+            )
+        })
+        .clone();
+    let mut addr_json = crate::protocol::peer_addr::peer_info_to_json(
         &our_addr,
-        state.own_needs_lane,
+        !state.local_udp_transport,
         ctx.endpoint.secret_key(),
         ctx.mesh.as_str().as_bytes(),
-    ))
-    .expect("peer_info_to_json produces a Value that always serializes");
+    );
+    addr_json["proof"] = serde_json::Value::String(proof);
+    let addr_data = serde_json::to_string(&addr_json)
+        .expect("peer_info_to_json produces a Value that always serializes");
     let addr_body =
         MessageBody::new(addr_data).expect("endpoint address JSON has no control characters");
     broadcast_msg(
