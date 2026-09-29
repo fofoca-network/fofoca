@@ -242,6 +242,32 @@ mod tests {
         );
     }
 
+    /// Bulk both ways at once moves twice the bulk, and the rate counts both.
+    #[tokio::test]
+    async fn a_both_ways_sample_counts_both_directions() {
+        let args = Args {
+            only: None,
+            bytes: 64 * 1024,
+            rounds: 1,
+            direction: Direction::Both,
+            list: false,
+            json: None,
+        };
+        let client = vanilla().await.expect("bind the client");
+        let server = vanilla().await.expect("bind the server");
+        let addr = ip_addr(&server).expect("the server has an IPv4 socket");
+        let _router = Router::builder(server).accept(BENCH_ALPN, Bench).spawn();
+
+        let samples = rounds(&client, addr, &args).await.expect("the rounds run");
+
+        let counted: Vec<usize> = samples.iter().map(|sample| sample.bytes).collect();
+        assert!(
+            counted.iter().all(|&bytes| bytes == 2 * args.bytes),
+            "samples counted {counted:?} bytes, both directions moved {}",
+            2 * args.bytes
+        );
+    }
+
     /// The reply bytes a `Bench` server sends for one raw request header.
     async fn reply_to(mode: u8, wanted: u32) -> usize {
         let client = vanilla().await.expect("bind the client");

@@ -44,6 +44,10 @@ cargo task benchmark --only safari           # the two STP cells
 cargo task benchmark --direction up          # or `both`
 ```
 
+With `--direction both`, a sample counts the bytes of both directions, so its
+rate is the total of the two. The JSON's top-level `bytes` is the requested
+size, and each sample's `bytes` is twice that.
+
 ## Results
 
 Apple M5, macOS 27.0, rustc 1.95.0, Chrome for Testing 152.0.7977.42.
