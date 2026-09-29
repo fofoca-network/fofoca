@@ -407,7 +407,16 @@ fn devtools_port(profile: &Path, chrome: &mut Child) -> Result<u16, Skip> {
 fn page_socket(port: u16) -> Result<String, Skip> {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
+        // Bounded: a server that accepts and then says nothing would
+        // otherwise hold the loop past its deadline.
+        let per_request = deadline
+            .saturating_duration_since(Instant::now())
+            .min(Duration::from_secs(5))
+            .max(Duration::from_millis(100));
         let targets: serde_json::Value = ureq::get(format!("http://127.0.0.1:{port}/json/list"))
+            .config()
+            .timeout_global(Some(per_request))
+            .build()
             .call()
             .and_then(|mut reply| reply.body_mut().read_json())
             .map_err(|error| Skip(format!("could not list Chrome's targets: {error}")))?;
@@ -520,6 +529,30 @@ mod tests {
             }
         });
         port
+    }
+
+    /// A `DevTools` server that accepts the connection and then says nothing
+    /// must not hold the runner past its deadline.
+    #[test]
+    fn a_silent_target_list_does_not_hang() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind a local port");
+        let port = listener.local_addr().expect("local addr").port();
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept() {
+                held.push(stream);
+            }
+        });
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done_tx.send(page_socket(port).map_err(|skip| skip.0));
+        });
+
+        let result = done_rx.recv_timeout(std::time::Duration::from_secs(40));
+        assert!(
+            matches!(result, Ok(Err(_))),
+            "page_socket returned {result:?}"
+        );
     }
 
     /// Chrome writes `DevToolsActivePort` before its page target exists, and
