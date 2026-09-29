@@ -405,7 +405,13 @@ fn devtools_port(profile: &Path, chrome: &mut Child) -> Result<u16, Skip> {
 /// Chrome writes `DevToolsActivePort` before its page target exists, and until
 /// then the list is empty, so the list is read again until a page shows.
 fn page_socket(port: u16) -> Result<String, Skip> {
-    let deadline = Instant::now() + Duration::from_secs(30);
+    page_socket_within(port, Duration::from_secs(30))
+}
+
+/// [`page_socket`] with its deadline. A failed list call is tried again too:
+/// the list can be unreachable for a moment while Chrome starts.
+fn page_socket_within(port: u16, within: Duration) -> Result<String, Skip> {
+    let deadline = Instant::now() + within;
     loop {
         // Bounded: a server that accepts and then says nothing would
         // otherwise hold the loop past its deadline.
@@ -413,13 +419,23 @@ fn page_socket(port: u16) -> Result<String, Skip> {
             .saturating_duration_since(Instant::now())
             .min(Duration::from_secs(5))
             .max(Duration::from_millis(100));
-        let targets: serde_json::Value = ureq::get(format!("http://127.0.0.1:{port}/json/list"))
-            .config()
-            .timeout_global(Some(per_request))
-            .build()
-            .call()
-            .and_then(|mut reply| reply.body_mut().read_json())
-            .map_err(|error| Skip(format!("could not list Chrome's targets: {error}")))?;
+        let listed: Result<serde_json::Value, _> =
+            ureq::get(format!("http://127.0.0.1:{port}/json/list"))
+                .config()
+                .timeout_global(Some(per_request))
+                .build()
+                .call()
+                .and_then(|mut reply| reply.body_mut().read_json());
+        let targets = match listed {
+            Ok(targets) => targets,
+            Err(error) if Instant::now() >= deadline => {
+                return Err(Skip(format!("could not list Chrome's targets: {error}")));
+            }
+            Err(_) => {
+                std::thread::sleep(Duration::from_millis(50));
+                continue;
+            }
+        };
         let page = targets
             .as_array()
             .into_iter()
@@ -505,7 +521,7 @@ mod tests {
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpListener;
 
-    use super::page_socket;
+    use super::{page_socket, page_socket_within};
 
     /// Answer each `/json/list` request with the next body, then stop.
     fn fake_devtools(bodies: Vec<&'static str>) -> u16 {
@@ -531,6 +547,37 @@ mod tests {
         port
     }
 
+    /// A target-list call can fail while Chrome is still starting; the runner
+    /// tries again until its deadline instead of giving up on the first error.
+    #[test]
+    fn a_failed_target_list_is_read_again() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind a local port");
+        let port = listener.local_addr().expect("local addr").port();
+        std::thread::spawn(move || {
+            // The first connection is dropped at once: the call fails.
+            drop(listener.accept());
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut reader = BufReader::new(stream.try_clone().expect("clone the stream"));
+            let mut line = String::new();
+            while reader.read_line(&mut line).is_ok_and(|read| read > 2) {
+                line.clear();
+            }
+            let body =
+                r#"[{"type":"page","webSocketDebuggerUrl":"ws://127.0.0.1/devtools/page/2"}]"#;
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        });
+        assert_eq!(
+            page_socket(port).map_err(|skip| skip.0),
+            Ok("ws://127.0.0.1/devtools/page/2".to_owned())
+        );
+    }
+
     /// A `DevTools` server that accepts the connection and then says nothing
     /// must not hold the runner past its deadline.
     #[test]
@@ -545,7 +592,8 @@ mod tests {
         });
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let _ = done_tx.send(page_socket(port).map_err(|skip| skip.0));
+            let within = std::time::Duration::from_secs(2);
+            let _ = done_tx.send(page_socket_within(port, within).map_err(|skip| skip.0));
         });
 
         let result = done_rx.recv_timeout(std::time::Duration::from_secs(40));
