@@ -341,11 +341,8 @@ pub(crate) fn run(args: &Args) -> TaskOutcome {
     // The fast suite reports per-test through the runner rather than through a
     // published table, so it takes its own path and returns here.
     if args.suite == Suite::Loopback {
-        let chrome = browsers()
-            .into_iter()
-            .find(|browser| browser.name == "chrome-cft")
-            .ok_or("no Chrome-for-Testing entry to run the fast suite on")?;
-        return loopback::run(&chrome.binary, &env);
+        let chrome = cdp::chrome_for_testing().map_err(|Skip(why)| why)?;
+        return loopback::run(&chrome.to_string_lossy(), &env);
     }
 
     let mut rows = Vec::new();
