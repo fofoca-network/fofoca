@@ -265,7 +265,9 @@ impl UnicastPool {
     /// peer is dialed first, and only one dial to it runs at a time. Returns
     /// `false`, sending nothing, when the warm connection's path may not carry
     /// payload, or `eid` is cold and on the dial-failure cooldown or already
-    /// being dialed.
+    /// being dialed. `true` means handed off, not delivered: a dial, path or
+    /// write failure after it is only logged, and a write can succeed into a
+    /// connection that died silently.
     pub(crate) async fn send_batch_in_background(
         &self,
         eid: EndpointId,

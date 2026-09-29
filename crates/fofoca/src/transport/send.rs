@@ -1048,6 +1048,44 @@ mod tests {
         );
     }
 
+    /// A serve is counted when the batch is handed to the pool, not when it is
+    /// delivered, so a failed batch still costs one, but it does not strand
+    /// the asker: the same digest after the 200 ms repeat interval is answered
+    /// again. Here the failed dial puts the asker on the pool's cooldown, so
+    /// the second answer goes on gossip; the same-plane repeat is
+    /// `budget_tests::the_serve_budget_takes_new_heads_up_to_its_count`.
+    #[tokio::test]
+    async fn after_a_failed_batch_the_asker_is_answered_again_on_gossip() {
+        use crate::gossip::antientropy::handle_state_digest;
+        use crate::protocol::Channel;
+
+        // Linked and known by nickname, but with no address to dial: the
+        // batch's dial fails at once.
+        let unreachable = iroh::EndpointAddr::new(iroh::SecretKey::generate().public());
+        let (net, mut state, _frames) = holder(unreachable.clone(), 3).await;
+        state.linked_endpoints.insert(unreachable.id);
+        let ctx = net.ctx();
+        let asker = crate::protocol::identity::Identity::generate();
+        let behind = digest(&net.mesh, Channel::State, &serde_json::json!([]), &asker);
+
+        let first = handle_state_digest(Channel::State, &behind, &mut state, &ctx).await;
+        assert_eq!(
+            first.unicast, 3,
+            "handed to the pool as a point-to-point batch"
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        let again = handle_state_digest(Channel::State, &behind, &mut state, &ctx).await;
+        assert_eq!(
+            again,
+            crate::gossip::antientropy::Answered {
+                unicast: 0,
+                broadcast: 3
+            },
+            "answered again, on gossip: the failed dial put the asker on the pool's cooldown"
+        );
+    }
+
     /// Apply one local state change, as a frame from the network would land.
     fn apply_one(state: &mut EventLoopState, mesh: &MeshId, step: usize) {
         use crate::protocol::Channel;

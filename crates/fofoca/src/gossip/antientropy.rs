@@ -325,9 +325,11 @@ fn state_digest(
 /// and plane: at most [`ANTIENTROPY_SERVES_PER_WINDOW`] on the unicast plane,
 /// one on gossip. On unicast the same heads are answered again only after
 /// [`FAST_ROUND_MIN_INTERVAL_MS`], so a burst of one asker's digests draws one
-/// answer and a lost answer can still be asked for again. The heads alone
-/// cannot be the gate: the holder does not check them, so a digest with
-/// made-up heads would be new every time.
+/// answer and a lost answer can still be asked for again. A serve is counted
+/// when the answer is handed to the pool, not when it is delivered, so a batch
+/// that fails costs one serve, and the asker's next ask is answered. The
+/// heads alone cannot be the gate: the holder does not check them, so a
+/// digest with made-up heads would be new every time.
 #[derive(Debug, Default)]
 pub(crate) struct ServeBudget {
     windows: HashMap<(String, Channel, Plane), Served>,
