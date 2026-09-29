@@ -106,6 +106,14 @@ impl ProtocolHandler for Bench {
                 .await
                 .map_err(AcceptError::from_err)?;
             let wanted = u32::from_le_bytes([head[1], head[2], head[3], head[4]]) as usize;
+            // The peer names the reply size, so the ceiling `exchange` keeps
+            // on its side has to hold here too, or one header asks for 4 GiB.
+            if head[0] > 2 || wanted > MAX_TRANSFER_BYTES {
+                return Err(AcceptError::from_err(std::io::Error::other(format!(
+                    "refused request: mode {}, {wanted} bytes wanted",
+                    head[0]
+                ))));
+            }
 
             // Anything after the header on the request stream is the client's
             // bulk upload. Drained and verified before replying, so a corrupted

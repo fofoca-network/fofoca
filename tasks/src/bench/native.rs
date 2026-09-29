@@ -214,6 +214,7 @@ async fn ip_pair<F: Future<Output = Result<Endpoint, String>>>(
 mod tests {
     use super::{Args, BENCH_ALPN, Bench, Router, ip_addr, rounds, vanilla};
     use crate::bench::Direction;
+    use fofoca_iroh_webrtc_transport::bench::MAX_TRANSFER_BYTES;
 
     /// An upload's throughput is the bulk it sent, not the token it got back.
     #[tokio::test]
@@ -239,5 +240,36 @@ mod tests {
             "samples counted {counted:?} bytes, the upload sent {}",
             args.bytes
         );
+    }
+
+    /// The reply bytes a `Bench` server sends for one raw request header.
+    async fn reply_to(mode: u8, wanted: u32) -> usize {
+        let client = vanilla().await.expect("bind the client");
+        let server = vanilla().await.expect("bind the server");
+        let addr = ip_addr(&server).expect("the server has an IPv4 socket");
+        let _router = Router::builder(server).accept(BENCH_ALPN, Bench).spawn();
+        let connection = client.connect(addr, BENCH_ALPN).await.expect("connect");
+        let (mut send, mut recv) = connection.open_bi().await.expect("open a stream");
+        let mut head = vec![mode];
+        head.extend_from_slice(&wanted.to_le_bytes());
+        send.write_all(&head).await.expect("send the header");
+        let _ = send.finish();
+        let mut buf = vec![0u8; 64 * 1024];
+        let mut total = 0;
+        while let Ok(Some(read)) = recv.read(&mut buf).await {
+            total += read;
+        }
+        total
+    }
+
+    #[tokio::test]
+    async fn a_bench_server_refuses_an_unknown_mode() {
+        assert_eq!(reply_to(7, 1024).await, 0);
+    }
+
+    #[tokio::test]
+    async fn a_bench_server_refuses_a_reply_past_the_transfer_ceiling() {
+        let past = u32::try_from(MAX_TRANSFER_BYTES + 1).expect("the ceiling fits in u32");
+        assert_eq!(reply_to(0, past).await, 0);
     }
 }
