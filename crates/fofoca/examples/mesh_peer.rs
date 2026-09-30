@@ -109,6 +109,7 @@ async fn main() -> anyhow::Result<()> {
                     mdns: true,
                     dht: true,
                     relay_lookup: ladder,
+                    pkarr: fofoca::protocol::PkarrChoice::Disabled,
                 },
                 password: None,
                 issuer_pubkey: None,

@@ -159,6 +159,7 @@ async fn spawn_with(
                 mdns: false,
                 dht: false,
                 relay_lookup: RelayChoice::Custom(vec![relay.clone()]),
+                pkarr: fofoca::protocol::PkarrChoice::Disabled,
             },
             password: None,
             issuer_pubkey: None,

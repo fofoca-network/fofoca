@@ -158,7 +158,7 @@ fn spawn_startup_rung_confirmation(
 pub(crate) fn register_rendezvous(endpoint: &Endpoint, params: &RendezvousParams) {
     // Relay disabled (not in the allowlist) or private without a port ladder:
     // nothing to pre-register — joiners resolve the rendezvous id via
-    // mDNS/DHT only.
+    // mDNS/DHT/pkarr only.
     let Some(addr) = crate::beacon::rendezvous_addr(params) else {
         return;
     };
@@ -939,6 +939,7 @@ mod tests {
             mdns: false,
             dht: true,
             relay_lookup: RelayChoice::Disabled,
+            pkarr: crate::protocol::mesh::PkarrChoice::Disabled,
         };
         let policy =
             TransportPolicy::from_transports(&[Transport::Udp, Transport::WebRtc]).expect("valid");
@@ -963,6 +964,7 @@ mod tests {
             mdns: false,
             dht: true,
             relay_lookup: RelayChoice::Disabled,
+            pkarr: crate::protocol::mesh::PkarrChoice::Disabled,
         };
         let policy =
             TransportPolicy::from_transports(&[Transport::Udp, Transport::WebRtc]).expect("valid");
@@ -984,6 +986,7 @@ mod tests {
             mdns: false,
             dht: false,
             relay_lookup: RelayChoice::Pinned,
+            pkarr: crate::protocol::mesh::PkarrChoice::Disabled,
         };
         let no_relay = |policy: &TransportPolicy| crate::lookup::TransportOpts {
             relay: false,

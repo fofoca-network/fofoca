@@ -53,6 +53,7 @@ iroh-test-utils = [
     "iroh/test-utils",
     "dep:iroh-relay",
     "iroh-relay/server",
+    "dep:axum",
     "fofoca-iroh-webrtc-transport/test-hooks",
 ]
 # Off by default. The blob-offload side-channel: a `habilis-mesh/blob/1` ALPN
@@ -188,6 +189,9 @@ iroh = { workspace = true, features = [
 iroh-gossip.workspace = true
 # Only for `iroh-test-utils` (see the feature); pinned to `iroh`'s rev so it is
 # the copy already in the graph, not a second one.
+# Only for `iroh-test-utils`: the local pkarr relay (`net::test_pkarr`). The
+# same axum iroh already pulls in, so no second copy.
+axum = { version = "0.8", default-features = false, features = ["tokio", "http1"], optional = true }
 iroh-relay = { version = "=1.0.3", git = "https://github.com/fofoca-network/iroh", rev = "66003af753b5d221edb6f5407a4fda6a7a4d213c", default-features = false, optional = true }
 
 # The browser needs the endpoint and the relay transport and nothing else:
