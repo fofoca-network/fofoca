@@ -163,7 +163,7 @@ fn owner_start(pid: u32) -> anyhow::Result<u64> {
     );
     anyhow::ensure!(
         pid != std::process::id(),
-        "owner pid {pid} is the daemon itself"
+        "owner pid {pid} is this process itself"
     );
     crate::util::process::live_start_time(pid)
         .ok_or_else(|| anyhow::anyhow!("owner pid {pid} is not running"))
