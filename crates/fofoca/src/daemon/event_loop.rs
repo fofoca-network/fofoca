@@ -196,6 +196,7 @@ pub async fn run<A: NodeDriver>(
     let (path_tx, path_rx) = mpsc::unbounded_channel();
     state.path_changes = path_tx;
     state.rendezvous_id = Some(rendezvous_params.id);
+    state.rendezvous_answers_jsep = rendezvous_params.bind_ports.is_empty();
     state.write_peer_count();
 
     // An eager member co-hosts from t=0 so a beacon exists before any

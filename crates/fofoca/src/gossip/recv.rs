@@ -2028,4 +2028,27 @@ mod first_contact_tests {
         );
         node.endpoint.close().await;
     }
+
+    /// A native node on a private mesh still unlinked at a heal tick must not
+    /// arm the offer fallback either: the fallback assumes an unreachable
+    /// beacon is a tab, but a private rendezvous never answers JSEP, so the
+    /// fallback would hold every timer graft with nothing to release it.
+    #[tokio::test]
+    async fn a_heal_tick_never_arms_the_offer_fallback_on_a_private_mesh() {
+        let node = Node::spawn().await;
+        let ctx = node.ctx();
+        let mut state = fresh_state();
+        state.webrtc = Some(crate::lookup::new_webrtc_handle(node.endpoint.id()));
+        state.relay_transport = false;
+        state.local_udp_transport = true;
+        state.rendezvous_answers_jsep = false;
+
+        crate::transport::webrtc::negotiate_rendezvous_session(&mut state, &ctx);
+
+        assert!(
+            crate::transport::webrtc::rendezvous_graftable(&state),
+            "the heal tick held the timer graft on a private mesh"
+        );
+        node.endpoint.close().await;
+    }
 }
