@@ -881,21 +881,27 @@ pub(crate) fn negotiate_rendezvous_session(
     );
 }
 
-/// The first rendezvous offer, made when the loop starts. The heal tick that
-/// otherwise makes it is a whole interval away, and until it runs a
-/// browser-shaped node has no path onto a lookup-only mesh; a beacon that
-/// re-checks inside that window finds nobody negotiating and sheds.
+/// A rendezvous offer made off the heal tick: when the loop starts, and when
+/// the rendezvous link drops. The heal tick that otherwise makes it is a whole
+/// interval away, and until it runs a browser-shaped node has no path onto a
+/// lookup-only mesh; a beacon that re-checks inside that window finds nobody
+/// negotiating and sheds.
 ///
-/// Only a node that needs the lane: an IP-capable node's first call arms the
-/// offer fallback, which holds its timer grafts before its punch has had a
-/// heal interval to land.
-pub(crate) fn offer_rendezvous_at_start(
+/// Only a node that already offers: one that needs the lane, or an IP-capable
+/// node whose fallback is armed. An IP-capable node's first call arms the
+/// fallback, which holds its timer grafts, so only the heal tick may make it:
+/// the punch must first have had a heal interval to land.
+pub(crate) fn offer_rendezvous_off_tick(
     state: &mut crate::daemon::state::EventLoopState,
     ctx: &crate::daemon::ctx::HandlerCtx<'_>,
 ) {
-    if local_needs_webrtc_lane(state.local_udp_transport) {
+    if offers_off_tick(state) {
         negotiate_rendezvous_session(state, ctx);
     }
+}
+
+fn offers_off_tick(state: &crate::daemon::state::EventLoopState) -> bool {
+    local_needs_webrtc_lane(state.local_udp_transport) || state.rendezvous_offer_fallback
 }
 
 // ── Per-target JSEP ───────────────────────────────────────────────────────
@@ -2185,6 +2191,26 @@ mod tests {
     /// gate holds it and refuses it after `PROBE_DEADLINE`, and the attach
     /// that follows does not replace it. Observed every 30 s for a whole
     /// browser-first cell.
+    /// Off the heal tick, only a node that already offers offers again: a
+    /// lane-needing node on every call, as before, and an IP-capable node only
+    /// once the heal tick armed its fallback.
+    #[test]
+    fn only_a_node_that_already_offers_offers_off_the_heal_tick() {
+        let mut state = crate::testing::fresh_state();
+        state.local_udp_transport = false;
+        assert!(offers_off_tick(&state), "a lane-needing node");
+        state.local_udp_transport = true;
+        assert!(
+            !offers_off_tick(&state),
+            "an IP-capable node before its fallback"
+        );
+        state.rendezvous_offer_fallback = true;
+        assert!(
+            offers_off_tick(&state),
+            "an IP-capable node after its fallback"
+        );
+    }
+
     #[test]
     fn an_offer_fallback_holds_the_timer_graft() {
         let mut state = crate::testing::fresh_state();
