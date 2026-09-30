@@ -102,6 +102,8 @@ pub async fn run<A: NodeDriver>(
         relay_transport,
         driver,
         per_peer_gate,
+        #[cfg(feature = "host")]
+        owner,
     } = cfg;
 
     // Every driver-derived fact in one place. Only the CLI exits the
@@ -139,6 +141,7 @@ pub async fn run<A: NodeDriver>(
             StateFile::new(path, &mesh_str, &author, &mesh_name)
                 .with_base(runtime_base.clone())
                 .with_topic(topic_string.as_deref())
+                .with_owner_pid(owner.map(super::shutdown::Owner::pid))
         });
     #[cfg(not(feature = "host"))]
     drop(state_file);
@@ -269,7 +272,7 @@ pub async fn run<A: NodeDriver>(
     // case: there are no process signals to listen for.
     #[cfg(feature = "host")]
     let quit_rx = if handle_signals {
-        spawn_quit_signal_tasks(exit_on_quit)
+        spawn_quit_signal_tasks(exit_on_quit, owner)
     } else {
         never_quit()
     };
