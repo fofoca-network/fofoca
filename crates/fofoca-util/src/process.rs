@@ -59,7 +59,9 @@ pub fn parent_of(pid: u32) -> Option<u32> {
 }
 
 /// The start time of a live process, in clock ticks since boot (`stat` field
-/// 22). `None` for a pid with no process, or a zombie (see the macOS twin).
+/// 22). `None` for a pid with no process, or a zombie (see the macOS twin). The
+/// units differ from macOS, which is fine: a caller only compares two values
+/// from one host for equality.
 #[cfg(target_os = "linux")]
 #[must_use]
 pub fn live_start_time(pid: u32) -> Option<u64> {

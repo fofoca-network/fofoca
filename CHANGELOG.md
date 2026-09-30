@@ -15,6 +15,8 @@ published to a registry; pin it with
   the owner exits. The start time captured at startup guards against pid
   reuse, and an unreaped zombie owner counts as gone. The state file carries
   the pid as `owner_pid`, read back as `SessionEntry::owner_pid`.
+  `runtime::validate_owner_pid` runs the same checks, for a launcher that
+  refuses a bad pid before it re-spawns the daemon.
 - Native pairs race WebRTC against UDP on a `udp,webrtc` mesh. A session
   that attaches after UDP won is detached, and the far side drops its half
   at once. A path watcher races the pair again when UDP is lost, and detaches

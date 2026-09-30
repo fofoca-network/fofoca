@@ -143,6 +143,31 @@ pub(super) fn spawn_quit_signal_tasks(
     }
     quit_rx
 }
+/// Whether `pid` can own a daemon, with the checks and messages of
+/// `EventLoopConfig::with_owner_pid`. For a launcher that must refuse a bad
+/// pid in the foreground, before it re-spawns the daemon detached.
+///
+/// # Errors
+/// `pid` is 0 or 1, the calling process's own pid, or no live process has it
+/// (a zombie counts as dead). The message is one line.
+#[cfg(feature = "host")]
+pub fn validate_owner_pid(pid: u32) -> anyhow::Result<()> {
+    owner_start(pid).map(drop)
+}
+/// The start time of a valid owner, the one home of the owner checks.
+#[cfg(feature = "host")]
+fn owner_start(pid: u32) -> anyhow::Result<u64> {
+    anyhow::ensure!(
+        pid > 1,
+        "owner pid {pid} is init or invalid. Give a live process id greater than 1"
+    );
+    anyhow::ensure!(
+        pid != std::process::id(),
+        "owner pid {pid} is the daemon itself"
+    );
+    crate::util::process::live_start_time(pid)
+        .ok_or_else(|| anyhow::anyhow!("owner pid {pid} is not running"))
+}
 /// The process a detached daemon lives for, in place of its parent. The pid
 /// alone cannot tell the owner from a later process that reuses the pid, so
 /// the start time captured at startup is what identifies it.
@@ -156,17 +181,12 @@ pub(crate) struct Owner {
 #[cfg(feature = "host")]
 impl Owner {
     /// # Errors
-    /// `pid` is 0 or 1 (init/launchd is nobody's owner), the daemon's own pid,
-    /// or no live process has it. A single-line message, for a CLI that exits on it.
+    /// See [`validate_owner_pid`].
     pub(crate) fn new(pid: u32) -> anyhow::Result<Self> {
-        anyhow::ensure!(pid > 1, "owner pid {pid} is not an agent process");
-        anyhow::ensure!(
-            pid != std::process::id(),
-            "owner pid {pid} is the daemon itself"
-        );
-        let start = crate::util::process::live_start_time(pid)
-            .ok_or_else(|| anyhow::anyhow!("owner pid {pid} is not running"))?;
-        Ok(Self { pid, start })
+        Ok(Self {
+            pid,
+            start: owner_start(pid)?,
+        })
     }
 
     pub(crate) fn pid(self) -> u32 {
@@ -256,7 +276,7 @@ mod tests {
 
     use tokio::sync::mpsc;
 
-    use super::{Owner, orphan_watch_warranted, parent_lost, watch_owner};
+    use super::{Owner, orphan_watch_warranted, parent_lost, validate_owner_pid, watch_owner};
 
     const TICK: Duration = Duration::from_millis(10);
 
@@ -303,6 +323,8 @@ mod tests {
         child.wait().unwrap();
     }
 
+    /// Simulates reuse with `start + 1`: that a real reissue changes the start
+    /// time is a property of the OS, not something this test can show.
     #[tokio::test]
     async fn owner_watch_quits_when_the_pid_is_reissued() {
         let mut child = spawn_owner();
@@ -317,11 +339,35 @@ mod tests {
     }
 
     #[test]
+    fn validate_owner_pid_accepts_only_a_live_other_process() {
+        let mut child = spawn_owner();
+        let pid = child.id();
+        assert!(validate_owner_pid(pid).is_ok());
+        for refused in [0, 1, std::process::id()] {
+            let error = validate_owner_pid(refused)
+                .expect_err("refused")
+                .to_string();
+            assert!(!error.contains('\n'), "one error line: {error}");
+        }
+        child.kill().unwrap();
+        // SIGKILL lands asynchronously, so poll until the unreaped child is a
+        // zombie; it stays one until the `wait` below.
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while validate_owner_pid(pid).is_ok() {
+            assert!(std::time::Instant::now() < deadline, "a zombie is refused");
+            std::thread::sleep(TICK);
+        }
+        child.wait().unwrap();
+        assert!(validate_owner_pid(pid).is_err(), "a dead pid is refused");
+    }
+
+    #[test]
     fn owner_refuses_init_self_and_a_dead_pid() {
         assert!(Owner::new(0).is_err());
         assert!(Owner::new(std::process::id()).is_err(), "self is no owner");
         let init = Owner::new(1).expect_err("init refused").to_string();
         assert!(!init.contains('\n'), "one error line: {init}");
+        assert!(!init.contains("agent"), "engine vocabulary only: {init}");
         let mut child = spawn_owner();
         let pid = child.id();
         child.kill().unwrap();
