@@ -2189,13 +2189,6 @@ mod tests {
         client.close().await;
     }
 
-    /// An IP-capable node that fell back to offering the rendezvous a
-    /// session — the beacon is a tab, with no UDP to punch to — grafts on the
-    /// attach, never on a timer. A timer graft dials before the session
-    /// exists, so its connection has only the relay path; the tab's accept
-    /// gate holds it and refuses it after `PROBE_DEADLINE`, and the attach
-    /// that follows does not replace it. Observed every 30 s for a whole
-    /// browser-first cell.
     /// Off the heal tick, only a node that already offers offers again: a
     /// lane-needing node on every call, as before, and an IP-capable node only
     /// once the heal tick armed its fallback.
@@ -2216,6 +2209,13 @@ mod tests {
         );
     }
 
+    /// An IP-capable node that fell back to offering the rendezvous a
+    /// session — the beacon is a tab, with no UDP to punch to — grafts on the
+    /// attach, never on a timer. A timer graft dials before the session
+    /// exists, so its connection has only the relay path; the tab's accept
+    /// gate holds it and refuses it after `PROBE_DEADLINE`, and the attach
+    /// that follows does not replace it. Observed every 30 s for a whole
+    /// browser-first cell.
     #[test]
     fn an_offer_fallback_holds_the_timer_graft() {
         let mut state = crate::testing::fresh_state();
