@@ -120,14 +120,28 @@ pub const ALIVE_INTERVAL_SECS: u64 = 30;
 /// holder sees the joiner's `joined`, answers with a fresh one of its own, and
 /// the answer needs a gossip round trip. Also how long a rival must keep
 /// sending before the holder counts it as a holder too, not a joiner that is
-/// about to refuse itself.
+/// about to refuse itself. Hidden flag `--nickname-answer-secs`, for the
+/// app's subprocess suite.
 pub const NICKNAME_ANSWER_SECS: u64 = 3;
+
+/// The live value, after any CLI override of [`NICKNAME_ANSWER_SECS`].
+#[must_use]
+pub fn nickname_answer_secs() -> u64 {
+    current().nickname_answer_secs
+}
 
 /// How long a joiner that chose its nickname waits for a first link to a real
 /// peer before it takes the alone path and reports ready as it always has: with
 /// nobody to answer, nobody holds the nickname that it can know of. Below
 /// [`READY_MAX_SECS`], so the `ready` gate never times out on the wait.
+/// Hidden flag `--nickname-alone-secs`, for the app's subprocess suite.
 pub const NICKNAME_ALONE_SECS: u64 = 8;
+
+/// The live value, after any CLI override of [`NICKNAME_ALONE_SECS`].
+#[must_use]
+pub fn nickname_alone_secs() -> u64 {
+    current().nickname_alone_secs
+}
 
 /// How long a peer can go unheard before the sweeper evicts it.
 /// Must exceed `ALIVE_INTERVAL_SECS` comfortably — 3x absorbs one or
@@ -225,6 +239,8 @@ pub struct Tuning {
     pub rival_recheck_meshed_secs: u64,
     pub rival_recheck_alone_secs: u64,
     pub topic_mdns_only: bool,
+    pub nickname_answer_secs: u64,
+    pub nickname_alone_secs: u64,
 }
 
 impl Tuning {
@@ -248,6 +264,8 @@ impl Tuning {
         rival_recheck_meshed_secs: RIVAL_RECHECK_MESHED_SECS,
         rival_recheck_alone_secs: RIVAL_RECHECK_ALONE_SECS,
         topic_mdns_only: false,
+        nickname_answer_secs: NICKNAME_ANSWER_SECS,
+        nickname_alone_secs: NICKNAME_ALONE_SECS,
     };
 }
 

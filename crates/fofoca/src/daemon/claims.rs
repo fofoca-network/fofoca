@@ -6,7 +6,7 @@ use n0_future::time::Instant as TokioInstant;
 
 use crate::protocol::{Message, MessageKind, Nickname, PresenceSubtype};
 use crate::util::clock::Instant;
-use crate::util::tuning::{NICKNAME_ALONE_SECS, NICKNAME_ANSWER_SECS, alive_timeout_secs};
+use crate::util::tuning::{alive_timeout_secs, nickname_alone_secs, nickname_answer_secs};
 
 /// Where a member's nickname came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,7 +78,7 @@ pub(crate) struct ReadyHold {
 impl ReadyHold {
     pub(crate) fn new(now: TokioInstant) -> Self {
         Self {
-            deadline: now + Duration::from_secs(NICKNAME_ALONE_SECS),
+            deadline: now + Duration::from_secs(nickname_alone_secs()),
             linked: false,
         }
     }
@@ -88,7 +88,7 @@ impl ReadyHold {
     pub(crate) fn on_first_link(&mut self, now: TokioInstant) {
         if !self.linked {
             self.linked = true;
-            self.deadline = now + Duration::from_secs(NICKNAME_ANSWER_SECS);
+            self.deadline = now + Duration::from_secs(nickname_answer_secs());
         }
     }
 }
@@ -195,7 +195,7 @@ impl Claims {
         let settled = message.timestamp
             >= rival
                 .first_ts
-                .saturating_add(i64::try_from(NICKNAME_ANSWER_SECS).unwrap_or(i64::MAX));
+                .saturating_add(i64::try_from(nickname_answer_secs()).unwrap_or(i64::MAX));
         if settled && !rival.reported {
             rival.reported = true;
             step.report = true;
@@ -225,6 +225,7 @@ mod tests {
     use super::*;
     use crate::protocol::MeshId;
     use crate::protocol::identity::{Identity, encode_pubkey};
+    use crate::util::tuning::{NICKNAME_ALONE_SECS, NICKNAME_ANSWER_SECS};
 
     const KEY_A: &str = "aa";
     const KEY_B: &str = "bb";
