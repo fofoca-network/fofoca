@@ -53,6 +53,7 @@ pub(crate) fn tick_sweep(state: &mut EventLoopState, sink: &dyn NodeSink) {
         .collect();
     for (nick, seen, age) in expired {
         state.last_seen.remove(nick.as_str());
+        state.newest_ts.remove(nick.as_str());
         if state.peers.remove(nick.as_str()) {
             state.write_peer_count();
             if state.surfaced.remove(nick.as_str()) {

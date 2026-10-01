@@ -153,6 +153,9 @@ pub async fn join(opts: &Opts, sink: Arc<dyn NodeSink>) -> Result<Membership> {
             per_peer_gate: None,
             cohost: None,
             live_count: None,
+            identity: None,
+            resume_from: None,
+            nickname_source: crate::daemon::claims::NicknameSource::Minted,
         },
     )
     .await
@@ -230,6 +233,7 @@ pub fn resolve_kind(opts: &Opts, nickname: Option<Nickname>) -> Result<(SetupKin
                 target,
                 nickname,
                 password: None,
+                identity: None,
             }
             .resolve()
             .context("resolving the mesh id")?;
@@ -274,6 +278,7 @@ pub fn resolve_kind(opts: &Opts, nickname: Option<Nickname>) -> Result<(SetupKin
                 advertise: DirectorySelection::Unset,
                 password: None,
                 invite_only: false,
+                identity: None,
             }
             .resolve()
             .map_err(|error| anyhow::anyhow!("{error}"))?;
@@ -627,6 +632,7 @@ mod resolve_tests {
         let Resolved { kind: baseline, .. } = TopicParams {
             string: "standup".to_owned(),
             nickname: None,
+            identity: None,
         }
         .resolve()
         .expect("baseline");

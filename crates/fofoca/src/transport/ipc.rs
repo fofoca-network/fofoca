@@ -28,6 +28,37 @@ pub(crate) fn socket_path(base: &std::path::Path, mesh: &MeshId, nickname: &Nick
     )
 }
 
+/// Whether a live daemon already answers on the control socket of `nickname`.
+///
+/// A socket file whose daemon is gone refuses the connection, and is stale.
+/// One that answers is in use, and unlinking it, as [`bind`] does, would cut
+/// that daemon off from every client it has. A daemon that is on its way out
+/// still answers until its process ends, so an answer is given a short grace
+/// to stop before it counts.
+pub(crate) async fn held_by_live_daemon(
+    base: &std::path::Path,
+    mesh: &MeshId,
+    nickname: &Nickname,
+) -> bool {
+    let path = socket_path(base, mesh, nickname);
+    let answers = || std::os::unix::net::UnixStream::connect(&path).is_ok();
+    if !answers() {
+        return false;
+    }
+    for _ in 0..IPC_LEAVING_GRACE_POLLS {
+        n0_future::time::sleep(Duration::from_millis(IPC_LEAVING_GRACE_POLL_MS)).await;
+        if !answers() {
+            return false;
+        }
+    }
+    true
+}
+
+/// How long a daemon that is leaving may keep answering before it counts as
+/// holding its nickname: `POLLS` looks, `POLL_MS` apart.
+const IPC_LEAVING_GRACE_POLLS: u32 = 15;
+const IPC_LEAVING_GRACE_POLL_MS: u64 = 100;
+
 fn to_name(path: &str) -> Result<Name<'_>> {
     use interprocess::local_socket::{GenericFilePath, ToFsName};
     Ok(path.to_fs_name::<GenericFilePath>()?)
@@ -332,8 +363,8 @@ mod tests {
     use serde::{Deserialize, Serialize};
 
     use super::{
-        Addressed, IpcMessage, MeshId, Nickname, bind, json_error, json_ok, mpsc, send, serve,
-        socket_path,
+        Addressed, IpcMessage, MeshId, Nickname, bind, held_by_live_daemon, json_error, json_ok,
+        mpsc, send, serve, socket_path,
     };
 
     /// A minimal mesh-addressed command standing in for the app's real
@@ -392,6 +423,39 @@ mod tests {
     /// collide with (or be found by) a daemon running under a product's base.
     fn test_base() -> std::path::PathBuf {
         crate::util::runtime_base("fofoca-ipc-test")
+    }
+
+    /// A socket file whose daemon is gone is stale and gets unlinked; one that
+    /// answers is a live holder of the nickname, and `bind` must not be reached.
+    #[tokio::test]
+    async fn a_live_daemon_answers_the_probe_and_a_dead_ones_socket_does_not() {
+        let mesh = MeshId::from("abcdefghijkmnpqr");
+        let base = test_base();
+        let nickname = Nickname::from("probe-nick");
+        assert!(
+            !held_by_live_daemon(&base, &mesh, &nickname).await,
+            "no socket at all"
+        );
+
+        let listener = bind(&base, &mesh, &nickname).expect("bind the first daemon's socket");
+        assert!(
+            held_by_live_daemon(&base, &mesh, &nickname).await,
+            "a bound socket answers"
+        );
+        drop(listener);
+        // A daemon that dies without cleanup (SIGKILL) leaves its socket file
+        // behind with nothing listening. `std`'s listener does not unlink on
+        // drop, which is exactly that.
+        let path = socket_path(&base, &mesh, &nickname);
+        drop(std::os::unix::net::UnixListener::bind(&path).expect("leave a stale socket"));
+        assert!(
+            std::path::Path::new(&path).exists(),
+            "the stale file is on disk"
+        );
+        assert!(
+            !held_by_live_daemon(&base, &mesh, &nickname).await,
+            "a stale socket refuses the connection"
+        );
     }
 
     #[test]

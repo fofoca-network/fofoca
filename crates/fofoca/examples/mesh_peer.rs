@@ -136,6 +136,7 @@ async fn main() -> anyhow::Result<()> {
             target: id.parse::<JoinTarget>()?,
             nickname: None,
             password: None,
+            identity: None,
         }
         .resolve()?,
         None => CreateParams {
@@ -160,6 +161,7 @@ async fn main() -> anyhow::Result<()> {
             advertise: DirectorySelection::Unset,
             password: None,
             invite_only: false,
+            identity: None,
         }
         .resolve()?,
     };
@@ -193,6 +195,9 @@ async fn run_peer(
             per_peer_gate: None,
             cohost: None,
             live_count: Some(Arc::clone(&live)),
+            identity: None,
+            resume_from: None,
+            nickname_source: fofoca::runtime::NicknameSource::Minted,
         },
     )
     .await?;

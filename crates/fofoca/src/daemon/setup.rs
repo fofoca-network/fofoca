@@ -20,6 +20,8 @@ use crate::util::tuning::RELAY_RUNG_PROBE_SECS;
 use crate::beacon::RendezvousParams;
 use crate::lifecycle;
 
+use super::claims::{NicknameCheck, NicknameSource};
+use super::config::KeyOrigin;
 use super::{CoHostPolicy, DriverMode, EventLoopConfig};
 
 /// What kind of mesh we're setting up — either minting a new one
@@ -340,12 +342,49 @@ pub struct SetupParams {
     /// Supplied up front rather than patched onto the returned config, so the
     /// config is complete the moment it exists.
     pub live_count: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
+    /// Sign under this identity instead of minting one. A restarted process
+    /// that passes the key it saved is the same peer to the mesh, not a new one
+    /// under a recycled nickname. `None` mints a fresh key.
+    pub identity: Option<crate::protocol::identity::Identity>,
+    /// Unix seconds to resume surfacing from, for a process that restarts as the
+    /// same peer. The join horizon and the digest floor start here rather than
+    /// at this start, so what the mesh said while the process was down is shown
+    /// instead of being treated as history from before the join. Clamped into
+    /// `[0, start]`, so it can only widen the window; the caller caps how old a
+    /// point it will pass. Only frames from this start on count as signs of life.
+    /// `None` starts at now.
+    pub resume_from: Option<i64>,
+    /// Whether `author` is the caller's own choice. A joiner that chose its
+    /// nickname holds `ready` until the mesh has had time to say it is taken;
+    /// see [`NicknameTaken`](super::claims::NicknameTaken). A minted one does
+    /// not wait, and neither does a creator, who has no one to hear from.
+    pub nickname_source: NicknameSource,
 }
 
 impl std::fmt::Debug for SetupParams {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SetupParams").finish_non_exhaustive()
     }
+}
+
+/// The signing identity this member runs under, and where it came from.
+///
+/// A key the embedder supplied outlives the process, which is what the loop
+/// keys its restart handling on; a consumer that lets the engine mint one sees
+/// no change.
+fn member_identity(
+    supplied: Option<crate::protocol::identity::Identity>,
+) -> (
+    std::sync::Arc<crate::protocol::identity::Identity>,
+    KeyOrigin,
+) {
+    let origin = if supplied.is_some() {
+        KeyOrigin::Supplied
+    } else {
+        KeyOrigin::Minted
+    };
+    let identity = supplied.unwrap_or_else(crate::protocol::identity::Identity::generate);
+    (std::sync::Arc::new(identity), origin)
 }
 
 /// Why a browser refuses a mesh with no relay lookup: one string, so a test
@@ -501,6 +540,10 @@ struct Assembled {
 /// # Errors
 /// The join target fails to resolve, the password fails to verify, or the
 /// endpoint cannot bind.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one sequential assembly of the mesh config from the setup params; each step is a single call, and splitting it would only scatter them across helpers"
+)]
 pub async fn setup_mesh(kind: SetupKind, params: SetupParams) -> Result<EventLoopConfig> {
     let SetupParams {
         author,
@@ -515,7 +558,17 @@ pub async fn setup_mesh(kind: SetupKind, params: SetupParams) -> Result<EventLoo
         transports,
         multihop,
         per_peer_gate,
+        identity,
+        resume_from,
+        nickname_source,
     } = params;
+    // A joiner that chose its nickname waits to hear whether a peer holds it.
+    let nickname_check =
+        if nickname_source == NicknameSource::Chosen && !matches!(kind, SetupKind::Create { .. }) {
+            NicknameCheck::Confirm
+        } else {
+            NicknameCheck::Skip
+        };
     // The localhost binding is owned + bound by the caller; the engine only needs
     // the resolved port for the `ready` event. `Some(0)` (ephemeral) is resolved
     // caller-side and passed back in here as the real port.
@@ -544,7 +597,7 @@ pub async fn setup_mesh(kind: SetupKind, params: SetupParams) -> Result<EventLoo
 
     // This member's per-author signing identity. Hoisted above the match so it is
     // available to both attach paths.
-    let identity = std::sync::Arc::new(crate::protocol::identity::Identity::generate());
+    let (identity, key_origin) = member_identity(identity);
 
     let build = SetupBuild {
         author: &author,
@@ -616,6 +669,9 @@ pub async fn setup_mesh(kind: SetupKind, params: SetupParams) -> Result<EventLoo
         gossip,
         author,
         identity,
+        key_origin,
+        resume_from,
+        nickname_check,
         mesh: mesh_id,
         name: mesh_name,
         topic_string,

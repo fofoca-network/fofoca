@@ -41,7 +41,7 @@ pub(crate) use fofoca_util::consts::MAX_MESSAGE_SIZE;
 // (`gossip/mod.rs`): this crate is deliberately off iroh-gossip, so it cannot
 // name the constant it checks against.
 
-/// Protocol version embedded in every message, `12.0` for the engine's
+/// Protocol version embedded in every message, `13.0` for the engine's
 /// de-branding. The crypto byte-domains are mixed into signature and
 /// key-derivation transcripts, so any rebrand changes the bytes an older build
 /// derives and its signature verification fails *silently*. The exact-match gate
@@ -57,6 +57,15 @@ pub(crate) use fofoca_util::consts::MAX_MESSAGE_SIZE;
 /// The identity wire key stays **`mesh`**, and so does the internal vocabulary.
 /// The user-facing noun for a session is **gossip**, but that is a CLI/docs/MCP
 /// surface word and never reaches the wire.
+///
+/// **`13.0`** changes what a channel change's automerge actor is: the signer's
+/// key followed by a per-run suffix, where `12.0` required exactly the key. A
+/// restart under a key the embedder kept would otherwise number its changes from
+/// 1 again under the actor of its last run, and every replica would refuse them.
+/// The `state`/`meta` heads digest also names the sender's current actor. A
+/// `12.0` peer would drop every `13.0` channel change as one signed by a key
+/// that does not own its actor, so the two cannot share a mesh, and `parse`
+/// refuses the frames before that comes up.
 ///
 /// **`12.0` is the first version bump that breaks real interop.** `11.0` shipped
 /// (v0.7.4, on the Homebrew tap), so an `11.0` peer and a `12.0` peer cannot form
@@ -87,7 +96,7 @@ pub(crate) use fofoca_util::consts::MAX_MESSAGE_SIZE;
 /// - `4.0` — the native application-payload port.
 /// - `3.0` — the application-payload migration.
 /// - `2.0` — RFC 6902 → RFC 7386 shared state.
-pub(crate) const VERSION: &str = "12.0";
+pub(crate) const VERSION: &str = "13.0";
 
 /// Presence subtype.
 /// `Joined`/`Left` are user-visible; `Alive` is a silent keepalive used
@@ -419,7 +428,7 @@ fn empty_body() -> MessageBody {
 ///
 /// Wire format (compact JSON, one line):
 /// ```json
-/// {"v":"12.0","id":"<uuid>","type":"app","tag":"app_msg","mesh":"...","author":"word-word","ts":1234567890,"body":"{\"messageId\":\"<uuid>\",\"role\":\"ROLE_USER\",...}","ext":{}}
+/// {"v":"13.0","id":"<uuid>","type":"app","tag":"app_msg","mesh":"...","author":"word-word","ts":1234567890,"body":"{\"messageId\":\"<uuid>\",\"role\":\"ROLE_USER\",...}","ext":{}}
 /// ```
 ///
 /// `to` (the addressee nickname) is inlined into the JSON for a directed app frame.

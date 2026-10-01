@@ -80,6 +80,15 @@ pub enum CoHostPolicy {
 /// the directory in public mode — only one mesh was discoverable).
 pub const DIRECTORY_ADVERTISER_COHOST: CoHostPolicy = CoHostPolicy::EagerProbed;
 
+/// Where a member's signing key came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KeyOrigin {
+    /// Minted by `setup_mesh` for this process only.
+    Minted,
+    /// Supplied by the embedder, who keeps it across restarts.
+    Supplied,
+}
+
 /// Configuration for the event loop, shared by `create` and `join`.
 /// The driver-specific channels live in [`DriverMode`].
 /// Opaque to consumers: built whole by
@@ -97,9 +106,16 @@ pub struct EventLoopConfig {
     /// would stay permanently deaf (review finding H1).
     pub(crate) gossip: iroh_gossip::net::Gossip,
     pub(crate) author: Nickname,
-    /// This member's signing identity (Ed25519), minted in `setup_mesh`.
-    /// In-process / ephemeral for now (see [`crate::protocol::identity`]).
+    /// This member's signing identity (Ed25519): the embedder's, or one minted
+    /// in `setup_mesh` (see [`crate::protocol::identity`]).
     pub(crate) identity: std::sync::Arc<crate::protocol::identity::Identity>,
+    /// Whether `identity` outlives this process: its own frames come back after
+    /// a restart and its chain must not reuse a seq.
+    pub(crate) key_origin: KeyOrigin,
+    /// See [`SetupParams::resume_from`](super::setup::SetupParams::resume_from).
+    pub(crate) resume_from: Option<i64>,
+    /// Whether `ready` waits for the mesh to confirm the nickname.
+    pub(crate) nickname_check: super::claims::NicknameCheck,
     pub(crate) mesh: MeshId,
     /// Decoded mesh name (from the mesh id). Carried so the
     /// shutdown path can print `left #NAME` without re-parsing

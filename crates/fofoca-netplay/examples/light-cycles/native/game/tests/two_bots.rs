@@ -50,6 +50,9 @@ async fn spawn_bot(topic: &str, nick: &str) -> Bot {
             per_peer_gate: None,
             cohost: None,
             live_count: None,
+            identity: None,
+            resume_from: None,
+            nickname_source: fofoca::runtime::NicknameSource::Minted,
         },
     )
     .await

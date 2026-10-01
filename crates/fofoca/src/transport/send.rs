@@ -847,7 +847,7 @@ mod tests {
         let (endpoint, sender) = loopback_node().await;
         let mut state = state_with_pool(&endpoint, bob_addr);
         let mesh = MeshId::from("test");
-        let seed = *state.identity.public().as_bytes();
+        let seed = state.actor_seed();
         let mut write = |channel: Channel| -> Vec<Bytes> {
             (0..changes)
                 .map(|step| {
@@ -892,6 +892,20 @@ mod tests {
     ) -> Message {
         let body = MessageBody::new(serde_json::json!({ "heads": heads }).to_string())
             .expect("a JSON body");
+        Message::new_channel_digest(mesh, &nick("bob"), body, channel).signed(asker)
+    }
+
+    /// [`digest`] from a run of `asker` that writes under `actor` (hex).
+    fn digest_from_run(
+        mesh: &MeshId,
+        channel: crate::protocol::Channel,
+        heads: &serde_json::Value,
+        asker: &crate::protocol::identity::Identity,
+        actor: &str,
+    ) -> Message {
+        let body =
+            MessageBody::new(serde_json::json!({ "heads": heads, "actor": actor }).to_string())
+                .expect("a JSON body");
         Message::new_channel_digest(mesh, &nick("bob"), body, channel).signed(asker)
     }
 
@@ -976,10 +990,9 @@ mod tests {
         );
     }
 
-    /// A peer holds every change it signed, since a change's actor is its
-    /// signer's key and a session key lives no longer than its document. So
-    /// its own changes are never missing from it, even when it advertises
-    /// heads we do not hold, where we cannot tell what it has.
+    /// A run holds every change it made itself. So its own changes are never
+    /// missing from it, even when it advertises heads we do not hold, where we
+    /// cannot tell what it has.
     #[tokio::test]
     async fn a_peer_is_not_sent_its_own_changes() {
         use crate::gossip::antientropy::handle_state_digest;
@@ -991,7 +1004,13 @@ mod tests {
         let author = state.identity.clone();
         prove_identity(&mut state, &author, bob_endpoint.id());
         let unknown = serde_json::json!(["heads-we-do-not-hold"]);
-        let from_the_author = digest(&net.mesh, Channel::State, &unknown, &author);
+        let from_the_author = digest_from_run(
+            &net.mesh,
+            Channel::State,
+            &unknown,
+            &author,
+            &state.actor_hex(),
+        );
 
         let answered =
             handle_state_digest(Channel::State, &from_the_author, &mut state, &net.ctx()).await;
@@ -999,6 +1018,60 @@ mod tests {
             answered.unicast + answered.broadcast,
             0,
             "all 3 changes are its own"
+        );
+    }
+
+    /// A restart keeps the key and changes the actor: the changes the earlier
+    /// run made are not the new run's own, and it holds none of them.
+    #[tokio::test]
+    async fn a_restarted_peer_is_sent_its_earlier_runs_changes() {
+        use crate::gossip::antientropy::handle_state_digest;
+        use crate::protocol::Channel;
+
+        let (bob_endpoint, _bob_sender) = loopback_node().await;
+        let (net, mut state, _frames) = holder(bob_endpoint.addr(), 3).await;
+        state.linked_endpoints.insert(bob_endpoint.id());
+        let author = state.identity.clone();
+        prove_identity(&mut state, &author, bob_endpoint.id());
+        let unknown = serde_json::json!(["heads-we-do-not-hold"]);
+        let later_run = format!(
+            "{}{}",
+            crate::protocol::identity::encode_pubkey(&author.public()),
+            "ff".repeat(8)
+        );
+        let from_the_restart =
+            digest_from_run(&net.mesh, Channel::State, &unknown, &author, &later_run);
+
+        let answered =
+            handle_state_digest(Channel::State, &from_the_restart, &mut state, &net.ctx()).await;
+        assert_eq!(
+            answered.unicast + answered.broadcast,
+            3,
+            "the earlier run's 3 changes are what the restart lacks"
+        );
+    }
+
+    /// An actor that is not under the asker's own key cannot hide changes from
+    /// anyone but the liar.
+    #[tokio::test]
+    async fn an_actor_outside_the_askers_key_excludes_nothing() {
+        use crate::gossip::antientropy::handle_state_digest;
+        use crate::protocol::Channel;
+
+        let (bob_endpoint, _bob_sender) = loopback_node().await;
+        let (net, mut state, _frames) = holder(bob_endpoint.addr(), 3).await;
+        state.linked_endpoints.insert(bob_endpoint.id());
+        let author = state.identity.clone();
+        prove_identity(&mut state, &author, bob_endpoint.id());
+        let unknown = serde_json::json!(["heads-we-do-not-hold"]);
+        let claimed = state.actor_hex();
+        let stranger = crate::protocol::identity::Identity::generate();
+        let lie = digest_from_run(&net.mesh, Channel::State, &unknown, &stranger, &claimed);
+
+        let answered = handle_state_digest(Channel::State, &lie, &mut state, &net.ctx()).await;
+        assert!(
+            answered.unicast + answered.broadcast > 0,
+            "the claimed actor is not under the stranger's key, so it is ignored"
         );
     }
 
@@ -1224,7 +1297,7 @@ mod tests {
     fn apply_one(state: &mut EventLoopState, mesh: &MeshId, step: usize) {
         use crate::protocol::Channel;
 
-        let seed = *state.identity.public().as_bytes();
+        let seed = state.actor_seed();
         let change = state
             .doc(Channel::State)
             .build_change(&serde_json::json!({ format!("k{step}"): step }), &seed)
@@ -1380,12 +1453,13 @@ mod tests {
         let last = Message::parse(&got[3]).expect("the last frame parses");
         assert_eq!(last.kind, MessageKind::StateDigest, "then a state digest");
         assert_eq!(
-            last.body.as_str(),
-            format!(
-                r#"{{"heads":{},"closing":true}}"#,
-                serde_json::json!(state.doc(Channel::State).heads())
-            ),
-            "carrying the holder's heads"
+            serde_json::from_str::<serde_json::Value>(last.body.as_str()).expect("a JSON body"),
+            serde_json::json!({
+                "heads": state.doc(Channel::State).heads(),
+                "closing": true,
+                "actor": state.actor_hex(),
+            }),
+            "carrying the holder's heads and its actor"
         );
     }
 
@@ -1449,8 +1523,8 @@ mod tests {
         let ask = Message::parse(&got[0]).expect("the ask parses");
         assert_eq!(ask.kind, MessageKind::StateDigest);
         assert_eq!(
-            ask.body.as_str(),
-            serde_json::json!({ "heads": own }).to_string()
+            serde_json::from_str::<serde_json::Value>(ask.body.as_str()).expect("a JSON body"),
+            serde_json::json!({ "heads": own, "actor": state.actor_hex() })
         );
     }
 }

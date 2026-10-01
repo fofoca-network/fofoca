@@ -52,7 +52,8 @@ pub(crate) fn json_body<T: serde::Serialize>(value: &T) -> Option<crate::protoco
     crate::protocol::MessageBody::new(json).ok()
 }
 pub(crate) use recv::{
-    drain_dead_receiver, flush_pending, handle_gossip_event, ingest, retain_own_broadcast,
+    drain_dead_receiver, flush_pending, handle_gossip_event, ingest, push_to_log,
+    retain_own_broadcast, tell_app_of_restored_channels,
 };
 
 /// Which transport paths to a peer are active: direct (IP or a custom

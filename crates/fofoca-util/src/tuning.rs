@@ -115,6 +115,20 @@ pub const RESIDENT_MEMORY_WARN_MB: u64 = 1024;
 /// timer, so chatty meshes pay zero heartbeat cost.
 pub const ALIVE_INTERVAL_SECS: u64 = 30;
 
+/// How long a joiner that chose its nickname waits, after its first link to a
+/// real peer, for the answer of a peer already holding that nickname. The
+/// holder sees the joiner's `joined`, answers with a fresh one of its own, and
+/// the answer needs a gossip round trip. Also how long a rival must keep
+/// sending before the holder counts it as a holder too, not a joiner that is
+/// about to refuse itself.
+pub const NICKNAME_ANSWER_SECS: u64 = 3;
+
+/// How long a joiner that chose its nickname waits for a first link to a real
+/// peer before it takes the alone path and reports ready as it always has: with
+/// nobody to answer, nobody holds the nickname that it can know of. Below
+/// [`READY_MAX_SECS`], so the `ready` gate never times out on the wait.
+pub const NICKNAME_ALONE_SECS: u64 = 8;
+
 /// How long a peer can go unheard before the sweeper evicts it.
 /// Must exceed `ALIVE_INTERVAL_SECS` comfortably — 3x absorbs one or
 /// two lost gossip rounds. Worst-case ghost window is

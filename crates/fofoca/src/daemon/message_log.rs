@@ -136,6 +136,16 @@ impl MessageLog {
             .expect("the fullest author holds at least one message")
     }
 
+    /// Whether this log already holds `message`: the same frame, by author key
+    /// and id. For a caller that pushed a frame without marking it seen and now
+    /// meets it again.
+    #[must_use]
+    pub fn holds(&self, message: &Message) -> bool {
+        self.messages
+            .iter()
+            .any(|held| held.id == message.id && held.pubkey == message.pubkey)
+    }
+
     pub(crate) fn len(&self) -> usize {
         self.messages.len()
     }

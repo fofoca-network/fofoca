@@ -47,6 +47,15 @@ pub enum MembershipEvent {
         pubkey: String,
         seq: u64,
     },
+    /// Another key sends under our nickname and has kept at it: two holders of
+    /// one nickname met. The lower key keeps it; `lost` says this member is the
+    /// other.
+    NicknameConflict {
+        nick: String,
+        ours: String,
+        theirs: String,
+        lost: bool,
+    },
     StateChanged {
         channel: String,
         author: String,
@@ -116,6 +125,17 @@ fn classify(event: NodeEvent) -> Option<MembershipEvent> {
             nick: nickname.to_string(),
             pubkey,
             seq,
+        }),
+        NodeEvent::NicknameConflict {
+            nickname,
+            ours,
+            theirs,
+            lost,
+        } => Some(MembershipEvent::NicknameConflict {
+            nick: nickname.to_string(),
+            ours,
+            theirs,
+            lost,
         }),
         NodeEvent::StateChanged {
             channel,

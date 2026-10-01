@@ -38,6 +38,17 @@ pub fn unix_secs() -> i64 {
         .unwrap_or(0)
 }
 
+/// Milliseconds since the Unix epoch, or 0 if the system clock is set before
+/// 1970.
+#[must_use]
+pub fn unix_millis() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|since_epoch| i64::try_from(since_epoch.as_millis()).ok())
+        .unwrap_or(0)
+}
+
 /// Nanoseconds since the Unix epoch. Returns 0 on pre-1970 clocks
 /// or after the year 2262 (i64 nanosecond overflow). Only used by
 /// tests today (unique tmp-file suffixes); gated on `test-fixtures`

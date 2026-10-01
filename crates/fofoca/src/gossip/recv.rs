@@ -25,7 +25,7 @@ use crate::util::clock::Instant;
 use n0_future::time::Instant as TokioInstant;
 
 use super::app::{AppClass, InboundApp, NodeApp};
-use super::broadcast::{announce_arrival, broadcast_peer_info};
+use super::broadcast::{announce_arrival, broadcast_msg, broadcast_peer_info};
 use super::{antientropy, conn_path};
 
 /// Dispatch a single item from the gossip receiver stream:
@@ -112,6 +112,7 @@ pub(crate) async fn handle_gossip_event(
                 // buffered while we were unmeshed, in order.
                 if !state.meshed {
                     state.meshed = true;
+                    state.note_first_link();
                     state.degraded = false;
                     flush_pending(state, ctx, "first real-peer link up").await;
                     // Our first digests may have gone out over the rendezvous
@@ -338,6 +339,14 @@ pub(crate) async fn ingest(
     // pubkey is computed once at loop setup (`ctx.our_pubkey`), so this is a
     // string compare, not a key-derivation + allocation per message.
     if message.pubkey == ctx.our_pubkey {
+        // A key the embedder saved outlives the process, so after a restart the
+        // peers' digests show frames of ours we no longer hold and they resend
+        // them, on every round until we hold them. They never pass the rest of
+        // this function (they are not news to us), so keep them the way
+        // `retain_own_broadcast` keeps a frame we just sent.
+        if state.durable_identity {
+            retain_returning_own_frame(message, state, app, ctx).await;
+        }
         return;
     }
     tracing::trace!(target: "fofoca::gossip", author = %message.author, "gossip message received");
@@ -376,6 +385,24 @@ pub(crate) async fn ingest(
     // here. Only authenticated messages reach this gate.
     if state.mark_seen(&message) {
         return;
+    }
+    // Who holds this nickname. Channel changes are exempt: a doc converges
+    // whoever signed a change, and its own gates decide what that signer may
+    // write. Everything else under a held nickname from another key is kept for
+    // anti-entropy and does nothing: not the roster, not what is shown, not the
+    // holder's departure.
+    if !matches!(message.kind, MessageKind::State | MessageKind::Meta) {
+        let fresh = message.timestamp >= state.started_at;
+        let held_by_someone_else = if message.author == *ctx.author {
+            note_rival_of_our_nickname(&message, fresh, state, ctx).await;
+            true
+        } else {
+            !state.claims.admit(&message, fresh, Instant::now())
+        };
+        if held_by_someone_else {
+            retain_quietly(message, state, app, ctx).await;
+            return;
+        }
     }
     // Identity is the signing key, not the nickname (p2panda-style): the
     // signature above authenticates the *key*; the `author` nickname is a
@@ -799,12 +826,209 @@ fn retain_and_index(
 
 /// Push a retained message into the anti-entropy log, keeping the DAG + fork
 /// indexes bounded with the log window as the push evicts.
-pub(super) fn push_to_log(state: &mut EventLoopState, message: Message) {
+pub(crate) fn push_to_log(state: &mut EventLoopState, message: Message) {
+    state.note_fresh_frame(message.timestamp);
     if let Some(evicted) = state.message_log.push(message) {
         let evicted_hash = evicted.content_hash_hex();
         state.forget_hash(&evicted_hash);
         if let Some(seq) = evicted.seq {
             state.forget_msg_seq(&evicted.pubkey, seq, &evicted_hash);
+        }
+    }
+}
+
+/// Take back a frame of ours that a peer re-served after a restart: verified,
+/// deduplicated and kept for anti-entropy exactly when a peer receiving it would
+/// keep it. Nothing else happens to it: no surfacing (we know what we sent), no
+/// membership, no fork or DAG indexing, no app dispatch.
+async fn retain_returning_own_frame(
+    message: Message,
+    state: &mut EventLoopState,
+    app: &mut dyn NodeApp,
+    ctx: &HandlerCtx<'_>,
+) {
+    if !message.verify_signature_with(&message.canonical_bytes()) || message.mesh != *ctx.mesh {
+        return;
+    }
+    if state.mark_seen(&message) {
+        return;
+    }
+    // Our own earlier run's changes to a channel doc are what a peer's later
+    // change may depend on. Left out, that change would wait for its parents
+    // forever and the doc would stall. They go to the doc and nowhere else: no
+    // event, and not `on_meta_applied`, which would adopt our own hint as a
+    // peer's.
+    let channel = if matches!(message.kind, MessageKind::State) {
+        Some(Channel::State)
+    } else if matches!(message.kind, MessageKind::Meta) {
+        Some(Channel::Meta)
+    } else {
+        None
+    };
+    if let Some(channel) = channel {
+        feed_own_channel_event(channel, &message, state, ctx);
+        return;
+    }
+    retain_quietly(message, state, app, ctx).await;
+}
+
+/// Keep a frame that is not to be acted on for anti-entropy only, exactly when
+/// a peer receiving it would keep it. Without the log entry the holders of the
+/// frame would re-serve it on every round, forever, since it never reaches the
+/// dedup of a node that has not logged it. The caller has verified it and marked
+/// it seen; nothing else happens to it: not the roster, not the surfaces, not
+/// the app.
+async fn retain_quietly(
+    mut message: Message,
+    state: &mut EventLoopState,
+    app: &mut dyn NodeApp,
+    ctx: &HandlerCtx<'_>,
+) {
+    let class = if message.shard.is_some() {
+        // The shard path of `handle_shard`: a directed shard is the addressee's
+        // to keep, and a big group's shards stay out of the log.
+        if !addressed_to_us(&message, ctx.author)
+            || !crate::protocol::message::shard_fits_log(&message)
+        {
+            return;
+        }
+        message.kind.app_tag().map(|_| app.classify(&message))
+    } else {
+        let Gated::Pass { sealed, class } = gate_and_decrypt(&mut message, state, ctx, &*app)
+        else {
+            return;
+        };
+        // Back to the signed wire form, which is what the log re-serves.
+        if let Some(sealed) = sealed {
+            message.body = sealed;
+        }
+        class
+    };
+    let loggable = class.as_ref().map_or_else(
+        || is_loggable(&message.kind),
+        |cls| cls.loggable && !cls.beat,
+    );
+    // The app may have kept its own send already; see `retain_outbound`.
+    if loggable && !state.message_log.holds(&message) {
+        tracing::debug!(target: "fofoca::gossip", "retained a frame that is not acted on");
+        push_to_log(state, message);
+    }
+}
+
+/// A frame from another key under our own nickname. Before we have reported
+/// ready, a fresh one means the nickname is taken and we leave with it. After
+/// that, a duplicate is only ever news: the holder answers a newcomer with a
+/// fresh `joined` of its own, so one that is waiting to hear hears, and a rival
+/// that keeps sending past the answer window is a holder too, so the conflict
+/// is reported, with the lower key keeping the nickname.
+async fn note_rival_of_our_nickname(
+    message: &Message,
+    fresh: bool,
+    state: &mut EventLoopState,
+    ctx: &HandlerCtx<'_>,
+) {
+    use crate::daemon::claims::{NicknameHolder, NicknameTaken, we_lose_the_nickname};
+
+    if !fresh {
+        return;
+    }
+    if state.ready_hold.is_some() {
+        state.refusal.get_or_insert_with(|| NicknameTaken {
+            nickname: ctx.author.clone(),
+            holder: NicknameHolder::Peer {
+                pubkey: message.pubkey.clone(),
+            },
+        });
+        return;
+    }
+    let step = state.claims.note_rival(message);
+    if step.announce {
+        let joined = Message::new_joined(ctx.mesh, ctx.author).signed(ctx.identity);
+        broadcast_msg(ctx.sender, &joined).await;
+        retain_own_broadcast(state, &joined);
+        tracing::info!(target: "fofoca::lifecycle", nickname = %ctx.author, "another key sends under our nickname; announced ourselves again");
+    }
+    if step.report {
+        ctx.sink.emit(NodeEvent::NicknameConflict {
+            nickname: ctx.author.clone(),
+            ours: ctx.our_pubkey.to_owned(),
+            theirs: message.pubkey.clone(),
+            lost: we_lose_the_nickname(ctx.our_pubkey, &message.pubkey),
+        });
+    }
+}
+
+/// Apply a channel change signed by our own key, from a run of ours that is
+/// gone, to its doc. The doc applies it by change hash, so a repeat is harmless,
+/// and its own checks (the signer owns the actor, the card gate) still run.
+///
+/// When it moves the document the change is surfaced, if a peer frame it
+/// unblocked is past the join horizon: our own old frame says nothing of what
+/// the agent has seen. The app is told afterwards, once, to re-assert what
+/// belongs to this run.
+fn feed_own_channel_event(
+    channel: Channel,
+    message: &Message,
+    state: &mut EventLoopState,
+    ctx: &HandlerCtx<'_>,
+) {
+    use crate::doc::Ingested;
+
+    let changes = state.doc(channel).change_count();
+    let outcome = state.doc_mut(channel).ingest(message);
+    if state.doc(channel).change_count() > changes {
+        state.fast_rounds.note_change(channel, Instant::now());
+    }
+    for key in state.doc_mut(channel).take_dropped() {
+        state.seen.remove(&key);
+    }
+    let Ingested::Applied {
+        changed: true,
+        doc: after,
+    } = outcome
+    else {
+        return;
+    };
+    // The first frame applied is our own, from before: it says nothing of what
+    // the agent has seen. What it released can be a peer's, and that is what the
+    // join horizon is read off.
+    let surfaceable = state
+        .doc(channel)
+        .applied_timestamps()
+        .iter()
+        .skip(1)
+        .any(|stamp| *stamp >= state.joined_at);
+    if surfaceable {
+        let doc = state.doc(channel);
+        let surfaced = surface_view(message, doc.surface_body(message)).into_owned();
+        ctx.sink.emit(NodeEvent::StateChanged {
+            channel,
+            event: Box::new(surfaced),
+            document: after,
+            is_self: false,
+        });
+    }
+    // Once the round that is bringing our old changes has gone idle, not once per
+    // change: see `tell_apps_of_restored_channels`.
+    state.restored.insert(channel);
+}
+
+/// Tell the app that a channel doc took changes of ours from an earlier run, for
+/// each channel that has, once its fast round has gone idle. An app that
+/// re-asserts its card on this does it once, over the whole backfill.
+pub(crate) async fn tell_app_of_restored_channels(
+    state: &mut EventLoopState,
+    app: &mut dyn NodeApp,
+    ctx: &HandlerCtx<'_>,
+) {
+    if state.restored.is_empty() {
+        return;
+    }
+    let now = Instant::now();
+    for channel in [Channel::State, Channel::Meta] {
+        if state.restored.contains(&channel) && !state.fast_rounds.active(channel, now) {
+            state.restored.remove(&channel);
+            app.on_own_channel_restored(channel, state, ctx).await;
         }
     }
 }
@@ -1591,7 +1815,7 @@ mod evicted_orphan_tests {
         author: &Nickname,
         count: usize,
     ) -> Vec<Message> {
-        let seed = *writer.identity.public().as_bytes();
+        let seed = writer.actor_seed();
         (0..count)
             .map(|step| {
                 let change = writer
@@ -2050,5 +2274,736 @@ mod first_contact_tests {
             "the heal tick held the timer graft on a private mesh"
         );
         node.endpoint.close().await;
+    }
+}
+
+/// A restarted peer that keeps its key meets its own pre-crash frames again:
+/// the peers still hold them and re-serve them on every digest round until we
+/// do too. They must be kept quietly, and only for a key the embedder supplied.
+#[cfg(test)]
+mod returning_own_frame_tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use bytes::Bytes;
+    use iroh::endpoint::presets;
+    use iroh_gossip::net::Gossip;
+
+    use super::{ingest, tell_app_of_restored_channels};
+    use crate::daemon::ctx::HandlerCtx;
+    use crate::daemon::state::EventLoopState;
+    use crate::gossip::app::{AppClass, InboundApp, NodeApp};
+    use crate::gossip::event::CountingSink;
+    use crate::protocol::Channel;
+    use crate::protocol::identity::{Identity, encode_pubkey};
+    use crate::protocol::{AppFrameParams, AppTag, MeshId, Message, MessageBody, Nickname};
+    use crate::testing::{endpoint_id, nick, state_for_run, state_with_identity};
+    use crate::transport::MeshSender;
+
+    const SAVED_KEY: [u8; 32] = [9; 32];
+
+    /// Counts what reaches the app; the engine must hand it nothing of ours.
+    #[derive(Default)]
+    struct Chat {
+        dispatched: Arc<AtomicUsize>,
+        /// How often the engine told the app our own earlier changes landed.
+        restored: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl NodeApp for Chat {
+        fn classify(&self, _message: &Message) -> AppClass {
+            AppClass {
+                loggable: true,
+                beat: false,
+                valid: true,
+                chained: true,
+                sealed: false,
+            }
+        }
+
+        async fn on_app_frame(
+            &mut self,
+            _frame: InboundApp<'_>,
+            _state: &mut EventLoopState,
+            _ctx: &HandlerCtx<'_>,
+        ) -> bool {
+            self.dispatched.fetch_add(1, Ordering::Relaxed);
+            true
+        }
+
+        async fn on_own_channel_restored(
+            &mut self,
+            _channel: Channel,
+            _state: &mut EventLoopState,
+            _ctx: &HandlerCtx<'_>,
+        ) {
+            self.restored.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    struct Rig {
+        endpoint: iroh::Endpoint,
+        sender: MeshSender,
+        mesh: MeshId,
+        author: Nickname,
+        identity: Identity,
+        pubkey: String,
+        sink: CountingSink,
+    }
+
+    impl Rig {
+        async fn new() -> Self {
+            let endpoint = iroh::Endpoint::builder(presets::Minimal)
+                .bind()
+                .await
+                .expect("bind a local endpoint");
+            let gossip = Gossip::builder().spawn(endpoint.clone());
+            let topic = gossip
+                .subscribe(iroh_gossip::proto::TopicId::from_bytes([4u8; 32]), vec![])
+                .await
+                .expect("subscribe to a peerless topic");
+            let (gossip_sender, _receiver) = topic.split();
+            let identity = Identity::from_secret_bytes(SAVED_KEY);
+            Rig {
+                endpoint,
+                sender: MeshSender::new(gossip_sender),
+                mesh: MeshId::from("test"),
+                author: nick("me"),
+                pubkey: encode_pubkey(&identity.public()),
+                identity,
+                sink: CountingSink::new(),
+            }
+        }
+
+        fn ctx(&self) -> HandlerCtx<'_> {
+            HandlerCtx {
+                sender: &self.sender,
+                endpoint: &self.endpoint,
+                mesh: &self.mesh,
+                author: &self.author,
+                identity: &self.identity,
+                our_pubkey: &self.pubkey,
+                max_peers: 16,
+                rendezvous_id: endpoint_id(9),
+                external_msg_tx: None,
+                sink: &self.sink,
+            }
+        }
+
+        /// A chat frame the previous run signed under the saved key.
+        fn earlier_run_chat(&self, seq: u64) -> Message {
+            Message::new_app(
+                &self.mesh,
+                &self.author,
+                AppFrameParams {
+                    tag: AppTag::from("chat"),
+                    to: None,
+                    corr: None,
+                    body: MessageBody::new(format!("\"from before the crash {seq}\""))
+                        .expect("a JSON body"),
+                },
+            )
+            .with_chain(seq, None)
+            .signed(&Identity::from_secret_bytes(SAVED_KEY))
+        }
+    }
+
+    fn wire(frame: &Message) -> Bytes {
+        Bytes::from(frame.serialize().expect("serialize"))
+    }
+
+    #[tokio::test]
+    async fn a_peer_re_served_frame_of_ours_is_kept_without_being_shown() {
+        let rig = Rig::new().await;
+        let ctx = rig.ctx();
+        let dispatched = Arc::new(AtomicUsize::new(0));
+        let mut app = Chat {
+            dispatched: Arc::clone(&dispatched),
+            ..Chat::default()
+        };
+        let mut state = state_for_run(true, None);
+        let frame = rig.earlier_run_chat(5);
+
+        ingest(wire(&frame), &mut state, &mut app, &ctx).await;
+        assert_eq!(state.message_log.len(), 1, "kept, so our digest names it");
+        assert!(
+            state.seen.contains(&frame.dedup_key()),
+            "marked seen, so a repeat is dropped at the gate"
+        );
+
+        ingest(wire(&frame), &mut state, &mut app, &ctx).await;
+        assert_eq!(state.message_log.len(), 1, "a repeat is not pushed twice");
+
+        assert_eq!(dispatched.load(Ordering::Relaxed), 0, "the app is not told");
+        assert_eq!(rig.sink.count(), 0, "nothing is surfaced");
+        assert!(state.peers.is_empty(), "we are not our own peer");
+        assert!(state.author_seqs.is_empty(), "no fork index for our chain");
+        rig.endpoint.close().await;
+    }
+
+    #[tokio::test]
+    async fn our_own_presence_comes_back_the_same_way() {
+        let rig = Rig::new().await;
+        let ctx = rig.ctx();
+        let mut app = Chat::default();
+        let mut state = state_for_run(true, None);
+        let joined = Message::new_joined(&rig.mesh, &rig.author)
+            .signed(&Identity::from_secret_bytes(SAVED_KEY));
+
+        ingest(wire(&joined), &mut state, &mut app, &ctx).await;
+        assert_eq!(state.message_log.len(), 1);
+        assert_eq!(rig.sink.count(), 0);
+        rig.endpoint.close().await;
+    }
+
+    #[tokio::test]
+    async fn a_tampered_frame_claiming_our_key_is_dropped() {
+        let rig = Rig::new().await;
+        let ctx = rig.ctx();
+        let mut app = Chat::default();
+        let mut state = state_for_run(true, None);
+        let mut forged = rig.earlier_run_chat(1);
+        forged.body = MessageBody::new("\"something we never said\"".to_owned()).expect("body");
+
+        ingest(wire(&forged), &mut state, &mut app, &ctx).await;
+        assert_eq!(state.message_log.len(), 0, "the signature no longer holds");
+        assert!(!state.seen.contains(&forged.dedup_key()));
+        rig.endpoint.close().await;
+    }
+
+    #[tokio::test]
+    async fn a_frame_from_another_mesh_is_dropped() {
+        let rig = Rig::new().await;
+        let ctx = rig.ctx();
+        let mut app = Chat::default();
+        let mut state = state_for_run(true, None);
+        let foreign = Message::new_joined(&MeshId::from("elsewhere"), &rig.author)
+            .signed(&Identity::from_secret_bytes(SAVED_KEY));
+
+        ingest(wire(&foreign), &mut state, &mut app, &ctx).await;
+        assert_eq!(state.message_log.len(), 0);
+        rig.endpoint.close().await;
+    }
+
+    /// The gate: a consumer that lets the engine mint its key never meets its own
+    /// frames after a restart, so nothing about it changes.
+    #[tokio::test]
+    async fn with_a_minted_key_our_own_frames_are_still_dropped_unseen() {
+        let rig = Rig::new().await;
+        let ctx = rig.ctx();
+        let mut app = Chat::default();
+        let mut state = state_for_run(false, None);
+        let frame = rig.earlier_run_chat(5);
+
+        ingest(wire(&frame), &mut state, &mut app, &ctx).await;
+        assert_eq!(state.message_log.len(), 0);
+        assert!(!state.seen.contains(&frame.dedup_key()));
+        rig.endpoint.close().await;
+    }
+
+    /// A change on `channel` authored the way `broadcast_state_merge` does: built
+    /// under the state's run actor, signed with its key, applied to its own doc.
+    fn publish(
+        state: &mut EventLoopState,
+        author: &Nickname,
+        channel: Channel,
+        merge: &serde_json::Value,
+        aged_secs: i64,
+    ) -> Message {
+        let mesh = MeshId::from("test");
+        let change = state
+            .doc(channel)
+            .build_change(merge, &state.actor_seed())
+            .expect("a JSON object merges")
+            .expect("a non-empty merge yields a change");
+        let (wire, _plain) = state
+            .doc(channel)
+            .compose_wire_body(&change, None)
+            .expect("compose the wire body");
+        let mut frame = Message::new_channel_event(&mesh, author, wire, channel);
+        frame.timestamp -= aged_secs;
+        let frame = frame.signed(&state.identity);
+        assert!(matches!(
+            state.doc_mut(channel).ingest(&frame),
+            crate::doc::Ingested::Applied { .. }
+        ));
+        frame
+    }
+
+    /// Our run before the crash wrote `before_crash`; a peer then wrote a change
+    /// that builds on it. Returns both frames, ours first.
+    fn pre_crash_write_and_dependent_peer_write(
+        channel: Channel,
+        ours_aged_secs: i64,
+    ) -> (Message, Message) {
+        let mut earlier_run =
+            state_with_identity(Identity::from_secret_bytes(SAVED_KEY), true, None);
+        let ours = publish(
+            &mut earlier_run,
+            &nick("me"),
+            channel,
+            &serde_json::json!({"before_crash": 1}),
+            ours_aged_secs,
+        );
+        let mut peer = state_for_run(false, None);
+        assert!(matches!(
+            peer.doc_mut(channel).ingest(&ours),
+            crate::doc::Ingested::Applied { .. }
+        ));
+        let theirs = publish(
+            &mut peer,
+            &nick("bob"),
+            channel,
+            &serde_json::json!({"after_it": 2}),
+            0,
+        );
+        (ours, theirs)
+    }
+
+    async fn restarted_doc_after(
+        frames: [&Message; 2],
+        channel: Channel,
+        durable_identity: bool,
+    ) -> serde_json::Value {
+        let rig = Rig::new().await;
+        let ctx = rig.ctx();
+        let mut app = Chat::default();
+        let mut state = state_with_identity(
+            Identity::from_secret_bytes(SAVED_KEY),
+            durable_identity,
+            None,
+        );
+        for frame in frames {
+            ingest(wire(frame), &mut state, &mut app, &ctx).await;
+        }
+        let outcome = state.doc(channel).to_json();
+        rig.endpoint.close().await;
+        outcome
+    }
+
+    /// A peer's change that depends on our earlier run's would wait for its
+    /// parents for good, and the restarted doc would stall behind it, unless our
+    /// own frames reach the doc when the peers hand them back.
+    #[tokio::test]
+    async fn the_restarted_doc_relearns_its_own_earlier_changes_whichever_arrives_first() {
+        for channel in [Channel::Meta, Channel::State] {
+            let (ours, theirs) = pre_crash_write_and_dependent_peer_write(channel, 0);
+            for frames in [[&ours, &theirs], [&theirs, &ours]] {
+                let doc = restarted_doc_after(frames, channel, true).await;
+                assert_eq!(
+                    doc,
+                    serde_json::json!({"before_crash": 1, "after_it": 2}),
+                    "{channel:?}: the doc holds our earlier run's entry and the peer's"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn with_a_minted_key_our_own_channel_change_is_still_dropped() {
+        let (ours, theirs) = pre_crash_write_and_dependent_peer_write(Channel::Meta, 0);
+        let doc = restarted_doc_after([&theirs, &ours], Channel::Meta, false).await;
+        assert_eq!(doc, serde_json::json!({}), "the dependent change waits");
+    }
+
+    /// Our own frame from before applies and moves the doc, but it says nothing
+    /// of what the agent has seen: nothing is surfaced for it alone, whatever its
+    /// age. The app is told once, later, not once per change.
+    #[tokio::test]
+    async fn an_own_change_alone_surfaces_nothing_and_the_app_is_told_once_later() {
+        let rig = Rig::new().await;
+        let ctx = rig.ctx();
+        let mut app = Chat::default();
+        let restored = Arc::clone(&app.restored);
+        let mut state = state_with_identity(Identity::from_secret_bytes(SAVED_KEY), true, None);
+        for age in [0, 1_000] {
+            let (ours, _theirs) = pre_crash_write_and_dependent_peer_write(Channel::Meta, age);
+            ingest(wire(&ours), &mut state, &mut app, &ctx).await;
+            assert_eq!(rig.sink.count(), 0, "age {age}: nothing is surfaced");
+            ingest(wire(&ours), &mut state, &mut app, &ctx).await;
+        }
+        assert!(
+            state.restored.contains(&Channel::Meta),
+            "the channel is marked"
+        );
+        assert_eq!(
+            restored.load(Ordering::Relaxed),
+            0,
+            "the app is not told yet"
+        );
+
+        // The round that was bringing them is still on.
+        tell_app_of_restored_channels(&mut state, &mut app, &ctx).await;
+        assert_eq!(restored.load(Ordering::Relaxed), 0, "not while it is on");
+
+        state.fast_rounds = crate::gossip::antientropy::FastRounds::default();
+        tell_app_of_restored_channels(&mut state, &mut app, &ctx).await;
+        assert_eq!(restored.load(Ordering::Relaxed), 1, "once it is idle");
+        tell_app_of_restored_channels(&mut state, &mut app, &ctx).await;
+        assert_eq!(restored.load(Ordering::Relaxed), 1, "and only once");
+        assert!(state.peers.is_empty(), "we are not our own peer");
+        assert_eq!(state.message_log.len(), 0, "channel frames live in the doc");
+        rig.endpoint.close().await;
+    }
+
+    /// The frame our run hands back is old, but it releases a peer's change
+    /// that is not; the doc moved in a way the agent has not seen.
+    #[tokio::test]
+    async fn a_current_peer_change_released_by_an_old_own_one_is_surfaced() {
+        let rig = Rig::new().await;
+        let ctx = rig.ctx();
+        let mut app = Chat::default();
+        let (ours, theirs) = pre_crash_write_and_dependent_peer_write(Channel::Meta, 1_000);
+        let mut state = state_with_identity(Identity::from_secret_bytes(SAVED_KEY), true, None);
+
+        ingest(wire(&theirs), &mut state, &mut app, &ctx).await;
+        // Meeting the peer for the first time is its own event; the change is
+        // buffered behind its missing parent and adds none.
+        let baseline = rig.sink.count();
+        ingest(wire(&ours), &mut state, &mut app, &ctx).await;
+        assert_eq!(
+            state.doc(Channel::Meta).to_json(),
+            serde_json::json!({"before_crash": 1, "after_it": 2})
+        );
+        assert_eq!(
+            rig.sink.count(),
+            baseline + 1,
+            "surfaced because the peer's frame is current"
+        );
+        rig.endpoint.close().await;
+    }
+
+    /// An app that logs its own send without marking it seen gets the frame back
+    /// from a peer; the log must not hold it twice.
+    #[tokio::test]
+    async fn a_frame_the_app_logged_without_marking_it_seen_is_not_logged_twice() {
+        let rig = Rig::new().await;
+        let ctx = rig.ctx();
+        let mut app = Chat::default();
+        let mut state = state_for_run(true, None);
+        let frame = rig.earlier_run_chat(7);
+        let _ = state.message_log_mut().push(frame.clone());
+        assert!(!state.seen.contains(&frame.dedup_key()));
+
+        ingest(wire(&frame), &mut state, &mut app, &ctx).await;
+        assert_eq!(state.message_log.len(), 1, "re-served, and still held once");
+        rig.endpoint.close().await;
+    }
+
+    #[tokio::test]
+    async fn retain_outbound_keeps_a_sent_frame_seen_and_logged_once() {
+        let rig = Rig::new().await;
+        let ctx = rig.ctx();
+        let mut app = Chat::default();
+        let mut state = state_for_run(true, None);
+        let frame = rig.earlier_run_chat(8);
+
+        state.retain_outbound(&frame);
+        state.retain_outbound(&frame);
+        assert_eq!(state.message_log.len(), 1);
+        assert!(state.seen.contains(&frame.dedup_key()));
+        ingest(wire(&frame), &mut state, &mut app, &ctx).await;
+        assert_eq!(
+            state.message_log.len(),
+            1,
+            "a peer's copy is dropped at the gate"
+        );
+        rig.endpoint.close().await;
+    }
+
+    /// A resumed run reads frames from while it was down. They show, but they
+    /// are no proof of who is here: only a frame from this start on is.
+    #[tokio::test]
+    async fn on_a_resumed_run_only_current_frames_count_as_signs_of_life() {
+        let rig = Rig::new().await;
+        let ctx = rig.ctx();
+        let mut app = Chat::default();
+        let mut state = state_with_identity(
+            Identity::from_secret_bytes(SAVED_KEY),
+            true,
+            Some(crate::util::clock::unix_secs() - 600),
+        );
+        assert!(state.resumed());
+        let bob = Identity::generate();
+        let sent_at = |stamp: i64| {
+            let mut frame = Message::new_joined(&rig.mesh, &nick("bob"));
+            frame.timestamp = stamp;
+            frame.signed(&bob)
+        };
+
+        ingest(
+            wire(&sent_at(state.started_at - 300)),
+            &mut state,
+            &mut app,
+            &ctx,
+        )
+        .await;
+        assert!(
+            state.peers.is_empty(),
+            "a frame from the outage is not a peer"
+        );
+        assert!(state.last_seen.is_empty());
+
+        ingest(
+            wire(&sent_at(state.started_at + 1)),
+            &mut state,
+            &mut app,
+            &ctx,
+        )
+        .await;
+        assert!(state.peers.contains("bob"), "a frame from now is");
+        assert!(state.last_seen.contains_key("bob"));
+        rig.endpoint.close().await;
+    }
+
+    #[tokio::test]
+    async fn a_left_older_than_a_frame_already_seen_does_not_evict_the_peer() {
+        let rig = Rig::new().await;
+        let ctx = rig.ctx();
+        let mut app = Chat::default();
+        let mut state = state_for_run(true, None);
+        let bob = Identity::generate();
+        let at = state.started_at;
+        let joined = |stamp: i64| {
+            let mut frame = Message::new_joined(&rig.mesh, &nick("bob"));
+            frame.timestamp = stamp;
+            frame.signed(&bob)
+        };
+        let left = |stamp: i64| {
+            let mut frame = Message::new_left(&rig.mesh, &nick("bob"));
+            frame.timestamp = stamp;
+            frame.signed(&bob)
+        };
+
+        ingest(wire(&joined(at + 10)), &mut state, &mut app, &ctx).await;
+        assert!(state.peers.contains("bob"));
+        ingest(wire(&left(at + 5)), &mut state, &mut app, &ctx).await;
+        assert!(
+            state.peers.contains("bob"),
+            "a goodbye from before its newest frame is a replay"
+        );
+        ingest(wire(&left(at + 11)), &mut state, &mut app, &ctx).await;
+        assert!(!state.peers.contains("bob"), "a later one is real");
+        rig.endpoint.close().await;
+    }
+
+    /// Frames under a nickname a key already holds: another key's do nothing,
+    /// but they are kept so no peer re-serves them to us for good.
+    fn joined_by(rig: &Rig, key: &Identity, author: &str, stamp: i64) -> Message {
+        let mut frame = Message::new_joined(&rig.mesh, &nick(author));
+        frame.timestamp = stamp;
+        frame.signed(key)
+    }
+
+    fn chat_by(rig: &Rig, key: &Identity, author: &str, stamp: i64) -> Message {
+        let mut frame = Message::new_app(
+            &rig.mesh,
+            &nick(author),
+            AppFrameParams {
+                tag: AppTag::from("chat"),
+                to: None,
+                corr: None,
+                body: MessageBody::new(format!("\"said at {stamp}\"")).expect("a JSON body"),
+            },
+        );
+        frame.timestamp = stamp;
+        frame.signed(key)
+    }
+
+    #[tokio::test]
+    async fn a_second_key_under_a_held_nickname_is_logged_but_changes_nothing() {
+        let rig = Rig::new().await;
+        let ctx = rig.ctx();
+        let mut app = Chat::default();
+        let dispatched = Arc::clone(&app.dispatched);
+        let mut state = state_for_run(false, None);
+        let (holder, other) = (Identity::generate(), Identity::generate());
+        let at = state.started_at;
+
+        ingest(
+            wire(&joined_by(&rig, &holder, "bob", at + 1)),
+            &mut state,
+            &mut app,
+            &ctx,
+        )
+        .await;
+        assert!(state.peers.contains("bob"));
+        let held_chat = chat_by(&rig, &holder, "bob", at + 2);
+        ingest(wire(&held_chat), &mut state, &mut app, &ctx).await;
+        assert_eq!(
+            dispatched.load(Ordering::Relaxed),
+            1,
+            "the holder's chat is dispatched"
+        );
+
+        let events = rig.sink.count();
+        let usurper_chat = chat_by(&rig, &other, "bob", at + 3);
+        ingest(wire(&usurper_chat), &mut state, &mut app, &ctx).await;
+        assert_eq!(dispatched.load(Ordering::Relaxed), 1, "the app is not told");
+        assert_eq!(rig.sink.count(), events, "nothing is shown");
+        assert!(state.seen.contains(&usurper_chat.dedup_key()), "seen");
+        assert!(state.message_log.holds(&usurper_chat), "and kept");
+        assert!(state.message_log.holds(&held_chat));
+    }
+
+    #[tokio::test]
+    async fn a_second_keys_left_does_not_send_the_holder_away() {
+        let rig = Rig::new().await;
+        let ctx = rig.ctx();
+        let mut app = Chat::default();
+        let mut state = state_for_run(false, None);
+        let (holder, other) = (Identity::generate(), Identity::generate());
+        let at = state.started_at;
+
+        ingest(
+            wire(&joined_by(&rig, &holder, "bob", at + 1)),
+            &mut state,
+            &mut app,
+            &ctx,
+        )
+        .await;
+        let mut left = Message::new_left(&rig.mesh, &nick("bob"));
+        left.timestamp = at + 2;
+        ingest(wire(&left.signed(&other)), &mut state, &mut app, &ctx).await;
+        assert!(state.peers.contains("bob"), "still on the roster");
+        let mut left = Message::new_left(&rig.mesh, &nick("bob"));
+        left.timestamp = at + 3;
+        ingest(wire(&left.signed(&holder)), &mut state, &mut app, &ctx).await;
+        assert!(!state.peers.contains("bob"), "the holder's own left counts");
+    }
+
+    #[tokio::test]
+    async fn a_channel_change_from_a_second_key_is_never_dropped() {
+        let rig = Rig::new().await;
+        let ctx = rig.ctx();
+        let mut app = Chat::default();
+        let mut state = state_for_run(false, None);
+        let holder = Identity::generate();
+        let at = state.started_at;
+        ingest(
+            wire(&joined_by(&rig, &holder, "bob", at + 1)),
+            &mut state,
+            &mut app,
+            &ctx,
+        )
+        .await;
+
+        let mut other_run = state_with_identity(Identity::generate(), false, None);
+        let change = publish(
+            &mut other_run,
+            &nick("bob"),
+            Channel::Meta,
+            &serde_json::json!({"from_a_second_key": 1}),
+            0,
+        );
+        ingest(wire(&change), &mut state, &mut app, &ctx).await;
+        assert_eq!(
+            state.doc(Channel::Meta).to_json(),
+            serde_json::json!({"from_a_second_key": 1}),
+            "a doc converges whoever signed the change"
+        );
+    }
+
+    #[tokio::test]
+    async fn before_ready_a_fresh_frame_under_our_nickname_refuses_it() {
+        let rig = Rig::new().await;
+        let ctx = rig.ctx();
+        let mut app = Chat::default();
+        let mut state = state_for_run(false, None);
+        state.ready_hold = Some(crate::daemon::claims::ReadyHold::new(
+            n0_future::time::Instant::now(),
+        ));
+        let holder = Identity::generate();
+        let at = state.started_at;
+
+        ingest(
+            wire(&joined_by(&rig, &holder, "me", at + 1)),
+            &mut state,
+            &mut app,
+            &ctx,
+        )
+        .await;
+        let taken = state.refusal.clone().expect("the nickname is refused");
+        assert_eq!(taken.nickname, nick("me"));
+        assert_eq!(
+            taken.holder,
+            crate::daemon::claims::NicknameHolder::Peer {
+                pubkey: encode_pubkey(&holder.public())
+            }
+        );
+        assert!(
+            state.peers.is_empty(),
+            "the holder under our nickname is not a peer"
+        );
+    }
+
+    #[tokio::test]
+    async fn before_ready_an_old_frame_under_our_nickname_refuses_nothing() {
+        let rig = Rig::new().await;
+        let ctx = rig.ctx();
+        let mut app = Chat::default();
+        let mut state = state_for_run(false, None);
+        state.ready_hold = Some(crate::daemon::claims::ReadyHold::new(
+            n0_future::time::Instant::now(),
+        ));
+        let earlier_holder = Identity::generate();
+        let at = state.started_at;
+
+        ingest(
+            wire(&joined_by(&rig, &earlier_holder, "me", at - 100)),
+            &mut state,
+            &mut app,
+            &ctx,
+        )
+        .await;
+        assert!(state.refusal.is_none(), "from before we started: history");
+    }
+
+    #[tokio::test]
+    async fn after_ready_a_duplicate_is_an_event_and_never_an_exit() {
+        let rig = Rig::new().await;
+        let ctx = rig.ctx();
+        let mut app = Chat::default();
+        let mut state = state_for_run(false, None);
+        let rival = Identity::generate();
+        let at = state.started_at;
+
+        ingest(
+            wire(&joined_by(&rig, &rival, "me", at + 1)),
+            &mut state,
+            &mut app,
+            &ctx,
+        )
+        .await;
+        assert!(state.refusal.is_none(), "ready: never an exit");
+        assert_eq!(rig.sink.count(), 0, "a newcomer is not yet a conflict");
+        assert!(
+            state.message_log.len() >= 1,
+            "we announced ourselves again, and kept it"
+        );
+        assert!(state.peers.is_empty());
+
+        let settled = i64::try_from(crate::util::tuning::NICKNAME_ANSWER_SECS).expect("small");
+        ingest(
+            wire(&chat_by(&rig, &rival, "me", at + 1 + settled)),
+            &mut state,
+            &mut app,
+            &ctx,
+        )
+        .await;
+        assert_eq!(
+            rig.sink.count(),
+            1,
+            "kept sending past the window: a conflict"
+        );
+        ingest(
+            wire(&chat_by(&rig, &rival, "me", at + 2 + settled)),
+            &mut state,
+            &mut app,
+            &ctx,
+        )
+        .await;
+        assert_eq!(rig.sink.count(), 1, "reported once");
     }
 }
