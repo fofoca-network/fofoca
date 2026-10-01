@@ -878,7 +878,14 @@ async fn held_by_someone_else(
     if matches!(message.kind, MessageKind::State | MessageKind::Meta) {
         return false;
     }
-    let fresh = message.timestamp >= state.started_at;
+    // A frame from at or before its author's goodbye is a replay, however late
+    // it arrives: it claims nothing, or a key rejoining under that nickname
+    // would be dropped as held by the one that left.
+    let fresh = message.timestamp >= state.started_at
+        && state
+            .departed
+            .get(&message.author)
+            .is_none_or(|&left_at| message.timestamp > left_at);
     if message.author == *ctx.author {
         note_rival_of_our_nickname(message, fresh, state, ctx).await;
         return true;
@@ -1057,7 +1064,8 @@ pub(crate) fn next_restored_notice(state: &EventLoopState) -> Option<Instant> {
 
 /// Tell the app that a channel doc took changes of ours from an earlier run, for
 /// each channel whose notice is due: see [`restored_notice_at`]. An app that
-/// re-asserts its card on this does it once, over the whole backfill.
+/// re-asserts its card on this is told at least once after the last restored
+/// change, not once per change; a long backfill can tell it more than once.
 pub(crate) async fn tell_app_of_restored_channels(
     state: &mut EventLoopState,
     app: &mut dyn NodeApp,
@@ -2898,6 +2906,11 @@ mod returning_own_frame_tests {
         assert!(!state.peers.contains("bob"), "gone after its goodbye");
         ingest(wire(&frame(false, at + 15)), &mut state, &mut app, &ctx).await;
         assert!(!state.peers.contains("bob"), "a replay from before it");
+        assert_eq!(
+            state.nickname_holder(&nick("bob")),
+            None,
+            "and claims nothing, so a new key may take the nickname"
+        );
         ingest(wire(&frame(false, at + 21)), &mut state, &mut app, &ctx).await;
         assert!(state.peers.contains("bob"), "a newer frame is a return");
         assert!(state.departed.is_empty(), "and ends the goodbye");

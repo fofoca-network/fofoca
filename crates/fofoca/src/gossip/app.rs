@@ -95,6 +95,10 @@ pub trait NodeApp: Send {
     /// before the crash over the one it holds now. Lets the app re-assert what
     /// belongs to this run (its card, its status) in `channel`.
     ///
+    /// Called at least once after the last restored change, not once per
+    /// change; a long backfill can call it more than once, so keep the handler
+    /// idempotent.
+    ///
     /// Defaults to a no-op: an app that keeps nothing in a channel doc has
     /// nothing to re-assert.
     async fn on_own_channel_restored(

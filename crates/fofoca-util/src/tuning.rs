@@ -125,13 +125,14 @@ pub const ALIVE_INTERVAL_SECS: u64 = 30;
 /// their own process's value, so every member of a mesh must use the same one.
 pub const NICKNAME_ANSWER_SECS: u64 = 3;
 
-/// The live value, after any override of [`NICKNAME_ANSWER_SECS`]. At least 2:
-/// frame timestamps are whole seconds, so with 1 a rival could count as
-/// settled milliseconds after its first frame, and with 0 a joiner would never
-/// wait for the holder's answer.
+/// The live value, after any override of [`NICKNAME_ANSWER_SECS`], kept
+/// between 2 and 10. At least 2: frame timestamps are whole seconds, so with 1
+/// a rival could count as settled milliseconds after its first frame, and with
+/// 0 a joiner would never wait for the holder's answer. At most 10, so that
+/// with [`nickname_alone_secs`] the wait stays below [`READY_MAX_SECS`].
 #[must_use]
 pub fn nickname_answer_secs() -> u64 {
-    current().nickname_answer_secs.max(2)
+    current().nickname_answer_secs.clamp(2, 10)
 }
 
 /// How long a joiner that chose its nickname waits for a first link to a real
@@ -142,11 +143,14 @@ pub fn nickname_answer_secs() -> u64 {
 /// subprocess suite.
 pub const NICKNAME_ALONE_SECS: u64 = 8;
 
-/// The live value, after any override of [`NICKNAME_ALONE_SECS`], kept between
-/// 1 and one second below [`READY_MAX_SECS`].
+/// The live value, after any override of [`NICKNAME_ALONE_SECS`]. A first link
+/// just before this deadline restarts the wait for [`nickname_answer_secs`], so
+/// the two together are kept one second below [`READY_MAX_SECS`].
 #[must_use]
 pub fn nickname_alone_secs() -> u64 {
-    current().nickname_alone_secs.clamp(1, READY_MAX_SECS - 1)
+    current()
+        .nickname_alone_secs
+        .clamp(1, READY_MAX_SECS - nickname_answer_secs() - 1)
 }
 
 /// How long a peer can go unheard before the sweeper evicts it.
