@@ -20,6 +20,8 @@ use crate::protocol::identity;
 use crate::protocol::message::MessageBody;
 use crate::protocol::{Channel, Message, MessageKind, Nickname, PresenceSubtype};
 use crate::util::clock::Instant;
+use crate::util::tuning::RESTORED_NOTICE_MAX_MS;
+use std::time::Duration;
 // The timer-driver clock the ping round's deadlines are kept in — distinct from
 // `clock::Instant` off wasm32. See `daemon::state`.
 use n0_future::time::Instant as TokioInstant;
@@ -1018,14 +1020,41 @@ fn feed_own_channel_event(
             is_self: false,
         });
     }
-    // Once the round that is bringing our old changes has gone idle, not once per
-    // change: see [`tell_app_of_restored_channels`].
-    state.restored.insert(channel);
+    // Once the round that is bringing our old changes has gone quiet, not once
+    // per change: see [`tell_app_of_restored_channels`].
+    state.restored.entry(channel).or_insert_with(Instant::now);
+}
+
+/// When the app is to be told that `channel` took changes of ours back, first
+/// marked at `marked`: once the channel has gone quiet, and at the latest
+/// [`RESTORED_NOTICE_MAX_MS`] after `marked`, since a channel that peers write
+/// without pause never goes quiet.
+fn restored_notice_at(
+    state: &EventLoopState,
+    channel: Channel,
+    marked: Instant,
+    now: Instant,
+) -> Instant {
+    let latest = marked + Duration::from_millis(RESTORED_NOTICE_MAX_MS);
+    state
+        .fast_rounds
+        .quiet_at(channel, now)
+        .map_or(now, |quiet| quiet.min(latest))
+}
+
+/// The next time a channel's restored notice falls due, for the event loop to
+/// wake at. `None` when no notice is pending.
+pub(crate) fn next_restored_notice(state: &EventLoopState) -> Option<Instant> {
+    let now = Instant::now();
+    state
+        .restored
+        .iter()
+        .map(|(&channel, &marked)| restored_notice_at(state, channel, marked, now))
+        .min()
 }
 
 /// Tell the app that a channel doc took changes of ours from an earlier run, for
-/// each channel that has, once its fast round has gone idle and its changes
-/// have stopped landing. An app that
+/// each channel whose notice is due: see [`restored_notice_at`]. An app that
 /// re-asserts its card on this does it once, over the whole backfill.
 pub(crate) async fn tell_app_of_restored_channels(
     state: &mut EventLoopState,
@@ -1037,10 +1066,10 @@ pub(crate) async fn tell_app_of_restored_channels(
     }
     let now = Instant::now();
     for channel in [Channel::State, Channel::Meta] {
-        if state.restored.contains(&channel)
-            && !state.fast_rounds.active(channel, now)
-            && !state.fast_rounds.changed_recently(channel, now)
-        {
+        let Some(&marked) = state.restored.get(&channel) else {
+            continue;
+        };
+        if restored_notice_at(state, channel, marked, now) <= now {
             state.restored.remove(&channel);
             app.on_own_channel_restored(channel, state, ctx).await;
         }
@@ -2303,7 +2332,10 @@ mod returning_own_frame_tests {
     use iroh::endpoint::presets;
     use iroh_gossip::net::Gossip;
 
-    use super::{ingest, tell_app_of_restored_channels};
+    use super::{
+        Duration, Instant, RESTORED_NOTICE_MAX_MS, ingest, next_restored_notice,
+        restored_notice_at, tell_app_of_restored_channels,
+    };
     use crate::daemon::ctx::HandlerCtx;
     use crate::daemon::state::EventLoopState;
     use crate::gossip::app::{AppClass, InboundApp, NodeApp};
@@ -2313,6 +2345,7 @@ mod returning_own_frame_tests {
     use crate::protocol::{AppFrameParams, AppTag, MeshId, Message, MessageBody, Nickname};
     use crate::testing::{endpoint_id, nick, state_for_run, state_with_identity};
     use crate::transport::MeshSender;
+    use crate::util::tuning::FAST_ROUND_MIN_INTERVAL_MS;
 
     const SAVED_KEY: [u8; 32] = [9; 32];
 
@@ -2638,7 +2671,7 @@ mod returning_own_frame_tests {
             ingest(wire(&ours), &mut state, &mut app, &ctx).await;
         }
         assert!(
-            state.restored.contains(&Channel::Meta),
+            state.restored.contains_key(&Channel::Meta),
             "the channel is marked"
         );
         assert_eq!(
@@ -2648,20 +2681,53 @@ mod returning_own_frame_tests {
         );
 
         // The round that was bringing them is still on: its frames keep landing.
-        state
-            .fast_rounds
-            .note_change(Channel::Meta, std::time::Instant::now());
+        state.fast_rounds.note_change(Channel::Meta, Instant::now());
         tell_app_of_restored_channels(&mut state, &mut app, &ctx).await;
         assert_eq!(restored.load(Ordering::Relaxed), 0, "not while it is on");
 
-        state.fast_rounds = crate::gossip::antientropy::FastRounds::default();
+        let due = next_restored_notice(&state).expect("a notice is pending");
+        tokio::time::sleep(due.saturating_duration_since(Instant::now())).await;
         tell_app_of_restored_channels(&mut state, &mut app, &ctx).await;
-        assert_eq!(restored.load(Ordering::Relaxed), 1, "once it is idle");
+        assert_eq!(restored.load(Ordering::Relaxed), 1, "once it is quiet");
+        assert_eq!(
+            next_restored_notice(&state),
+            None,
+            "nothing left to wake for"
+        );
         tell_app_of_restored_channels(&mut state, &mut app, &ctx).await;
         assert_eq!(restored.load(Ordering::Relaxed), 1, "and only once");
         assert!(state.peers.is_empty(), "we are not our own peer");
         assert_eq!(state.message_log.len(), 0, "channel frames live in the doc");
         rig.endpoint.close().await;
+    }
+
+    /// A channel that peers write without pause never goes quiet; the notice
+    /// still comes, at the latest [`RESTORED_NOTICE_MAX_MS`] after the first
+    /// restored change.
+    #[test]
+    fn the_restored_notice_waits_for_quiet_but_not_past_its_limit() {
+        let mut state = state_with_identity(Identity::from_secret_bytes(SAVED_KEY), true, None);
+        let marked = Instant::now();
+        let ms = Duration::from_millis;
+        state.fast_rounds.note_change(Channel::Meta, marked);
+        assert_eq!(
+            restored_notice_at(&state, Channel::Meta, marked, marked),
+            marked + ms(FAST_ROUND_MIN_INTERVAL_MS),
+            "one quiet interval after the last change"
+        );
+        let later = marked + ms(RESTORED_NOTICE_MAX_MS - 10);
+        state.fast_rounds.note_change(Channel::Meta, later);
+        assert_eq!(
+            restored_notice_at(&state, Channel::Meta, marked, later),
+            marked + ms(RESTORED_NOTICE_MAX_MS),
+            "changes still landing: the limit"
+        );
+        let quiet = later + ms(FAST_ROUND_MIN_INTERVAL_MS);
+        assert_eq!(
+            restored_notice_at(&state, Channel::Meta, marked, quiet),
+            quiet,
+            "a quiet channel is due at once"
+        );
     }
 
     /// The frame our run hands back is old, but it releases a peer's change

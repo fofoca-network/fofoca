@@ -275,9 +275,9 @@ pub struct EventLoopState {
     /// When each nickname that said goodbye did, until a newer frame from it.
     pub(crate) departed: HashMap<Nickname, i64>,
     /// Channels whose doc just took changes of ours from an earlier run, and
-    /// whose app has not been told yet. Told once the channel's fast round has
-    /// gone idle, not once per change.
-    pub(crate) restored: HashSet<crate::protocol::Channel>,
+    /// whose app has not been told yet, with when the first one landed. Told
+    /// once the channel has gone quiet, not once per change.
+    pub(crate) restored: HashMap<crate::protocol::Channel, Instant>,
     /// Which key holds each nickname we have heard, and who else sends under
     /// ours.
     pub(crate) claims: super::claims::Claims,
@@ -704,7 +704,7 @@ impl EventLoopState {
             resume_floor: run.floor,
             newest_ts: HashMap::new(),
             departed: HashMap::new(),
-            restored: HashSet::new(),
+            restored: HashMap::new(),
             claims: super::claims::Claims::default(),
             ready_hold: None,
             refusal: None,

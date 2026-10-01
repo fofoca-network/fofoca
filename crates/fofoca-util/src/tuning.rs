@@ -691,6 +691,12 @@ pub const FAST_ROUND_MIN_INTERVAL_MS: u64 = 200;
 /// broadcast digests for that channel.
 pub const FAST_ROUND_ACTIVE_MS: u64 = 1000;
 
+/// The longest the app waits to be told that a channel doc took back changes
+/// of ours from an earlier run, counted from the first one. The notice waits
+/// for the channel to go quiet, and a channel that peers write without pause
+/// never does.
+pub const RESTORED_NOTICE_MAX_MS: u64 = 5000;
+
 /// How long a stalled fast round waits before it asks a peer that is still
 /// ahead again: a lost request, a lost answer, or a refusal costs this, not an
 /// anti-entropy tick. The reclaim timer drives the check, so this matches it.

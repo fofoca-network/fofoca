@@ -678,6 +678,11 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
                 state.ready_hold = None;
                 announce_ready(&mut state, sink.as_ref(), &mesh_str, &mesh_name, &author);
             }
+            // Wakes the loop when a restored-channel notice falls due; the
+            // top of the loop tells the app.
+            () = sleep_until_opt(gossip::next_restored_notice(&state).map(|at| {
+                TokioInstant::now() + at.saturating_duration_since(Instant::now())
+            })) => {}
             () = sleep_until_opt(state.ping_round.as_ref().map(|round| round.deadline)) => {
                 state.idle.external += 1;
                 finalize_ping_round(&mut state, sink.as_ref());

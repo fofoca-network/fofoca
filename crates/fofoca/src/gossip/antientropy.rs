@@ -621,6 +621,21 @@ impl FastRounds {
         pick.map(|peer| (peer.pubkey.clone(), peer.author.clone()))
     }
 
+    /// When `channel` goes quiet: its round no longer runs, and no change has
+    /// landed for [`FAST_ROUND_MIN_INTERVAL_MS`]. `None` when it is quiet at
+    /// `now`.
+    pub(crate) fn quiet_at(&self, channel: Channel, now: Instant) -> Option<Instant> {
+        let round_ends = self
+            .rounds
+            .get(&channel)
+            .map(|round| round.at + Self::ACTIVE);
+        let changes_end = self
+            .last_change
+            .get(&channel)
+            .map(|&changed| changed + Self::MIN_INTERVAL);
+        round_ends.max(changes_end).filter(|&at| at > now)
+    }
+
     /// Whether a direct round runs for `channel`: we asked a peer within
     /// [`FAST_ROUND_ACTIVE_MS`]. Our broadcast digests wait meanwhile: during
     /// a backfill each one draws a full answer from every linked holder, and
