@@ -1612,8 +1612,8 @@ impl EventLoopState {
 mod tests {
     use super::{
         DirectCounts, DirectState, Duration, EndpointId, EventLoopState, Instant,
-        KNOWN_ENDPOINTS_CAP, MAX_SEED_MILLIS, Message, QUIET_CAP, RELINK_COOLDOWN_SECS, Reach,
-        SEED_EPOCH_MILLIS, run_chain_seed,
+        KNOWN_ENDPOINTS_CAP, LIVENESS_CLOCK_SLACK_SECS, MAX_SEED_MILLIS, Message, QUIET_CAP,
+        RELINK_COOLDOWN_SECS, Reach, SEED_EPOCH_MILLIS, run_chain_seed,
     };
     use crate::protocol::{AppFrameParams, MeshId, MessageBody, MessageId};
     use crate::testing::{endpoint_id, fresh_state, nick, state_for_run};
@@ -1694,6 +1694,64 @@ mod tests {
         );
         let plain = state_for_run(true, None);
         assert!(plain.joined_at >= started, "no resume point starts now");
+    }
+
+    /// L6: a resumed run reads a frame as a sign of life when it is no older than
+    /// its start, give or take the clock slack between two machines.
+    #[test]
+    fn a_resumed_run_reads_a_frame_within_the_clock_slack_of_its_start_as_live() {
+        let bob = nick("bob");
+        let resumed = state_for_run(true, Some(crate::util::clock::unix_secs() - 600));
+        assert!(resumed.resumed());
+        let start = resumed.started_at;
+        assert!(resumed.is_live_frame(&bob, start), "sent as we started");
+        assert!(
+            resumed.is_live_frame(&bob, start - LIVENESS_CLOCK_SLACK_SECS),
+            "a clock behind ours by the slack"
+        );
+        assert!(
+            !resumed.is_live_frame(&bob, start - LIVENESS_CLOCK_SLACK_SECS - 1),
+            "sent while we were down"
+        );
+
+        let plain = state_for_run(true, None);
+        assert!(!plain.resumed());
+        assert!(
+            plain.is_live_frame(&bob, plain.started_at - 600),
+            "a run that reaches back to nothing reads every frame as live"
+        );
+    }
+
+    /// L8: after a goodbye, what the peer said until then is a replay, not a
+    /// sign of life; the first newer frame is a return.
+    #[test]
+    fn a_goodbye_makes_older_frames_replays_until_a_newer_one_returns() {
+        let mut state = fresh_state();
+        let bob = nick("bob");
+        let left_at = state.started_at + 10;
+        state.note_departed(&bob, left_at);
+        assert!(
+            !state.is_live_frame(&bob, left_at),
+            "the goodbye's own second"
+        );
+        assert!(!state.is_live_frame(&bob, left_at - 5), "said before it");
+        assert!(state.is_live_frame(&bob, left_at + 1), "said after it");
+        assert!(
+            state.is_live_frame(&nick("carol"), left_at - 5),
+            "only bob's goodbye counts"
+        );
+
+        state.note_departed(&bob, left_at - 3);
+        assert!(
+            !state.is_live_frame(&bob, left_at),
+            "a replayed older goodbye does not move it back"
+        );
+
+        state.note_returned_after_departure(&bob, left_at);
+        assert!(!state.is_live_frame(&bob, left_at), "not newer: no return");
+        state.note_returned_after_departure(&bob, left_at + 1);
+        assert!(state.departed.is_empty(), "a newer frame ends the goodbye");
+        assert!(state.is_live_frame(&bob, left_at - 5));
     }
 
     #[test]
