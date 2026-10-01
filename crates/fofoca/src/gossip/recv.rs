@@ -866,8 +866,10 @@ fn retain_returning_own_frame(
 }
 
 /// Whether `message` comes from a key other than the one holding its nickname,
-/// ours included. A fresh frame from such a key is noted as a rival; a channel
-/// change is never held, since its doc decides what a signer may write.
+/// ours included. A channel change is never held, since its doc decides what a
+/// signer may write. Not a pure check: it records or refreshes the sender's
+/// claim, and a frame under our own nickname may answer with a fresh `joined`,
+/// raise `NicknameConflict`, or refuse our nickname before ready.
 async fn held_by_someone_else(
     message: &Message,
     state: &mut EventLoopState,

@@ -120,27 +120,33 @@ pub const ALIVE_INTERVAL_SECS: u64 = 30;
 /// holder sees the joiner's `joined`, answers with a fresh one of its own, and
 /// the answer needs a gossip round trip. Also how long a rival must keep
 /// sending before the holder counts it as a holder too, not a joiner that is
-/// about to refuse itself. Hidden flag `--nickname-answer-secs`, for the
-/// app's subprocess suite.
+/// about to refuse itself. A [`Tuning`] field, so the app can offer it as a
+/// hidden flag for its subprocess suite. The holder and the joiner each read
+/// their own process's value, so every member of a mesh must use the same one.
 pub const NICKNAME_ANSWER_SECS: u64 = 3;
 
-/// The live value, after any CLI override of [`NICKNAME_ANSWER_SECS`].
+/// The live value, after any override of [`NICKNAME_ANSWER_SECS`]. At least 2:
+/// frame timestamps are whole seconds, so with 1 a rival could count as
+/// settled milliseconds after its first frame, and with 0 a joiner would never
+/// wait for the holder's answer.
 #[must_use]
 pub fn nickname_answer_secs() -> u64 {
-    current().nickname_answer_secs
+    current().nickname_answer_secs.max(2)
 }
 
 /// How long a joiner that chose its nickname waits for a first link to a real
 /// peer before it takes the alone path and reports ready as it always has: with
 /// nobody to answer, nobody holds the nickname that it can know of. Below
-/// [`READY_MAX_SECS`], so the `ready` gate never times out on the wait.
-/// Hidden flag `--nickname-alone-secs`, for the app's subprocess suite.
+/// [`READY_MAX_SECS`], so the `ready` gate never times out on the wait. A
+/// [`Tuning`] field, so the app can offer it as a hidden flag for its
+/// subprocess suite.
 pub const NICKNAME_ALONE_SECS: u64 = 8;
 
-/// The live value, after any CLI override of [`NICKNAME_ALONE_SECS`].
+/// The live value, after any override of [`NICKNAME_ALONE_SECS`], kept between
+/// 1 and one second below [`READY_MAX_SECS`].
 #[must_use]
 pub fn nickname_alone_secs() -> u64 {
-    current().nickname_alone_secs
+    current().nickname_alone_secs.clamp(1, READY_MAX_SECS - 1)
 }
 
 /// How long a peer can go unheard before the sweeper evicts it.

@@ -1362,6 +1362,13 @@ impl EventLoopState {
     /// read off its fresh frames: the key whose frames under that nickname
     /// reach the roster and the surfaces. `None` when no claim on it is live.
     /// Our own nickname is never claimed here; its holder is this node.
+    ///
+    /// Narrower than the roster. Only a fresh frame (stamped at or after this
+    /// process started) that is not a State or Meta change makes a claim. A
+    /// peer learned from backfilled frames is on the roster but has no holder
+    /// until its next fresh presence or chat frame, up to the alive interval
+    /// later; a peer heard only through channel changes never has one. Keep a
+    /// fallback for those.
     #[must_use]
     pub fn nickname_holder(&self, nickname: &Nickname) -> Option<&str> {
         self.claims.holder(nickname, Instant::now())
