@@ -41,7 +41,7 @@ pub struct FofocaOpts {
     pub topic: *const c_char,
     pub nick: *const c_char,
     pub name: *const c_char,
-    /// Comma-separated lookups, any of `mdns`, `dht`, `relay`; NULL ⇒ none
+    /// Comma-separated lookups, any of `mdns`, `dht`, `relay`, `pkarr`; NULL ⇒ none
     /// (a loopback mesh on create).
     pub lookup: *const c_char,
     /// Comma-separated transports, any of `udp`, `webrtc`, `relay`; NULL ⇒
@@ -50,6 +50,8 @@ pub struct FofocaOpts {
     /// Comma-separated custom relay ladder; NULL ⇒ the default ladder.
     pub relay_urls: *const c_char,
     pub max_peers: usize,
+    /// Comma-separated pkarr relays; NULL ⇒ the default list.
+    pub pkarr_urls: *const c_char,
 }
 
 /// The layout `packages/fofoca-ffi/src/dlopen/opts-struct.ts` hand-encodes,
@@ -65,7 +67,7 @@ pub struct FofocaOpts {
 const _: () = {
     use std::mem::{align_of, offset_of, size_of};
 
-    assert!(size_of::<FofocaOpts>() == 64, "opts-struct.ts OPTS_BYTES");
+    assert!(size_of::<FofocaOpts>() == 72, "opts-struct.ts OPTS_BYTES");
     assert!(align_of::<FofocaOpts>() == 8);
     assert!(offset_of!(FofocaOpts, mesh) == 0);
     assert!(offset_of!(FofocaOpts, topic) == 8);
@@ -75,6 +77,7 @@ const _: () = {
     assert!(offset_of!(FofocaOpts, transport) == 40);
     assert!(offset_of!(FofocaOpts, relay_urls) == 48);
     assert!(offset_of!(FofocaOpts, max_peers) == 56);
+    assert!(offset_of!(FofocaOpts, pkarr_urls) == 64);
 };
 
 /// One received message's metadata, mirroring `fofoca_msg` in the header. The
@@ -214,6 +217,17 @@ unsafe fn optional_str(ptr: *const c_char) -> Result<Option<&'static str>, ()> {
     }
 }
 
+/// Split a comma-separated URL list, left unparsed for the engine to check.
+/// NULL and the empty string are the empty list, which takes the default, as
+/// in [`comma_list`]; an empty entry between commas stays, so the engine
+/// rejects it rather than shrinking the list.
+fn url_list(text: Option<&str>) -> Vec<String> {
+    match text.map(str::trim) {
+        None | Some("") => Vec::new(),
+        Some(urls) => urls.split(',').map(|url| url.trim().to_owned()).collect(),
+    }
+}
+
 /// Split a comma-separated C list into its parsed entries. NULL and the empty
 /// string are the empty list; a name that is not one of the type's choices
 /// puts that type's own message (`unknown lookup ...`) in the error slot.
@@ -297,23 +311,21 @@ pub unsafe extern "C" fn fofoca_mesh_open(opts: *const FofocaOpts) -> *mut Fofoc
             return std::ptr::null_mut();
         };
         // SAFETY: NUL-terminated or NULL, per the header contract, for each
-        // of the three comma lists.
+        // of the four comma lists.
         let lists = unsafe {
             (
                 optional_str(opts.lookup),
                 optional_str(opts.transport),
                 optional_str(opts.relay_urls),
+                optional_str(opts.pkarr_urls),
             )
         };
-        let (Ok(lookup), Ok(transport), Ok(relay_urls)) = lists else {
+        let (Ok(lookup), Ok(transport), Ok(relay_urls), Ok(pkarr_urls)) = lists else {
             return std::ptr::null_mut();
         };
         let (Ok(lookup), Ok(transport)) = (comma_list(lookup), comma_list(transport)) else {
             return std::ptr::null_mut();
         };
-        let relay_urls: Vec<String> = relay_urls
-            .map(|urls| urls.split(',').map(|url| url.trim().to_owned()).collect())
-            .unwrap_or_default();
         let parsed = Opts {
             mesh: mesh.map(str::to_owned),
             topic: topic.map(str::to_owned),
@@ -321,7 +333,8 @@ pub unsafe extern "C" fn fofoca_mesh_open(opts: *const FofocaOpts) -> *mut Fofoc
             name: name.map(str::to_owned),
             lookup,
             transport,
-            relay_urls,
+            relay_urls: url_list(relay_urls),
+            pkarr_urls: url_list(pkarr_urls),
             max_peers: opts.max_peers,
         };
         match Mesh::open(&parsed) {
@@ -589,6 +602,7 @@ pub struct FofocaStreamOpts {
     pub lookup: *const c_char,
     pub transport: *const c_char,
     pub relay_urls: *const c_char,
+    pub pkarr_urls: *const c_char,
 }
 
 /// Pinned like `FofocaOpts`: a reordered field would silently misread a
@@ -596,11 +610,12 @@ pub struct FofocaStreamOpts {
 const _: () = {
     use std::mem::{align_of, offset_of, size_of};
 
-    assert!(size_of::<FofocaStreamOpts>() == 24);
+    assert!(size_of::<FofocaStreamOpts>() == 32);
     assert!(align_of::<FofocaStreamOpts>() == 8);
     assert!(offset_of!(FofocaStreamOpts, lookup) == 0);
     assert!(offset_of!(FofocaStreamOpts, transport) == 8);
     assert!(offset_of!(FofocaStreamOpts, relay_urls) == 16);
+    assert!(offset_of!(FofocaStreamOpts, pkarr_urls) == 24);
 };
 
 /// The opaque handle behind `fofoca_streams *`.
@@ -657,9 +672,10 @@ pub unsafe extern "C" fn fofoca_streams_bind(opts: *const FofocaStreamOpts) -> *
                 optional_str(opts.lookup),
                 optional_str(opts.transport),
                 optional_str(opts.relay_urls),
+                optional_str(opts.pkarr_urls),
             )
         };
-        let (Ok(lookup), Ok(transport), Ok(relay_urls)) = lists else {
+        let (Ok(lookup), Ok(transport), Ok(relay_urls), Ok(pkarr_urls)) = lists else {
             return std::ptr::null_mut();
         };
         let (Ok(lookup), Ok(transport)) = (comma_list(lookup), comma_list(transport)) else {
@@ -668,9 +684,8 @@ pub unsafe extern "C" fn fofoca_streams_bind(opts: *const FofocaStreamOpts) -> *
         let parsed = fofoca_stream::StreamOpts {
             lookup,
             transport,
-            relay_urls: relay_urls
-                .map(|urls| urls.split(',').map(|url| url.trim().to_owned()).collect())
-                .unwrap_or_default(),
+            relay_urls: url_list(relay_urls),
+            pkarr_urls: url_list(pkarr_urls),
         };
         boxed(Streams::bind(&parsed).map(|streams| FofocaStreams { streams }))
     })
