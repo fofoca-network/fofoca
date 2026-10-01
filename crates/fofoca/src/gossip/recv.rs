@@ -1009,12 +1009,13 @@ fn feed_own_channel_event(
         });
     }
     // Once the round that is bringing our old changes has gone idle, not once per
-    // change: see `tell_apps_of_restored_channels`.
+    // change: see [`tell_app_of_restored_channels`].
     state.restored.insert(channel);
 }
 
 /// Tell the app that a channel doc took changes of ours from an earlier run, for
-/// each channel that has, once its fast round has gone idle. An app that
+/// each channel that has, once its fast round has gone idle and its changes
+/// have stopped landing. An app that
 /// re-asserts its card on this does it once, over the whole backfill.
 pub(crate) async fn tell_app_of_restored_channels(
     state: &mut EventLoopState,
@@ -1026,7 +1027,10 @@ pub(crate) async fn tell_app_of_restored_channels(
     }
     let now = Instant::now();
     for channel in [Channel::State, Channel::Meta] {
-        if state.restored.contains(&channel) && !state.fast_rounds.active(channel, now) {
+        if state.restored.contains(&channel)
+            && !state.fast_rounds.active(channel, now)
+            && !state.fast_rounds.changed_recently(channel, now)
+        {
             state.restored.remove(&channel);
             app.on_own_channel_restored(channel, state, ctx).await;
         }
@@ -2633,7 +2637,10 @@ mod returning_own_frame_tests {
             "the app is not told yet"
         );
 
-        // The round that was bringing them is still on.
+        // The round that was bringing them is still on: its frames keep landing.
+        state
+            .fast_rounds
+            .note_change(Channel::Meta, std::time::Instant::now());
         tell_app_of_restored_channels(&mut state, &mut app, &ctx).await;
         assert_eq!(restored.load(Ordering::Relaxed), 0, "not while it is on");
 
