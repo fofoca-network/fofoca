@@ -136,7 +136,7 @@ impl<A: NodeDriver + 'static> Node<A> {
                 joined = task => {
                     joined
                         .map_err(|error| anyhow::anyhow!("mesh task panicked: {error}"))?
-                        .map_err(|error| anyhow::anyhow!("mesh loop error: {error}"))?;
+                        .map_err(|error| error.context("mesh loop error"))?;
                 }
                 () = timeout => {}
             }

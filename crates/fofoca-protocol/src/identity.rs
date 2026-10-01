@@ -10,12 +10,13 @@
 //! The public key is the durable identity; the [`crate::Nickname`] is a display
 //! label bound to it trust-on-first-use by the receiver.
 //!
-//! The key is currently **in-process / ephemeral** — minted once per
-//! `create`/`join` and held in memory for the process lifetime. A process
-//! restart therefore mints a *new* key, so under the same nickname it is
-//! seen as a new identity (peers that pinned the old key flag it). Stable
-//! cross-restart identity (on-disk persistence) is a documented follow-up;
-//! see `docs/history-integrity.md`.
+//! Unless the embedder injects one ([`Identity::from_secret_bytes`]), the key is
+//! **in-process / ephemeral** — minted once per `create`/`join` and held in
+//! memory for the process lifetime. A restart then mints a *new* key, so under
+//! the same nickname it is seen as a new identity (peers that pinned the old
+//! key flag it). An embedder that persists the secret itself keeps the key
+//! across restarts; the engine never writes it anywhere. See
+//! `docs/history-integrity.md`.
 
 use anyhow::{Context, Result};
 use iroh_base::{PublicKey, SecretKey, Signature};
@@ -40,6 +41,23 @@ impl Identity {
         Identity {
             secret: SecretKey::from_bytes(&bytes),
         }
+    }
+
+    /// Rebuild an identity from a secret saved earlier with
+    /// [`to_secret_bytes`](Self::to_secret_bytes), so a restarted process keeps
+    /// the key its peers already know instead of minting a stranger.
+    #[must_use]
+    pub fn from_secret_bytes(bytes: [u8; 32]) -> Self {
+        Identity {
+            secret: SecretKey::from_bytes(&bytes),
+        }
+    }
+
+    /// The 32-byte Ed25519 secret. The caller owns its storage: anyone who
+    /// reads these bytes can sign as this peer.
+    #[must_use]
+    pub fn to_secret_bytes(&self) -> [u8; 32] {
+        self.secret.to_bytes()
     }
 
     #[must_use]
@@ -201,6 +219,23 @@ mod tests {
         let bytes = b"canonical message bytes";
         let sig = identity.sign(bytes);
         assert!(verify(&identity.public(), bytes, &sig));
+    }
+
+    #[test]
+    fn secret_bytes_round_trip_keeps_the_key() {
+        let original = Identity::generate();
+        let restored = Identity::from_secret_bytes(original.to_secret_bytes());
+        assert_eq!(restored.public(), original.public());
+        assert_eq!(restored.seal_public(), original.seal_public());
+        let sig = restored.sign(b"after restart");
+        assert!(verify(&original.public(), b"after restart", &sig));
+    }
+
+    #[test]
+    fn distinct_secrets_give_distinct_keys() {
+        let first = Identity::from_secret_bytes([1; 32]);
+        let second = Identity::from_secret_bytes([2; 32]);
+        assert_ne!(first.public(), second.public());
     }
 
     #[test]

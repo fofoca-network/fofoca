@@ -23,6 +23,18 @@ pub enum NodeEvent {
         pubkey: String,
         seq: u64,
     },
+    /// Another key is sending under our nickname and has kept at it past the
+    /// answer window: two holders of one nickname met, as after a partition
+    /// heals. Evicts nobody. The lower key keeps the nickname; `lost` says this
+    /// member is the other one.
+    NicknameConflict {
+        nickname: Nickname,
+        /// Our signing key, lowercase hex.
+        ours: String,
+        /// The other holder's signing key, lowercase hex.
+        theirs: String,
+        lost: bool,
+    },
     PeerTimeout {
         nickname: Nickname,
         last_seen_secs_ago: u64,

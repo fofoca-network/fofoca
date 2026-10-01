@@ -159,11 +159,12 @@ pub async fn broadcast_state_merge(
 
     // 1. Build the change on a fork (no live mutation yet); a no-op merge is a
     //    silent success.
-    // The actor seed is the session's signing key, not the nickname: a
-    // rejoined session under a nickname-derived actor would collide seq
-    // numbers with its predecessor's history (see `doc::actor_for`).
-    let actor_seed = *state.identity.public().as_bytes();
-    let built = state.doc(channel).build_change(&merge, &actor_seed)?;
+    // The actor seed is the signing key plus this run's nonce, not the nickname
+    // and not the key alone: a rejoined run under an actor an earlier run used
+    // would collide seq numbers with its history (see `doc::actor_for`).
+    let built = state
+        .doc(channel)
+        .build_change(&merge, &state.actor_seed())?;
     let Some(change_bytes) = built else {
         return Ok(None);
     };

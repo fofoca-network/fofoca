@@ -26,6 +26,23 @@
 
 pub mod wire;
 
+/// Bytes of per-run randomness a run's automerge actor carries after its
+/// signing key. The actor of a channel change is exactly the signer's 32-byte
+/// key followed by this many bytes.
+pub const RUN_NONCE_LEN: usize = 8;
+
+/// Whether `actor` (hex) is a well-formed actor of the signer `pubkey` (hex): a
+/// 32-byte key, lowercase hex as it travels, followed by [`RUN_NONCE_LEN`]
+/// bytes. The key prefix is what stops one key from writing under another's
+/// actor, and with it from taking that actor's next seq. Exactly the one length
+/// leaves a key a single actor per run to account for.
+fn actor_belongs_to(actor: &str, pubkey: &str) -> bool {
+    pubkey.len() == 64
+        && pubkey.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && actor.len() == pubkey.len() + 2 * RUN_NONCE_LEN
+        && actor.starts_with(pubkey)
+}
+
 use std::collections::{HashMap, HashSet};
 
 use automerge::transaction::Transactable;
@@ -134,6 +151,9 @@ pub struct MeshDoc {
     /// it after each ingest, as the receive path does. A local write cannot
     /// orphan and never adds to it.
     dropped: Vec<[u8; 16]>,
+    /// Timestamps of the frames the last [`Self::ingest`] applied, the frame it
+    /// was handed and any buffered ones it unblocked. Replaced by every ingest.
+    applied_stamps: Vec<i64>,
     /// This channel's per-peer write gate, when it has one (`meta` does; `state`
     /// is free-form and carries no per-peer identity, so it does not).
     gate: Option<SelfWriteGate>,
@@ -187,6 +207,7 @@ impl MeshDoc {
             pending: HashMap::new(),
             pending_arrivals: 0,
             dropped: Vec::new(),
+            applied_stamps: Vec::new(),
             gate,
             key: None,
         }
@@ -311,15 +332,22 @@ impl MeshDoc {
     /// is never sent — every replica constructs it locally.
     #[must_use]
     pub fn changes_since(&self, have: &[String], max: usize) -> Vec<Message> {
-        self.changes_since_not_by(have, "", max)
+        self.changes_since_not_by_actor(have, "", max)
     }
 
-    /// [`Self::changes_since`] without the frames signed by `pubkey`: a peer
-    /// holds every change it signed, since a change's actor is its signer's
-    /// key and a session key lives no longer than its document. Skipped
-    /// before the cap, so the budget goes to what the peer can lack.
+    /// [`Self::changes_since`] without the changes made by `actor` (hex), the
+    /// asker's actor for its current run: a run holds every change it made
+    /// itself. Only that run's. Its earlier runs signed under the same key but
+    /// under their own actors, and a restarted peer holds none of them until we
+    /// send them back. Skipped before the cap, so the budget goes to what the
+    /// peer can lack. An empty `actor` skips nothing.
     #[must_use]
-    pub fn changes_since_not_by(&self, have: &[String], pubkey: &str, max: usize) -> Vec<Message> {
+    pub fn changes_since_not_by_actor(
+        &self,
+        have: &[String],
+        actor: &str,
+        max: usize,
+    ) -> Vec<Message> {
         let have: Vec<ChangeHash> = have
             .iter()
             .filter_map(|encoded| decode_hash(encoded))
@@ -327,8 +355,8 @@ impl MeshDoc {
         self.doc
             .get_changes(&have)
             .into_iter()
+            .filter(|change| actor.is_empty() || change.actor_id().to_hex_string() != actor)
             .filter_map(|change| self.frames.get(&change.hash()))
-            .filter(|frame| pubkey.is_empty() || frame.pubkey != pubkey)
             .take(max)
             .cloned()
             .collect()
@@ -356,8 +384,8 @@ impl MeshDoc {
     /// before feeding the bytes back through [`MeshDoc::ingest`] to apply them,
     /// so an oversize change never lands in the doc it could not be gossiped for.
     ///
-    /// `actor_seed` must be unique per session — the daemon passes its signing
-    /// public key (see [`actor_for`]).
+    /// `actor_seed` must be unique per run — the daemon passes its signing public
+    /// key followed by a nonce minted at start (see [`actor_for`]).
     ///
     /// # Errors
     /// Unrepresentable merge (a non-object at the document root).
@@ -386,17 +414,19 @@ impl MeshDoc {
     /// frames, so re-serve and the gate both see the original signed frame). The
     /// frame's signature is verified upstream by `gossip::ingest`.
     pub fn ingest(&mut self, frame: &Message) -> Ingested {
+        self.applied_stamps.clear();
         let Some(bytes) = self.change_bytes(frame) else {
             return Ingested::Ignored;
         };
         let Ok(change) = Change::from_bytes(bytes) else {
             return Ingested::Ignored;
         };
-        if change.actor_id().to_hex_string() != frame.pubkey {
+        // The actor is the signer's key plus a per-run suffix, and nothing else.
+        if !actor_belongs_to(&change.actor_id().to_hex_string(), &frame.pubkey) {
             tracing::warn!(
                 target: LOG_TARGET,
                 author = %frame.author,
-                "dropping a channel change whose actor is not its signer's key"
+                "dropping a channel change whose actor is not its signer's key and a run suffix"
             );
             return Ingested::Ignored;
         }
@@ -442,8 +472,9 @@ impl MeshDoc {
     /// different content, which automerge rejects before it looks at deps.
     /// Missing deps are not an error there at all; they are queued. An earlier
     /// comment here had both backwards and dropped the error on that basis.
-    /// Two processes sharing a signing key reach it without any malice, since
-    /// the actor id is derived from the key.
+    /// Two processes sharing a signing key and an actor reach it without any
+    /// malice, which is why each run takes an actor of its own (see
+    /// [`actor_for`]).
     fn apply(&mut self, change: Change, hash: ChangeHash, frame: Message) -> bool {
         if let Err(error) = self.doc.apply_changes([change]) {
             tracing::warn!(
@@ -455,8 +486,18 @@ impl MeshDoc {
             return false;
         }
         self.applied.insert(hash);
+        self.applied_stamps.push(frame.timestamp);
         self.frames.insert(hash, frame);
         true
+    }
+
+    /// The timestamps of every frame the last [`Self::ingest`] applied: the one
+    /// it was handed and any buffered frames it unblocked. A caller that decides
+    /// what to surface by a frame's age needs the whole set, since a change that
+    /// moves the document can be a buffered peer frame the handed one released.
+    #[must_use]
+    pub fn applied_timestamps(&self) -> &[i64] {
+        &self.applied_stamps
     }
 
     fn deps_satisfied(&self, deps: &[ChangeHash]) -> bool {
@@ -653,19 +694,19 @@ fn peers_genesis(map: &str) -> Change {
         .expect("genesis produced exactly one change")
 }
 
-/// Derive a stable automerge [`ActorId`](automerge::ActorId) from a
-/// per-session seed (the daemon passes its signing public key) so a member's
-/// concurrent same-key writes resolve deterministically. Authenticity is the
-/// signed envelope's job, not the actor id — this only stabilizes automerge's
-/// own conflict tie-break.
+/// Derive a stable automerge [`ActorId`](automerge::ActorId) from a per-run
+/// seed (the daemon passes its signing public key followed by a nonce minted at
+/// start) so a member's concurrent same-key writes resolve deterministically.
+/// Authenticity is the signed envelope's job, which checks only that the actor
+/// starts with the signer's key; the actor id otherwise just stabilizes
+/// automerge's own conflict tie-break.
 ///
-/// The seed must NOT be the nickname: automerge numbers each actor's changes
-/// sequentially, so a rejoined session (fresh doc, seq restarting at 1) under
-/// a nickname-derived actor collides with its predecessor's history and every
-/// replica rejects its writes as `DuplicateSeqNumber` equivocation. The
-/// session identity is minted fresh per run, which makes it exactly
-/// session-unique. (If identity ever persists across restarts, the seed must
-/// grow a per-run component, since the docs start empty each run.)
+/// The seed must differ on every run, whatever the key. automerge numbers each
+/// actor's changes sequentially, and a run's document starts empty, so a second
+/// run under an actor that an earlier run used restarts at seq 1 and collides
+/// with that run's history: every replica rejects its writes as
+/// `DuplicateSeqNumber`. A nickname does not make a good seed for the same
+/// reason, and a signing key the embedder keeps across restarts does not either.
 fn actor_for(seed: &[u8]) -> automerge::ActorId {
     automerge::ActorId::from(seed)
 }
@@ -821,6 +862,7 @@ mod tests {
     use super::wire::change_body;
     use super::{DOC_PENDING_AUTHOR_MAX, DOC_PENDING_TOTAL_MAX, Ingested, MeshDoc, SelfWriteGate};
     use automerge::Change;
+    use fofoca_protocol::identity::encode_hex;
     use fofoca_protocol::{Channel, MeshId, Message, Nickname};
     use serde_json::{Value, json};
     use std::collections::HashSet;
@@ -840,8 +882,20 @@ mod tests {
             change_body(bytes, None).expect("body"),
             Channel::State,
         );
-        frame.pubkey = change.actor_id().to_hex_string();
+        // The signer is the key at the head of the actor, as a daemon's is.
+        let actor = change.actor_id().to_hex_string();
+        frame.pubkey = actor.get(..64).unwrap_or(&actor).to_owned();
         frame
+    }
+
+    /// A well-formed actor for `seed`: the seed padded to a 32-byte key, then a
+    /// run suffix. Two seeds that agree give the same actor, on purpose where a
+    /// test wants two authors to collide.
+    fn actor_of(seed: &[u8]) -> Vec<u8> {
+        let mut actor = seed[..seed.len().min(32)].to_vec();
+        actor.resize(32, 0);
+        actor.extend_from_slice(&[0xee; super::RUN_NONCE_LEN]);
+        actor
     }
 
     /// Author a merge on `doc` (build + ingest, as the daemon does) and return
@@ -855,7 +909,7 @@ mod tests {
     /// that can only ever happen on purpose.
     ///
     /// It last moved when the byte-domains dropped the product name for the
-    /// engine's, which is why `message::VERSION` is `12.0`.
+    /// engine's, which is why `message::VERSION` went to `12.0`.
     #[test]
     fn genesis_bytes_are_pinned() {
         let genesis = super::peers_genesis("peers");
@@ -882,7 +936,7 @@ mod tests {
     /// derives from its signing key.
     fn author_as(doc: &mut MeshDoc, who: &Nickname, seed: &[u8], merge: &Value) -> Message {
         let bytes = doc
-            .build_change(merge, seed)
+            .build_change(merge, &actor_of(seed))
             .expect("merge applies")
             .expect("merge is not a no-op");
         let carrier = frame(who, &bytes);
@@ -1260,7 +1314,7 @@ mod tests {
         assert!(matches!(sink.ingest(&root), Ingested::Applied { .. }));
 
         let forged = sink
-            .build_change(&json!({"a": "forged"}), &alice_key)
+            .build_change(&json!({"a": "forged"}), &actor_of(&alice_key))
             .expect("merge applies")
             .expect("merge is not a no-op");
         let mut forged = frame(&mallory, &forged);
@@ -1281,7 +1335,7 @@ mod tests {
         let mut source = MeshDoc::new_ungated();
         let _root = author_as(&mut source, &nick("alice"), &alice_key, &json!({"a": 1}));
         let orphan = source
-            .build_change(&json!({"a": "forged"}), &alice_key)
+            .build_change(&json!({"a": "forged"}), &actor_of(&alice_key))
             .expect("merge applies")
             .expect("merge is not a no-op");
         let mut forged = frame(&nick("mallory"), &orphan);
@@ -1290,6 +1344,195 @@ mod tests {
         let mut sink = MeshDoc::new_ungated();
         assert!(matches!(sink.ingest(&forged), Ingested::Ignored));
         assert_eq!(sink.pending_stats().0, 0);
+    }
+
+    /// A frame carrying `bytes`, signed by `key` (hex), whatever actor the
+    /// change names: how a real frame looks once the actor is the key plus a
+    /// per-run suffix.
+    fn frame_signed_by(who: &Nickname, bytes: &[u8], key: &str) -> Message {
+        let mut carrier = frame(who, bytes);
+        carrier.pubkey = key.to_owned();
+        carrier
+    }
+
+    /// The actor a run writes under: the key, then a nonce of that run's own.
+    fn run_actor(key: &[u8; 32], nonce: u8) -> Vec<u8> {
+        let mut actor = key.to_vec();
+        actor.extend_from_slice(&[nonce; 8]);
+        actor
+    }
+
+    #[test]
+    fn an_actor_that_extends_the_signers_key_is_accepted() {
+        let (alice, key) = (nick("alice"), [0xaa_u8; 32]);
+        let source = MeshDoc::new_ungated();
+        let bytes = source
+            .build_change(&json!({"a": 1}), &run_actor(&key, 1))
+            .expect("merge applies")
+            .expect("merge is not a no-op");
+        let carrier = frame_signed_by(&alice, &bytes, &encode_hex(&key));
+        let mut sink = MeshDoc::new_ungated();
+        assert!(matches!(sink.ingest(&carrier), Ingested::Applied { .. }));
+        assert_eq!(sink.to_json(), json!({"a": 1}));
+    }
+
+    #[test]
+    fn an_actor_that_only_resembles_the_signers_key_is_refused() {
+        let (mallory, alice_key) = (nick("mallory"), [0xaa_u8; 32]);
+        let source = MeshDoc::new_ungated();
+        let bytes = source
+            .build_change(&json!({"a": 1}), &run_actor(&alice_key, 1))
+            .expect("merge applies")
+            .expect("merge is not a no-op");
+        // Signed by a key that is not the actor's prefix, though the suffix and
+        // all but the first byte of the key match.
+        let mut other = alice_key;
+        other[0] = 0xab;
+        let carrier = frame_signed_by(&mallory, &bytes, &encode_hex(&other));
+        let mut sink = MeshDoc::new_ungated();
+        assert!(matches!(sink.ingest(&carrier), Ingested::Ignored));
+    }
+
+    #[test]
+    fn an_actor_of_the_wrong_shape_is_refused_whoever_signs_it() {
+        let (alice, key) = (nick("alice"), [0xaa_u8; 32]);
+        let key_hex = encode_hex(&key);
+        let source = MeshDoc::new_ungated();
+        let build = |actor: &[u8]| {
+            source
+                .build_change(&json!({"a": 1}), actor)
+                .expect("merge applies")
+                .expect("merge is not a no-op")
+        };
+        let bare = frame_signed_by(&alice, &build(&key), &key_hex);
+        let mut long_actor = run_actor(&key, 1);
+        long_actor.push(0xff);
+        let too_long = frame_signed_by(&alice, &build(&long_actor), &key_hex);
+        let well_formed = frame_signed_by(&alice, &build(&run_actor(&key, 1)), &key_hex);
+
+        let mut sink = MeshDoc::new_ungated();
+        assert!(
+            matches!(sink.ingest(&bare), Ingested::Ignored),
+            "the bare key is not a run's actor"
+        );
+        assert!(
+            matches!(sink.ingest(&too_long), Ingested::Ignored),
+            "a longer suffix would give one key as many actors as it likes"
+        );
+        assert!(matches!(
+            sink.ingest(&well_formed),
+            Ingested::Applied { .. }
+        ));
+    }
+
+    #[test]
+    fn a_pubkey_that_is_not_a_key_cannot_own_an_actor() {
+        let alice = nick("alice");
+        let source = MeshDoc::new_ungated();
+        let bytes = source
+            .build_change(&json!({"a": 1}), &run_actor(&[0xaa_u8; 32], 1))
+            .expect("merge applies")
+            .expect("merge is not a no-op");
+        for pubkey in ["", "aa", &"zz".repeat(32), &"aa".repeat(31)] {
+            let carrier = frame_signed_by(&alice, &bytes, pubkey);
+            let mut sink = MeshDoc::new_ungated();
+            assert!(
+                matches!(sink.ingest(&carrier), Ingested::Ignored),
+                "refused for pubkey {pubkey:?}"
+            );
+        }
+    }
+
+    /// The prefix rule is what keeps one key from writing under another's actor:
+    /// bob signing a change whose actor starts with alice's key is refused, so
+    /// he cannot take alice's next seq.
+    #[test]
+    fn an_actor_under_another_keys_prefix_is_refused_whoever_signs_it() {
+        let (bob, alice_key, bob_key) = (nick("bob"), [0xaa_u8; 32], [0xbb_u8; 32]);
+        let source = MeshDoc::new_ungated();
+        let bytes = source
+            .build_change(&json!({"a": "forged"}), &run_actor(&alice_key, 1))
+            .expect("merge applies")
+            .expect("merge is not a no-op");
+        let carrier = frame_signed_by(&bob, &bytes, &encode_hex(&bob_key));
+        let mut sink = MeshDoc::new_ungated();
+        assert!(matches!(sink.ingest(&carrier), Ingested::Ignored));
+        assert_eq!(sink.to_json(), json!({}));
+    }
+
+    /// The point of the per-run actor: a restart under the same key starts its
+    /// document empty, so under the key alone its first change would be
+    /// `(actor, 1)` again, which every replica holding the first run refuses.
+    #[test]
+    fn two_runs_of_one_key_both_apply() {
+        let (alice, key) = (nick("alice"), [0xaa_u8; 32]);
+        let key_hex = encode_hex(&key);
+        let mut first_run = MeshDoc::new_ungated();
+        let mut second_run = MeshDoc::new_ungated();
+        let before_crash = author_as_key(&mut first_run, &alice, &run_actor(&key, 1), &key_hex);
+        let after_restart = author_as_key(&mut second_run, &alice, &run_actor(&key, 2), &key_hex);
+
+        let mut replica = MeshDoc::new_ungated();
+        assert!(matches!(
+            replica.ingest(&before_crash),
+            Ingested::Applied { .. }
+        ));
+        assert!(matches!(
+            replica.ingest(&after_restart),
+            Ingested::Applied { .. }
+        ));
+        assert_eq!(replica.to_json(), json!({"n": 1}));
+        assert_eq!(replica.change_count(), 2, "both runs' changes");
+    }
+
+    /// `author_as` for a key-plus-nonce actor: the frame carries the signer's key.
+    fn author_as_key(doc: &mut MeshDoc, who: &Nickname, seed: &[u8], key: &str) -> Message {
+        let bytes = doc
+            .build_change(&json!({"n": 1}), seed)
+            .expect("merge applies")
+            .expect("merge is not a no-op");
+        let carrier = frame_signed_by(who, &bytes, key);
+        assert!(matches!(doc.ingest(&carrier), Ingested::Applied { .. }));
+        carrier
+    }
+
+    #[test]
+    fn a_holder_skips_only_the_asking_runs_own_changes() {
+        let (alice, key) = (nick("alice"), [0xaa_u8; 32]);
+        let key_hex = encode_hex(&key);
+        let (old_actor, new_actor) = (run_actor(&key, 1), run_actor(&key, 2));
+        let mut holder = MeshDoc::new_ungated();
+        let old_run = {
+            let bytes = holder
+                .build_change(&json!({"old": 1}), &old_actor)
+                .expect("merge applies")
+                .expect("merge is not a no-op");
+            let carrier = frame_signed_by(&alice, &bytes, &key_hex);
+            assert!(matches!(holder.ingest(&carrier), Ingested::Applied { .. }));
+            carrier
+        };
+        let new_run = {
+            let bytes = holder
+                .build_change(&json!({"new": 2}), &new_actor)
+                .expect("merge applies")
+                .expect("merge is not a no-op");
+            let carrier = frame_signed_by(&alice, &bytes, &key_hex);
+            assert!(matches!(holder.ingest(&carrier), Ingested::Applied { .. }));
+            carrier
+        };
+        let nothing_held: Vec<String> = Vec::new();
+
+        let sent = holder.changes_since_not_by_actor(&nothing_held, &encode_hex(&new_actor), 100);
+        assert_eq!(
+            sent.iter()
+                .map(|frame| frame.id.clone())
+                .collect::<Vec<_>>(),
+            vec![old_run.id.clone()],
+            "the asking run's own change is left out and its earlier run's is sent"
+        );
+        let everything = holder.changes_since_not_by_actor(&nothing_held, "", 100);
+        assert_eq!(everything.len(), 2, "no actor named, nothing skipped");
+        assert!(everything.iter().any(|frame| frame.id == new_run.id));
     }
 
     #[test]
@@ -1359,7 +1602,7 @@ mod tests {
         let merge = json!({"secret": "value"});
         let author_doc = MeshDoc::new_ungated().with_key(Some(zeroize::Zeroizing::new(key)));
         let bytes = author_doc
-            .build_change(&merge, alice.as_str().as_bytes())
+            .build_change(&merge, &actor_of(alice.as_str().as_bytes()))
             .expect("builds")
             .expect("not a no-op");
         let (wire, _plain) = author_doc
@@ -1367,7 +1610,7 @@ mod tests {
             .expect("compose");
         let mut carrier =
             Message::new_channel_event(&MeshId::from("test"), &alice, wire, Channel::State);
-        carrier.pubkey = automerge::ActorId::from(alice.as_str().as_bytes()).to_hex_string();
+        carrier.pubkey = encode_hex(&actor_of(alice.as_str().as_bytes())[..32]);
         assert!(
             !carrier.body.as_str().contains("value"),
             "the plaintext value must not appear on the wire"
@@ -1426,7 +1669,7 @@ mod tests {
         let own_bytes = alice_doc
             .build_change(
                 &json!({"peers": {"alice": {"card": {"name": "alice"}}}}),
-                alice.as_str().as_bytes(),
+                &actor_of(alice.as_str().as_bytes()),
             )
             .expect("builds")
             .expect("not a no-op");

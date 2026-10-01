@@ -98,6 +98,11 @@ struct HeadsBody {
     heads: Vec<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     closing: bool,
+    /// The automerge actor (hex) the sender's current run writes under, so a
+    /// holder skips the changes that run made and nothing else. Not part of
+    /// [`heads_key`]: two peers at the same heads still agree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    actor: Option<String>,
 }
 
 /// Broadcast an anti-entropy digest: an **open-ended newest** window (so
@@ -139,7 +144,11 @@ fn digest_windows(state: &mut EventLoopState) -> Option<Vec<WireWindow>> {
     let recent = ANTIENTROPY_DIGEST_WINDOW_IDS;
     let mut newest = state.message_log.recent_window(recent)?;
     let older_len = state.message_log.older_len(recent);
-    if older_len == 0 {
+    // A resumed run keeps asking from its resume point, whatever the log holds,
+    // until a round brings nothing new: the log fills with what it was sent
+    // since the last one, and `lo` alone would climb past the outage.
+    let resuming = state.step_resume_floor();
+    if older_len == 0 || resuming {
         // The window is the whole log, so its `lo` is only our first entry: the
         // moment we first spoke, not when we joined. A node alone at start logs
         // nothing until a link forms, and without this floor what the mesh said
@@ -163,8 +172,10 @@ fn digest_windows(state: &mut EventLoopState) -> Option<Vec<WireWindow>> {
 
 /// Handle a received anti-entropy digest: for each advertised window, re-send
 /// our logged messages the sender lacks **within that window** (open-ended
-/// newest ⇒ everything newer; closed older ⇒ that slice only), newest-first, up
-/// to `antientropy_max_resend()` total. Receivers that already have them drop
+/// newest ⇒ everything newer; closed older ⇒ that slice only), up to
+/// `antientropy_max_resend()` total. The newest ones are kept when the budget
+/// cuts the batch, and sent oldest-first, so a receiver meets a chain's links in
+/// the order they were written. Receivers that already have them drop
 /// the repeat (dedup); the sender (and anyone else who missed them) recovers.
 /// Never logged.
 ///
@@ -213,7 +224,8 @@ pub(crate) async fn handle_digest(
         if budget == 0 {
             break;
         }
-        for msg in state.message_log.missing_in_window(MissingQuery {
+        // `missing_in_window` hands back the newest `budget` newest-first.
+        let mut batch = state.message_log.missing_in_window(MissingQuery {
             range: WindowRange {
                 lo: window.lo,
                 hi: window.hi,
@@ -221,7 +233,9 @@ pub(crate) async fn handle_digest(
             have: &have,
             max: budget,
             requester: &message.author,
-        }) {
+        });
+        batch.reverse();
+        for msg in batch {
             if !resend_one(&msg, state, ctx).await {
                 continue;
             }
@@ -335,7 +349,12 @@ fn heads_digest(
         return None;
     }
     let heads = state.doc(channel).heads();
-    let body = super::json_body(&HeadsBody { heads, closing })?;
+    let actor = Some(state.actor_hex());
+    let body = super::json_body(&HeadsBody {
+        heads,
+        closing,
+        actor,
+    })?;
     Some(
         Message::new_channel_digest(origin.mesh, origin.author, body, channel)
             .signed(&state.identity),
@@ -602,6 +621,21 @@ impl FastRounds {
         pick.map(|peer| (peer.pubkey.clone(), peer.author.clone()))
     }
 
+    /// When `channel` goes quiet: its round no longer runs, and no change has
+    /// landed for [`FAST_ROUND_MIN_INTERVAL_MS`]. `None` when it is quiet at
+    /// `now`.
+    pub(crate) fn quiet_at(&self, channel: Channel, now: Instant) -> Option<Instant> {
+        let round_ends = self
+            .rounds
+            .get(&channel)
+            .map(|round| round.at + Self::ACTIVE);
+        let changes_end = self
+            .last_change
+            .get(&channel)
+            .map(|&changed| changed + Self::MIN_INTERVAL);
+        round_ends.max(changes_end).filter(|&at| at > now)
+    }
+
     /// Whether a direct round runs for `channel`: we asked a peer within
     /// [`FAST_ROUND_ACTIVE_MS`]. Our broadcast digests wait meanwhile: during
     /// a backfill each one draws a full answer from every linked holder, and
@@ -655,6 +689,7 @@ fn heads_key_of(state: &EventLoopState, channel: Channel) -> u64 {
     let heads = HeadsBody {
         heads: state.doc(channel).heads(),
         closing: false,
+        actor: None,
     };
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     serde_json::to_string(&heads)
@@ -740,8 +775,20 @@ async fn ask(
 /// A digest's heads as the serve budget keys them: its body is the heads. The
 /// same heads in another order hash differently and get one more answer.
 fn heads_key(digest: &Message) -> u64 {
+    // Without the sender's actor, so it names the heads and nothing about the
+    // run that advertised them.
+    let canonical = serde_json::from_str::<HeadsBody>(digest.body.as_str())
+        .ok()
+        .and_then(|body| {
+            serde_json::to_string(&HeadsBody {
+                actor: None,
+                ..body
+            })
+            .ok()
+        })
+        .unwrap_or_else(|| digest.body.as_str().to_owned());
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    digest.body.as_str().hash(&mut hasher);
+    canonical.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -863,16 +910,24 @@ pub(crate) async fn handle_state_digest(
 }
 
 /// The signed change frames the author of `digest` lacks on `channel`, up to
-/// the resend budget, less the ones it signed itself: with heads we do not
-/// hold we cannot tell what it has and send everything, but its own changes
-/// it always has. Empty for an undecodable digest body.
+/// the resend budget, less the ones its current run made itself: with heads we
+/// do not hold we cannot tell what it has and send everything, but the changes
+/// of its own run it always has. Its earlier runs' are sent. Empty for an
+/// undecodable digest body.
 fn missing_frames(channel: Channel, digest: &Message, state: &EventLoopState) -> Vec<Message> {
     let Ok(body) = serde_json::from_str::<HeadsBody>(digest.body.as_str()) else {
         return Vec::new();
     };
+    // The asker names its current run's actor, and only an actor under its own
+    // key counts: a made-up one can only hide the liar's own changes from it.
+    let actor = body
+        .actor
+        .as_deref()
+        .filter(|actor| actor.starts_with(&digest.pubkey))
+        .unwrap_or_default();
     state
         .doc(channel)
-        .changes_since_not_by(&body.heads, &digest.pubkey, antientropy_max_resend())
+        .changes_since_not_by_actor(&body.heads, actor, antientropy_max_resend())
 }
 
 #[cfg(test)]
@@ -1093,7 +1148,7 @@ mod budget_tests {
         let mut state = crate::testing::fresh_state();
         state.meshed = true;
         let (mesh, author) = (MeshId::from("test"), nick("alice"));
-        let seed = *state.identity.public().as_bytes();
+        let seed = state.actor_seed();
         let change = state
             .doc(Channel::State)
             .build_change(&serde_json::json!({ "k": 1 }), &seed)
@@ -1258,7 +1313,7 @@ mod tests {
         author: &Nickname,
         merge: &serde_json::Value,
     ) {
-        let seed = *state.identity.public().as_bytes();
+        let seed = state.actor_seed();
         let change = state
             .doc(Channel::Meta)
             .build_change(merge, &seed)
@@ -1500,6 +1555,8 @@ mod tests {
         let json = serde_json::to_string(&HeadsBody {
             heads: heads.clone(),
             closing: false,
+            // The longest it gets: a 32-byte key and an 8-byte run nonce, in hex.
+            actor: Some("ab".repeat(40)),
         })
         .expect("serialize heads body");
         let back: HeadsBody = serde_json::from_str(&json).expect("round-trip");
@@ -1587,6 +1644,140 @@ mod tests {
                 ["4 s before the first entry", "1 s before the first entry"].map(String::from)
             )
         );
+    }
+
+    /// The point of retaining a returning frame: until the restarted node holds
+    /// it, every digest it sends shows the gap and a peer re-serves the frame,
+    /// round after round. Once it holds it the digest names it and the peer has
+    /// nothing to send.
+    #[test]
+    fn a_holder_stops_re_serving_a_frame_once_the_restarted_node_holds_it() {
+        let joined_at = 1_700_000_000;
+        let pre_crash = chat_at("sent before the crash", joined_at + 1);
+        let mut holder = MessageLog::new(10);
+        holder.push(pre_crash.clone());
+        let mut node = crate::testing::state_for_run(true, None);
+        node.joined_at = joined_at;
+        node.message_log.push(chat_at("own joined", joined_at + 5));
+
+        assert_eq!(
+            answer(&mut node, &holder),
+            HashSet::from(["sent before the crash".to_owned()]),
+            "not held yet, so it is served"
+        );
+        node.retain_outbound(&pre_crash);
+        assert!(
+            answer(&mut node, &holder).is_empty(),
+            "held now, so every round after it is quiet"
+        );
+    }
+
+    /// A resumed run asks from its resume point on every digest, however full
+    /// its log has become, until three rounds in a row bring nothing from the
+    /// outage. The log fills with what the last round returned, and the
+    /// window's own lower bound climbs past the outage with it.
+    #[test]
+    fn a_resumed_digest_keeps_its_floor_until_three_rounds_bring_nothing() {
+        let joined_at = 1_700_000_000;
+        let mut node =
+            crate::testing::state_for_run(true, Some(crate::util::clock::unix_secs() - 600));
+        node.joined_at = joined_at;
+        let held = ANTIENTROPY_DIGEST_WINDOW_IDS + 10;
+        for step in 0..held {
+            let stamp = joined_at + 500 + i64::try_from(step).expect("small");
+            node.message_log
+                .push(chat_at(&format!("held {step}"), stamp));
+        }
+        let newest_lo = |target: &mut EventLoopState| {
+            digest_windows(target).expect("a non-empty log advertises")[0].lo
+        };
+
+        assert_eq!(
+            newest_lo(&mut node),
+            joined_at,
+            "the first round asks for it all"
+        );
+        crate::gossip::push_to_log(&mut node, chat_at("arrived", joined_at + 900));
+        assert_eq!(
+            newest_lo(&mut node),
+            joined_at,
+            "the round before it brought something"
+        );
+        for quiet in 1..=2 {
+            assert_eq!(
+                newest_lo(&mut node),
+                joined_at,
+                "quiet round {quiet} of 3: one more may bring the rest"
+            );
+        }
+        crate::gossip::push_to_log(&mut node, chat_at("late straggler", joined_at + 901));
+        assert_eq!(
+            newest_lo(&mut node),
+            joined_at,
+            "a straggler starts the count over"
+        );
+        for quiet in 1..=2 {
+            assert_eq!(newest_lo(&mut node), joined_at, "quiet round {quiet} of 3");
+        }
+        assert!(
+            newest_lo(&mut node) > joined_at,
+            "the third quiet round in a row ends the floor, and the window climbs"
+        );
+        assert!(node.resume_floor.is_none());
+    }
+
+    /// Frames stamped from this start on are live traffic. They fill the log all
+    /// the time and must not keep a resumed digest reaching back for good.
+    #[test]
+    fn live_frames_do_not_hold_the_resume_floor_open() {
+        let mut node =
+            crate::testing::state_for_run(true, Some(crate::util::clock::unix_secs() - 600));
+        let live_stamp = node.started_at + 1;
+        node.message_log.push(chat_at("held", live_stamp));
+        let _ = digest_windows(&mut node);
+        for round in 0..3 {
+            crate::gossip::push_to_log(
+                &mut node,
+                chat_at(&format!("live {round}"), live_stamp + round),
+            );
+            let _ = digest_windows(&mut node);
+        }
+        assert!(
+            node.resume_floor.is_none(),
+            "three rounds with only live traffic count as quiet"
+        );
+    }
+
+    /// A mesh that keeps answering still does not hold the floor, and the resend
+    /// budget it spends, for longer than the cap.
+    #[test]
+    fn the_resume_floor_ends_by_time_whatever_arrives() {
+        let mut node =
+            crate::testing::state_for_run(true, Some(crate::util::clock::unix_secs() - 600));
+        node.message_log.push(chat_at("held", node.started_at - 10));
+        let _ = digest_windows(&mut node);
+        let in_the_past = node.started_at - 10;
+        crate::gossip::push_to_log(&mut node, chat_at("from the outage", in_the_past));
+        assert!(node.resume_floor.is_some());
+        node.expire_resume_floor_for_test();
+        let _ = digest_windows(&mut node);
+        assert!(node.resume_floor.is_none(), "the cap has passed");
+    }
+
+    /// Without a resume point a full log asks only from its own window: the
+    /// floor is for resumed runs.
+    #[test]
+    fn a_plain_run_with_a_full_log_does_not_reach_back_to_joining() {
+        let joined_at = 1_700_000_000;
+        let mut node = fresh_state();
+        node.joined_at = joined_at;
+        for step in 0..ANTIENTROPY_DIGEST_WINDOW_IDS + 10 {
+            let stamp = joined_at + 500 + i64::try_from(step).expect("small");
+            node.message_log
+                .push(chat_at(&format!("held {step}"), stamp));
+        }
+        let windows = digest_windows(&mut node).expect("a non-empty log advertises");
+        assert!(windows[0].lo > joined_at);
     }
 
     /// The full digest body survives a serde round-trip, preserving the

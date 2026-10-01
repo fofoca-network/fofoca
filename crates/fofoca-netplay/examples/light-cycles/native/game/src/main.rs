@@ -198,6 +198,9 @@ async fn run(room: &str, nick: &str, local: bool, relay_transport: bool) -> Resu
             per_peer_gate: None,
             cohost: None,
             live_count: None,
+            identity: None,
+            resume_from: None,
+            nickname_source: fofoca::runtime::NicknameSource::Minted,
         },
     )
     .await?;

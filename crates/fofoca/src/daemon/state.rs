@@ -12,6 +12,7 @@ use serde::Serialize;
 use super::message_log::MessageLog;
 #[cfg(feature = "host")]
 use crate::daemon::state_file::StateFile;
+use crate::doc::RUN_NONCE_LEN;
 use crate::protocol::identity::Identity;
 use crate::protocol::mesh::Mesh;
 use crate::protocol::{Message, Nickname, ShardGroup};
@@ -260,6 +261,32 @@ pub struct EventLoopState {
     /// stamped before this are never *surfaced* (printed / `poll` /
     /// `fetch` / library API): the operator/agent view starts at join.
     pub(crate) joined_at: i64,
+    /// Wall-clock unix seconds when this process started. Equal to `joined_at`
+    /// except on a resumed run, where `joined_at` reaches back to the resume
+    /// point. `joined_at` decides what content is shown; `started_at` decides
+    /// what counts as a sign of life, since a frame sent while we were down
+    /// proves nothing about who is here now.
+    pub(crate) started_at: i64,
+    /// The digest floor of a resumed run, until a round brings nothing new.
+    pub(crate) resume_floor: Option<ResumeFloor>,
+    /// The newest timestamp seen from each nickname, so a `Left` older than a
+    /// frame we already hold from it is known to be a replay.
+    pub(crate) newest_ts: HashMap<Nickname, i64>,
+    /// When each nickname that said goodbye did, until a newer frame from it.
+    pub(crate) departed: HashMap<Nickname, i64>,
+    /// Channels whose doc just took changes of ours from an earlier run, and
+    /// whose app has not been told yet, with when the first one landed. Told
+    /// once the channel has gone quiet, not once per change.
+    pub(crate) restored: HashMap<crate::protocol::Channel, Instant>,
+    /// Which key holds each nickname we have heard, and who else sends under
+    /// ours.
+    pub(crate) claims: super::claims::Claims,
+    /// `ready` is held until this deadline, while the mesh may still tell us the
+    /// nickname we chose is taken. `None` once ready, or when nothing is held.
+    pub(crate) ready_hold: Option<super::claims::ReadyHold>,
+    /// Set when a holder refused our nickname before we reported ready; the loop
+    /// exits with it.
+    pub(crate) refusal: Option<super::claims::NicknameTaken>,
     /// Goes false when the receiver stream terminally ends; IPC
     /// keeps working for `msg` / `poll` after that.
     pub(crate) gossip_open: bool,
@@ -445,6 +472,13 @@ pub struct EventLoopState {
     /// our `Msg` stream is a `seq`+`prev` hash chain.
     pub(crate) self_seq: u64,
     pub(crate) self_prev: Option<String>,
+    /// The signing key is the embedder's and outlives this process, so a frame
+    /// of ours can come back from a peer's log after a restart (see
+    /// `gossip::recv::ingest`).
+    pub(crate) durable_identity: bool,
+    /// Random per run, appended to the signing key to make the automerge actor
+    /// this run writes its channel changes under (see [`Self::actor_seed`]).
+    pub(crate) run_nonce: [u8; RUN_NONCE_LEN],
     /// Phase 2 fork detection: per author pubkey (hex), the content hash
     /// seen at each `Msg` `seq`. A *different* hash at an already-seen
     /// `(pubkey, seq)` is cryptographic proof of equivocation → a `fork`
@@ -584,6 +618,10 @@ pub(crate) struct StateInit {
     #[cfg(feature = "host")]
     pub(crate) state_file: Option<StateFile>,
     pub(crate) identity: Arc<Identity>,
+    /// The identity is the embedder's own and outlives this process.
+    pub(crate) durable_identity: bool,
+    /// Where the join horizon starts, when earlier than this start.
+    pub(crate) resume_from: Option<i64>,
     pub secrets: MeshSecrets,
     /// The `meta` channel's per-peer write gate; `None` leaves it free-form.
     pub per_peer_gate: Option<crate::doc::SelfWriteGate>,
@@ -599,6 +637,11 @@ pub(crate) struct StateInit {
     pub(crate) webrtc_ice: crate::transport::IceProfile,
 }
 
+/// One channel's encryption key, derived from the mesh key under `label`.
+fn channel_key(mesh_key: Option<&[u8; 32]>, label: &[u8]) -> Option<zeroize::Zeroizing<[u8; 32]>> {
+    mesh_key.map(|key| zeroize::Zeroizing::new(crate::protocol::crypto::derive_secret(key, label)))
+}
+
 impl EventLoopState {
     /// Build a fresh event-loop state. `now` is passed explicitly so
     /// tests can pin a deterministic instant. `secrets` is taken by value (not
@@ -609,11 +652,14 @@ impl EventLoopState {
             #[cfg(feature = "host")]
             state_file,
             identity,
+            durable_identity,
+            resume_from,
             secrets,
             per_peer_gate,
             webrtc_admission,
             webrtc_ice,
         } = init;
+        let run = RunStart::new(durable_identity, resume_from);
         let MeshSecrets {
             password: mesh_password,
             key: mesh_key,
@@ -621,15 +667,9 @@ impl EventLoopState {
         // Per-channel encryption keys, domain-separated from each other and from
         // every other seed-derived secret. `None` (passwordless) ⇒ the docs and
         // broadcast chat stay plaintext, exactly as before.
-        let state_key = mesh_key.as_deref().map(|key| {
-            zeroize::Zeroizing::new(crate::protocol::crypto::derive_secret(key, b"state-doc"))
-        });
-        let meta_key = mesh_key.as_deref().map(|key| {
-            zeroize::Zeroizing::new(crate::protocol::crypto::derive_secret(key, b"meta-doc"))
-        });
-        let broadcast_key = mesh_key.as_deref().map(|key| {
-            zeroize::Zeroizing::new(crate::protocol::crypto::derive_secret(key, b"broadcast"))
-        });
+        let state_key = channel_key(mesh_key.as_deref(), b"state-doc");
+        let meta_key = channel_key(mesh_key.as_deref(), b"meta-doc");
+        let broadcast_key = channel_key(mesh_key.as_deref(), b"broadcast");
         Self {
             linked_endpoints: HashSet::new(),
             direct: HashMap::new(),
@@ -659,7 +699,15 @@ impl EventLoopState {
             quiet_since: HashMap::new(),
             surfaced: HashSet::new(),
             last_sent_at: now,
-            joined_at: crate::util::clock::unix_secs(),
+            joined_at: run.joined_at,
+            started_at: run.started_at,
+            resume_floor: run.floor,
+            newest_ts: HashMap::new(),
+            departed: HashMap::new(),
+            restored: HashMap::new(),
+            claims: super::claims::Claims::default(),
+            ready_hold: None,
+            refusal: None,
             gossip_open: true,
             rendezvous_linked: false,
             rendezvous_session_stale: false,
@@ -700,8 +748,10 @@ impl EventLoopState {
             .with_key(meta_key),
             digest_cursor: 0,
             identity,
-            self_seq: 0,
+            self_seq: run.chain_seed,
             self_prev: None,
+            durable_identity,
+            run_nonce: run.nonce,
             author_seqs: HashMap::new(),
             forked: HashSet::new(),
             by_hash: HashMap::new(),
@@ -1130,6 +1180,111 @@ impl EventLoopState {
     }
 }
 
+/// How many nicknames' newest timestamps are kept.
+const NEWEST_TS_CAP: usize = 4096;
+
+/// Where a resumed run's digest stands: how many digests it has sent, how many
+/// frames from the outage entered the log since the last one, how many rounds in
+/// a row brought none, and when the floor ends whatever arrives.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ResumeFloor {
+    digests: u32,
+    fresh: u32,
+    quiet_rounds: u32,
+    until: Instant,
+}
+
+impl ResumeFloor {
+    fn new(now: Instant) -> Self {
+        Self {
+            digests: 0,
+            fresh: 0,
+            quiet_rounds: 0,
+            until: now + Duration::from_secs(RESUME_FLOOR_MAX_SECS),
+        }
+    }
+}
+
+/// How many rounds in a row must bring nothing from the outage before a resumed
+/// digest stops asking from the resume point.
+const RESUME_FLOOR_QUIET_ROUNDS: u32 = 3;
+
+/// The longest a resumed digest keeps asking from the resume point, whatever
+/// arrives: a mesh that keeps answering must not hold the floor, and the
+/// resend budget it spends, for good.
+const RESUME_FLOOR_MAX_SECS: u64 = 120;
+
+/// Disagreement between two clocks that a frame of someone who is here may show
+/// against this process's start.
+const LIVENESS_CLOCK_SLACK_SECS: i64 = 5;
+
+/// What is fixed when a run starts.
+struct RunStart {
+    started_at: i64,
+    /// Where surfacing starts: the resume point, or the start.
+    joined_at: i64,
+    chain_seed: u64,
+    nonce: [u8; RUN_NONCE_LEN],
+    floor: Option<ResumeFloor>,
+}
+
+impl RunStart {
+    /// `resume_from` is clamped into `[0, start]`: a negative point means the
+    /// beginning of time, and one in the future hides nothing.
+    fn new(durable_identity: bool, resume_from: Option<i64>) -> Self {
+        let started_at_millis = crate::util::clock::unix_millis();
+        let started_at = started_at_millis / 1000;
+        let resumed = resume_from
+            .map(|from| from.clamp(0, started_at))
+            .filter(|from| *from < started_at);
+        let mut nonce = [0u8; RUN_NONCE_LEN];
+        rand::RngCore::fill_bytes(&mut rand::rng(), &mut nonce);
+        RunStart {
+            started_at,
+            joined_at: resumed.unwrap_or(started_at),
+            chain_seed: if durable_identity {
+                run_chain_seed(started_at_millis)
+            } else {
+                0
+            },
+            nonce,
+            floor: resumed.map(|_| ResumeFloor::new(Instant::now())),
+        }
+    }
+}
+
+/// Bits a run's chain seed leaves for the messages it sends: one start
+/// millisecond owns this many seqs before the next millisecond's run could
+/// overlap them.
+const RUN_SEQ_BITS: u32 = 12;
+
+/// Where seed time starts counting: 2020-01-01T00:00:00Z, in Unix milliseconds.
+/// Measuring from here instead of 1970 is what leaves the seed room for the
+/// bits above.
+const SEED_EPOCH_MILLIS: i64 = 1_577_836_800_000;
+
+/// Latest offset from [`SEED_EPOCH_MILLIS`] the seed can encode and still land
+/// under 2^53, the largest integer a JSON number carries exactly, which is where
+/// a `seq` goes on the wire. That is the year 2089.
+const MAX_SEED_MILLIS: i64 = (1 << (53 - RUN_SEQ_BITS)) - 1;
+
+/// Where a run's chain starts when its signing key outlives it.
+///
+/// A restarted process has lost its seq counter, and peers still hold what it
+/// signed before, so starting over at 0 would put two different messages at one
+/// `(key, seq)`, which is exactly what fork detection reports as equivocation.
+/// Seeding from the start time makes every run's seqs sit above the last one's
+/// without the receiver having to guess a restart from the wire, which a
+/// signature cannot tell apart from equivocation. Milliseconds rather than
+/// seconds, because a supervisor restarting a crashing daemon can start two runs
+/// inside one second. A run only reaches the next run's seqs by sending more
+/// than `2^12` messages per millisecond it has been up. A clock set before 2020
+/// seeds 0 and gives up the guarantee.
+pub(crate) fn run_chain_seed(started_at_millis: i64) -> u64 {
+    let since_epoch = (started_at_millis - SEED_EPOCH_MILLIS).clamp(0, MAX_SEED_MILLIS);
+    u64::try_from(since_epoch).unwrap_or(0) << RUN_SEQ_BITS
+}
+
 /// Max `parents` stamped on a `Msg` — bounds the wire size of the causal
 /// links. A quiet mesh has one head; this only bites under heavy concurrency.
 const MAX_DAG_PARENTS: usize = 16;
@@ -1203,6 +1358,22 @@ impl EventLoopState {
         self.multihop.as_ref()
     }
 
+    /// The signing key, lowercase hex, that holds `nickname` on the mesh, as
+    /// read off its fresh frames: the key whose frames under that nickname
+    /// reach the roster and the surfaces. `None` when no claim on it is live.
+    /// Our own nickname is never claimed here; its holder is this node.
+    ///
+    /// Narrower than the roster. Only a fresh frame (stamped at or after this
+    /// process started) that is not a State or Meta change makes a claim. A
+    /// peer learned from backfilled frames is on the roster but has no holder
+    /// until its next fresh presence or chat frame, up to the alive interval
+    /// later; a peer heard only through channel changes never has one. Keep a
+    /// fallback for those.
+    #[must_use]
+    pub fn nickname_holder(&self, nickname: &Nickname) -> Option<&str> {
+        self.claims.holder(nickname, Instant::now())
+    }
+
     /// The Argon2id-derived broadcast key, for a password-protected mesh.
     #[must_use]
     pub fn broadcast_key(&self) -> Option<&[u8; 32]> {
@@ -1220,6 +1391,162 @@ impl EventLoopState {
     #[must_use]
     pub fn mint_mesh(&self) -> Option<&Mesh> {
         self.mint_mesh.as_ref()
+    }
+
+    /// Whether this run reaches back before its own start.
+    #[must_use]
+    pub(crate) fn resumed(&self) -> bool {
+        self.joined_at < self.started_at
+    }
+
+    /// Whether a frame from `author` stamped `timestamp` is a sign of life now.
+    /// Not when it is no newer than the author's own goodbye: a replay of what it
+    /// said before it left. On a resumed run, not when it is from before this
+    /// process started, give or take [`LIVENESS_CLOCK_SLACK_SECS`] of disagreement
+    /// between two clocks: what was sent while this process was down says nothing
+    /// about who is present.
+    #[must_use]
+    pub(crate) fn is_live_frame(&self, author: &Nickname, timestamp: i64) -> bool {
+        if self
+            .departed
+            .get(author)
+            .is_some_and(|left_at| timestamp <= *left_at)
+        {
+            return false;
+        }
+        !self.resumed() || timestamp.saturating_add(LIVENESS_CLOCK_SLACK_SECS) >= self.started_at
+    }
+
+    /// Note that `author` said goodbye at `timestamp`, so that replays of what
+    /// it said until then do not bring it back. Dropped by the first newer
+    /// frame from it, which is a return. A goodbye stamped ahead of our clock
+    /// by more than [`LIVENESS_CLOCK_SLACK_SECS`] counts as said now: else it
+    /// would keep the nickname off the roster until wall time caught up.
+    pub(crate) fn note_departed(&mut self, author: &Nickname, timestamp: i64) {
+        let timestamp = timestamp
+            .min(crate::util::clock::unix_secs().saturating_add(LIVENESS_CLOCK_SLACK_SECS));
+        if self.departed.len() >= NEWEST_TS_CAP && !self.departed.contains_key(author) {
+            self.departed.clear();
+        }
+        let left_at = self.departed.entry(author.clone()).or_insert(timestamp);
+        *left_at = (*left_at).max(timestamp);
+    }
+
+    /// A frame newer than the goodbye ends it: the nickname is back.
+    pub(crate) fn note_returned_after_departure(&mut self, author: &Nickname, timestamp: i64) {
+        if self
+            .departed
+            .get(author)
+            .is_some_and(|left_at| timestamp > *left_at)
+        {
+            self.departed.remove(author);
+        }
+    }
+
+    /// Record the newest timestamp seen from `author`.
+    pub(crate) fn note_frame_ts(&mut self, author: &Nickname, timestamp: i64) {
+        if self.newest_ts.len() >= NEWEST_TS_CAP && !self.newest_ts.contains_key(author) {
+            // A flood of nicknames: forget the lot rather than grow. What goes
+            // is only the protection against a replayed `Left`.
+            self.newest_ts.clear();
+        }
+        let newest = self.newest_ts.entry(author.clone()).or_insert(timestamp);
+        *newest = (*newest).max(timestamp);
+    }
+
+    /// Whether a `Left` stamped `timestamp` is older than a frame already seen
+    /// from `author`: a replay from before the nickname came back.
+    #[must_use]
+    pub(crate) fn is_stale_left(&self, author: &Nickname, timestamp: i64) -> bool {
+        self.newest_ts
+            .get(author)
+            .is_some_and(|newest| timestamp < *newest)
+    }
+
+    /// Step the resume floor for a digest about to go out. Returns whether the
+    /// digest keeps reaching back to `joined_at`: until one round after the
+    /// first brought nothing into the log.
+    pub(crate) fn step_resume_floor(&mut self) -> bool {
+        let Some(floor) = self.resume_floor.as_mut() else {
+            return false;
+        };
+        if Instant::now() >= floor.until {
+            self.resume_floor = None;
+            return false;
+        }
+        if floor.digests > 0 {
+            if floor.fresh == 0 {
+                floor.quiet_rounds += 1;
+            } else {
+                floor.quiet_rounds = 0;
+            }
+            if floor.quiet_rounds >= RESUME_FLOOR_QUIET_ROUNDS {
+                self.resume_floor = None;
+                return false;
+            }
+        }
+        floor.digests += 1;
+        floor.fresh = 0;
+        true
+    }
+
+    /// The first link to a real peer: while `ready` is held, a holder of our
+    /// nickname can answer from here, so the wait becomes one answer window.
+    pub(crate) fn note_first_link(&mut self) {
+        if let Some(hold) = self.ready_hold.as_mut() {
+            hold.on_first_link(n0_future::time::Instant::now());
+        }
+    }
+
+    /// Move the floor's deadline into the past, as if its time had run out.
+    #[cfg(test)]
+    pub(crate) fn expire_resume_floor_for_test(&mut self) {
+        if let Some(floor) = self.resume_floor.as_mut() {
+            floor.until = Instant::now()
+                .checked_sub(Duration::from_secs(1))
+                .expect("the clock is past its first second");
+        }
+    }
+
+    /// A frame stamped `timestamp` entered the log. A frame from before this run
+    /// started is what the floor is for, and counts as the round having brought
+    /// something; one from after is live traffic, which never stops.
+    pub(crate) fn note_fresh_frame(&mut self, timestamp: i64) {
+        if timestamp < self.started_at
+            && let Some(floor) = self.resume_floor.as_mut()
+        {
+            floor.fresh = floor.fresh.saturating_add(1);
+        }
+    }
+
+    /// Keep a frame this node just sent so anti-entropy can serve it: marked
+    /// seen, so a peer re-serving it is dropped at the gate, and in the log
+    /// once. An app that pushes its own sends to
+    /// [`message_log_mut`](Self::message_log_mut) instead leaves the frame unseen
+    /// and, on a durable key, logs it a second time when a peer hands it back.
+    pub fn retain_outbound(&mut self, message: &Message) {
+        self.mark_seen(message);
+        if !self.message_log.holds(message) {
+            crate::gossip::push_to_log(self, message.clone());
+        }
+    }
+
+    /// The seed of the automerge actor this run writes channel changes under:
+    /// the signing key, then this run's nonce. The key prefix is what the
+    /// receivers check; the nonce keeps a run from reusing an actor an earlier
+    /// run of the same key took, since its document starts empty and automerge
+    /// would number its changes from 1 again.
+    #[must_use]
+    pub(crate) fn actor_seed(&self) -> Vec<u8> {
+        let mut seed = self.identity.public().as_bytes().to_vec();
+        seed.extend_from_slice(&self.run_nonce);
+        seed
+    }
+
+    /// [`Self::actor_seed`] as the hex string an automerge change carries.
+    #[must_use]
+    pub(crate) fn actor_hex(&self) -> String {
+        crate::protocol::identity::encode_hex(&self.actor_seed())
     }
 
     /// Stamp the next position on this author's hash chain, advancing it.
@@ -1305,10 +1632,11 @@ impl EventLoopState {
 mod tests {
     use super::{
         DirectCounts, DirectState, Duration, EndpointId, EventLoopState, Instant,
-        KNOWN_ENDPOINTS_CAP, Message, QUIET_CAP, RELINK_COOLDOWN_SECS, Reach,
+        KNOWN_ENDPOINTS_CAP, LIVENESS_CLOCK_SLACK_SECS, MAX_SEED_MILLIS, Message, QUIET_CAP,
+        RELINK_COOLDOWN_SECS, Reach, SEED_EPOCH_MILLIS, run_chain_seed,
     };
     use crate::protocol::{AppFrameParams, MeshId, MessageBody, MessageId};
-    use crate::testing::{endpoint_id, fresh_state, nick};
+    use crate::testing::{endpoint_id, fresh_state, nick, state_for_run};
 
     /// An unsigned chat message carrying `id` — enough to exercise
     /// `mark_seen`, which keys on `dedup_key()` (`SHA-256(pubkey ‖ id)`).
@@ -1325,6 +1653,133 @@ mod tests {
         );
         message.id = id.clone();
         message
+    }
+
+    #[test]
+    fn a_run_with_its_own_key_starts_its_chain_above_every_earlier_run() {
+        let earlier = run_chain_seed(1_790_000_000_000);
+        let next_millisecond = run_chain_seed(1_790_000_000_001);
+        assert_eq!(
+            next_millisecond - earlier,
+            1 << 12,
+            "a run has 2^12 seqs before a run one millisecond later begins"
+        );
+        let before = crate::util::clock::unix_millis();
+        let state = state_for_run(true, None);
+        assert!(
+            state.chain_head().0 >= run_chain_seed(before),
+            "a run that starts now is above one that started before it"
+        );
+    }
+
+    #[test]
+    fn two_runs_started_inside_one_second_do_not_share_a_seq() {
+        // A supervisor restarting a crashing daemon can start two runs in one second.
+        let first = run_chain_seed(1_790_000_000_100);
+        let second = run_chain_seed(1_790_000_000_900);
+        assert!(second - first >= 1 << 12);
+    }
+
+    #[test]
+    fn a_run_with_a_minted_key_keeps_its_chain_at_zero() {
+        assert_eq!(state_for_run(false, None).chain_head(), (0, None));
+    }
+
+    #[test]
+    fn the_chain_seed_stays_exact_as_a_json_number() {
+        const JSON_SAFE: u64 = 1 << 53;
+        assert!(run_chain_seed(1_790_000_000_000) < JSON_SAFE);
+        assert!(run_chain_seed(SEED_EPOCH_MILLIS + MAX_SEED_MILLIS) < JSON_SAFE);
+        assert_eq!(
+            run_chain_seed(i64::MAX),
+            run_chain_seed(SEED_EPOCH_MILLIS + MAX_SEED_MILLIS),
+            "a far-future clock clamps rather than wrapping"
+        );
+        assert_eq!(
+            run_chain_seed(-5),
+            0,
+            "a clock before the epoch clamps to zero"
+        );
+    }
+
+    #[test]
+    fn resume_from_moves_the_join_horizon_back_and_never_forward() {
+        let started = crate::util::clock::unix_secs();
+        let resumed = state_for_run(true, Some(started - 600));
+        assert_eq!(resumed.joined_at, started - 600, "outage frames surface");
+        let future = state_for_run(true, Some(started + 600));
+        assert!(
+            future.joined_at <= started + 1,
+            "a resume point in the future cannot hide anything"
+        );
+        let plain = state_for_run(true, None);
+        assert!(plain.joined_at >= started, "no resume point starts now");
+    }
+
+    /// L6: a resumed run reads a frame as a sign of life when it is no older than
+    /// its start, give or take the clock slack between two machines.
+    #[test]
+    fn a_resumed_run_reads_a_frame_within_the_clock_slack_of_its_start_as_live() {
+        let bob = nick("bob");
+        let resumed = state_for_run(true, Some(crate::util::clock::unix_secs() - 600));
+        assert!(resumed.resumed());
+        let start = resumed.started_at;
+        assert!(resumed.is_live_frame(&bob, start), "sent as we started");
+        assert!(
+            resumed.is_live_frame(&bob, start - LIVENESS_CLOCK_SLACK_SECS),
+            "a clock behind ours by the slack"
+        );
+        assert!(
+            !resumed.is_live_frame(&bob, start - LIVENESS_CLOCK_SLACK_SECS - 1),
+            "sent while we were down"
+        );
+
+        let plain = state_for_run(true, None);
+        assert!(!plain.resumed());
+        assert!(
+            plain.is_live_frame(&bob, plain.started_at - 600),
+            "a run that reaches back to nothing reads every frame as live"
+        );
+    }
+
+    /// L8: after a goodbye, what the peer said until then is a replay, not a
+    /// sign of life; the first newer frame is a return.
+    #[test]
+    fn a_goodbye_makes_older_frames_replays_until_a_newer_one_returns() {
+        let mut state = fresh_state();
+        let bob = nick("bob");
+        let left_at = state.started_at;
+        state.note_departed(&bob, left_at);
+        assert!(
+            !state.is_live_frame(&bob, left_at),
+            "the goodbye's own second"
+        );
+        assert!(!state.is_live_frame(&bob, left_at - 5), "said before it");
+        assert!(state.is_live_frame(&bob, left_at + 1), "said after it");
+        assert!(
+            state.is_live_frame(&nick("carol"), left_at - 5),
+            "only bob's goodbye counts"
+        );
+
+        state.note_departed(&bob, left_at - 3);
+        assert!(
+            !state.is_live_frame(&bob, left_at),
+            "a replayed older goodbye does not move it back"
+        );
+
+        let mut clockless = fresh_state();
+        let far_ahead = clockless.started_at + 3600;
+        clockless.note_departed(&bob, far_ahead);
+        assert!(
+            clockless.is_live_frame(&bob, clockless.started_at + LIVENESS_CLOCK_SLACK_SECS + 2),
+            "a goodbye from a clock far ahead holds no longer than the slack"
+        );
+
+        state.note_returned_after_departure(&bob, left_at);
+        assert!(!state.is_live_frame(&bob, left_at), "not newer: no return");
+        state.note_returned_after_departure(&bob, left_at + 1);
+        assert!(state.departed.is_empty(), "a newer frame ends the goodbye");
+        assert!(state.is_live_frame(&bob, left_at - 5));
     }
 
     #[test]

@@ -40,7 +40,8 @@ use super::beacon_arm::{
     CohostArm, claims_at_startup, maybe_cohost, maybe_reclaim, probes_before_claim,
     release_rendezvous, schedule_rival_recheck, shed_rival_beacon_if_due,
 };
-use super::config::{CoHostPolicy, DriverMode, EventLoopConfig};
+use super::claims::{NicknameCheck, NicknameHolder, NicknameTaken, ReadyHold};
+use super::config::{CoHostPolicy, DriverMode, EventLoopConfig, KeyOrigin};
 use super::ctx::HandlerCtx;
 use super::heal::{GossipLink, ResubscribeEnv, apply_rung_change, resubscribe_tick, run_heal};
 #[cfg(feature = "host")]
@@ -74,6 +75,9 @@ pub async fn run<A: NodeDriver>(
         gossip,
         author,
         identity,
+        key_origin,
+        resume_from,
+        nickname_check,
         mesh: mesh_str,
         name: mesh_name,
         topic_string,
@@ -121,6 +125,20 @@ pub async fn run<A: NodeDriver>(
     let external_req_rx = session_rx;
 
     let started = Instant::now();
+    // Another daemon on this machine already serves this nickname: refuse before
+    // anything is written. The state file below defaults to a path named by the
+    // nickname, and a refused daemon must not remove the holder's.
+    #[cfg(feature = "host")]
+    if !ipc_listener_disabled
+        && let Some(base) = runtime_base.as_deref()
+        && crate::transport::ipc::held_by_live_daemon(base, &mesh_str, &author).await
+    {
+        return Err(NicknameTaken {
+            nickname: author,
+            holder: NicknameHolder::Local,
+        }
+        .into());
+    }
     // CLI `create`/`join` daemons default their state file into the mesh's
     // runtime folder (`<prefix>/<nick>.state.json`, beside the socket + log)
     // when no `--state-file` override is given. In-process in-process sessions
@@ -162,6 +180,8 @@ pub async fn run<A: NodeDriver>(
             #[cfg(feature = "host")]
             state_file,
             identity,
+            durable_identity: key_origin == KeyOrigin::Supplied,
+            resume_from,
             secrets: MeshSecrets {
                 password: mesh_password,
                 key: mesh_key,
@@ -301,13 +321,14 @@ pub async fn run<A: NodeDriver>(
     // stdout event and the state-file flag a readiness gate polls — now
     // have one source and cannot disagree.
     if ipc_listener_disabled || ipc_rx.is_some() {
-        state.ready = true;
-        state.write_peer_count();
-        sink.emit(NodeEvent::Ready {
-            mesh: mesh_str.clone(),
-            name: mesh_name.clone(),
-            nickname: author.clone(),
-        });
+        match nickname_check {
+            // A nickname we chose may be a live peer's. `ready` waits for the
+            // mesh to say so, or for the wait to run out with nobody to ask.
+            NicknameCheck::Confirm => state.ready_hold = Some(ReadyHold::new(TokioInstant::now())),
+            NicknameCheck::Skip => {
+                announce_ready(&mut state, sink.as_ref(), &mesh_str, &mesh_name, &author);
+            }
+        }
     }
 
     // `_router` stays owned in this scope so its accept loop outlives
@@ -353,6 +374,24 @@ pub async fn run<A: NodeDriver>(
         path_rx,
     }))
     .await
+}
+
+/// Mark the daemon serving and say so, in the state file and the `ready` event
+/// alike, so the two cannot disagree.
+fn announce_ready(
+    state: &mut EventLoopState,
+    sink: &dyn NodeSink,
+    mesh: &MeshId,
+    name: &MeshName,
+    author: &Nickname,
+) {
+    state.ready = true;
+    state.write_peer_count();
+    sink.emit(NodeEvent::Ready {
+        mesh: mesh.clone(),
+        name: name.clone(),
+        nickname: author.clone(),
+    });
 }
 
 /// The alive tick: note the gap, then broadcast the keepalive presence.
@@ -617,7 +656,33 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
     }
 
     loop {
+        // A holder refused our nickname before we reported ready. Leave the way
+        // a node that never announced itself does: no `left`, the state file
+        // gone, and the refusal for the caller to report.
+        if let Some(taken) = state.refusal.take() {
+            let ctx = parts.ctx(&sender);
+            app.close_poll_waiters();
+            app.on_shutdown(&mut state, &ctx).await;
+            #[cfg(feature = "host")]
+            if let Some(state_file) = state.state_file.as_ref() {
+                state_file.remove();
+            }
+            return Err(taken.into());
+        }
+        {
+            let ctx = parts.ctx(&sender);
+            gossip::tell_app_of_restored_channels(&mut state, &mut app, &ctx).await;
+        }
         tokio::select! {
+            () = sleep_until_opt(state.ready_hold.map(|hold| hold.deadline)) => {
+                state.ready_hold = None;
+                announce_ready(&mut state, sink.as_ref(), &mesh_str, &mesh_name, &author);
+            }
+            // Wakes the loop when a restored-channel notice falls due; the
+            // top of the loop tells the app.
+            () = sleep_until_opt(gossip::next_restored_notice(&state).map(|at| {
+                TokioInstant::now() + at.saturating_duration_since(Instant::now())
+            })) => {}
             () = sleep_until_opt(state.ping_round.as_ref().map(|round| round.deadline)) => {
                 state.idle.external += 1;
                 finalize_ping_round(&mut state, sink.as_ref());

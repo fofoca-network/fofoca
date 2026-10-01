@@ -143,7 +143,7 @@ const FIXTURE_MESH: &str = "2UXAThUkdBAbiJNXvCt4YeMGQ9myFg7gJJZSr3pG3MAGzUwWmmV7
 #[test]
 fn test_unknown_ext_fields_ignored() {
     let json = format!(
-        r#"{{"v":"12.0","id":"{FIXTURE_ID}","type":"app","tag":"app_msg","mesh":"{FIXTURE_MESH}","author":"a-b","ts":0,"body":"hi","ext":{{"future_field":"value","another":42}}}}"#
+        r#"{{"v":"13.0","id":"{FIXTURE_ID}","type":"app","tag":"app_msg","mesh":"{FIXTURE_MESH}","author":"a-b","ts":0,"body":"hi","ext":{{"future_field":"value","another":42}}}}"#
     );
     let parsed = Message::parse(json.as_bytes()).unwrap();
     assert_eq!(parsed.body.as_str(), "hi");
@@ -153,7 +153,7 @@ fn test_unknown_ext_fields_ignored() {
 #[test]
 fn test_missing_ext_defaults_to_empty_object() {
     let json = format!(
-        r#"{{"v":"12.0","id":"{FIXTURE_ID}","type":"app","tag":"app_msg","mesh":"{FIXTURE_MESH}","author":"a-b","ts":0,"body":"hi"}}"#
+        r#"{{"v":"13.0","id":"{FIXTURE_ID}","type":"app","tag":"app_msg","mesh":"{FIXTURE_MESH}","author":"a-b","ts":0,"body":"hi"}}"#
     );
     let parsed = Message::parse(json.as_bytes()).unwrap();
     assert_eq!(parsed.ext, serde_json::json!({}));
@@ -175,14 +175,14 @@ fn test_version_mismatch_rejected() {
 // escapes / spoof the `<nick>`/`#mesh` conventions (bad body/author).
 #[test]
 fn parse_rejects_non_uuid_id() {
-    let json = r#"{"v":"12.0","id":"not-a-uuid","type":"app","tag":"app_msg","mesh":"test","author":"a-b","ts":0,"body":"hi","ext":{}}"#;
+    let json = r#"{"v":"13.0","id":"not-a-uuid","type":"app","tag":"app_msg","mesh":"test","author":"a-b","ts":0,"body":"hi","ext":{}}"#;
     assert!(Message::parse(json.as_bytes()).is_err());
 }
 
 #[test]
 fn parse_rejects_control_char_body() {
     let json = format!(
-        r#"{{"v":"12.0","id":"{FIXTURE_ID}","type":"app","tag":"app_msg","mesh":"test","author":"a-b","ts":0,"body":"evil\u0000body","ext":{{}}}}"#
+        r#"{{"v":"13.0","id":"{FIXTURE_ID}","type":"app","tag":"app_msg","mesh":"test","author":"a-b","ts":0,"body":"evil\u0000body","ext":{{}}}}"#
     );
     assert!(Message::parse(json.as_bytes()).is_err());
 }
@@ -190,7 +190,7 @@ fn parse_rejects_control_char_body() {
 #[test]
 fn parse_rejects_unsafe_author_nickname() {
     let json = format!(
-        r#"{{"v":"12.0","id":"{FIXTURE_ID}","type":"app","tag":"app_msg","mesh":"test","author":"a#b","ts":0,"body":"hi","ext":{{}}}}"#
+        r#"{{"v":"13.0","id":"{FIXTURE_ID}","type":"app","tag":"app_msg","mesh":"test","author":"a#b","ts":0,"body":"hi","ext":{{}}}}"#
     );
     assert!(Message::parse(json.as_bytes()).is_err());
 }
@@ -202,7 +202,7 @@ fn parse_rejects_malformed_integrity_fields() {
     // so a crafted value never reaches the fork/DAG indexes or sig verify.
     let base = |extra: &str| {
         format!(
-            r#"{{"v":"12.0","id":"{FIXTURE_ID}","type":"app","tag":"app_msg","mesh":"{FIXTURE_MESH}","author":"a-b","ts":0,"body":"hi"{extra},"ext":{{}}}}"#
+            r#"{{"v":"13.0","id":"{FIXTURE_ID}","type":"app","tag":"app_msg","mesh":"{FIXTURE_MESH}","author":"a-b","ts":0,"body":"hi"{extra},"ext":{{}}}}"#
         )
     };
     // 3KB garbage pubkey, non-hex / wrong-length variants, and a bad hash.

@@ -16,10 +16,28 @@ use crate::util::clock::Instant;
 /// A bare state with a fresh identity: no state file, no secrets, no per-peer
 /// gate. The starting point for a test that only cares about one field.
 pub(crate) fn fresh_state() -> EventLoopState {
+    state_for_run(false, None)
+}
+
+/// [`fresh_state`] for a run whose signing key the embedder supplied
+/// (`durable_identity`) and/or that resumes surfacing from `resume_from`.
+pub(crate) fn state_for_run(durable_identity: bool, resume_from: Option<i64>) -> EventLoopState {
+    state_with_identity(Identity::generate(), durable_identity, resume_from)
+}
+
+/// [`state_for_run`] under a given key: a restart is a second state under the
+/// same one.
+pub(crate) fn state_with_identity(
+    identity: Identity,
+    durable_identity: bool,
+    resume_from: Option<i64>,
+) -> EventLoopState {
     EventLoopState::new(
         StateInit {
             state_file: None,
-            identity: Arc::new(Identity::generate()),
+            identity: Arc::new(identity),
+            durable_identity,
+            resume_from,
             secrets: MeshSecrets::default(),
             per_peer_gate: None,
             webrtc_admission: crate::transport::SignalAdmission::new(

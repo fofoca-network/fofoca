@@ -60,18 +60,35 @@ pub(crate) fn observe(
     state: &mut EventLoopState,
     ctx: &HandlerCtx<'_>,
 ) -> Observed {
+    // A resumed run reads frames from before it started, so liveness (the
+    // heartbeat and the roster) takes only frames from now on: what was sent
+    // while this process was down says nothing about who is here. Content
+    // surfacing, below, still reaches back to the resume point.
+    let live = state.is_live_frame(&message.author, message.timestamp);
+    state.note_returned_after_departure(&message.author, message.timestamp);
+    state.note_frame_ts(&message.author, message.timestamp);
     // Implicit heartbeat: any received message updates last_seen.
-    match state.last_seen.get_mut(message.author.as_str()) {
-        Some(seen) => *seen = Instant::now(),
-        None => {
-            state
-                .last_seen
-                .insert(message.author.clone(), Instant::now());
+    if live {
+        match state.last_seen.get_mut(message.author.as_str()) {
+            Some(seen) => *seen = Instant::now(),
+            None => {
+                state
+                    .last_seen
+                    .insert(message.author.clone(), Instant::now());
+            }
         }
     }
 
-    let update = membership::compute(&message.kind, &message.author, state);
-    membership::apply(&update, &message.author, state);
+    let update = if live {
+        let update = membership::compute(&message.kind, &message.author, state);
+        membership::apply(&update, &message.author, state);
+        update
+    } else {
+        membership::MembershipUpdate {
+            returned: false,
+            joined_new: false,
+        }
+    };
 
     // Join horizon: the node still relays/logs everything (anti-entropy
     // keeps the mesh's set uniform), but a message stamped before we
@@ -103,7 +120,8 @@ pub(crate) fn observe(
     // arrival of a still-present peer whose first fresh message lands
     // after some old relayed one. `!surfaced.contains` keeps
     // this exactly-once instead.
-    if surfaceable
+    if live
+        && surfaceable
         && !update.returned
         && !state.surfaced.contains(message.author.as_str())
         && !matches!(message.kind, MessageKind::Presence { .. })
@@ -148,6 +166,14 @@ pub(crate) async fn handle_presence(
         return;
     }
     if subtype == PresenceSubtype::Left {
+        // A `Left` older than a frame we already hold from this nickname is a
+        // replay from before it came back.
+        if state.is_stale_left(&message.author, message.timestamp) {
+            tracing::debug!(target: "fofoca::lifecycle", nickname = %message.author, "ignored a stale left");
+            return;
+        }
+        state.note_departed(&message.author, message.timestamp);
+        state.newest_ts.remove(message.author.as_str());
         if state.peers.remove(message.author.as_str()) {
             state.write_peer_count();
         }

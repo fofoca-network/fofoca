@@ -89,6 +89,27 @@ pub trait NodeApp: Send {
         let _ = (author, state, ctx);
     }
 
+    /// Changes to a channel doc signed by our own key, from a run of ours that
+    /// is gone, were just applied and moved the document. The doc this run
+    /// started with did not hold them, so it may now read a value it wrote
+    /// before the crash over the one it holds now. Lets the app re-assert what
+    /// belongs to this run (its card, its status) in `channel`.
+    ///
+    /// Called at least once after the last restored change, not once per
+    /// change; a long backfill can call it more than once, so keep the handler
+    /// idempotent.
+    ///
+    /// Defaults to a no-op: an app that keeps nothing in a channel doc has
+    /// nothing to re-assert.
+    async fn on_own_channel_restored(
+        &mut self,
+        channel: crate::protocol::Channel,
+        state: &mut EventLoopState,
+        ctx: &HandlerCtx<'_>,
+    ) {
+        let _ = (channel, state, ctx);
+    }
+
     /// The node just formed its first real-peer link (became meshed). Lets the
     /// app re-publish anything whose value depends on being meshed — e.g. its
     /// card's dial hint, now that the home relay is homed and the startup

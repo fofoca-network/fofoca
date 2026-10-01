@@ -4,6 +4,7 @@
 //! [`setup_mesh`] → [`Node::spawn`] (or [`run`] for a consumer that owns the
 //! task itself). [`EventLoopConfig`] is opaque between the second and third.
 
+pub use crate::daemon::claims::{NicknameHolder, NicknameSource, NicknameTaken};
 pub use crate::daemon::config::{
     CoHostPolicy, DIRECTORY_ADVERTISER_COHOST, DriverMode, EventLoopConfig,
 };

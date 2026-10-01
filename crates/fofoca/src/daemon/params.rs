@@ -15,12 +15,14 @@ use anyhow::{Result, bail};
 
 use crate::protocol::Nickname;
 use crate::protocol::crypto::Password;
+use crate::protocol::identity::Identity;
 use crate::protocol::mesh::{
     AdvertiseRequiresReachable, DirectorySelection, LookupOpts, Mesh, MeshConfig, MeshName,
     TransportPolicy, validate_advertise,
 };
 use crate::resolver::{self, JoinTarget};
 
+use super::claims::NicknameSource;
 use super::setup::SetupKind;
 
 /// The create intent, before resolution. Each frontend builds this from its
@@ -38,6 +40,9 @@ pub struct CreateParams {
     /// `--invite-only`: the mesh's issuer keypair + invite root are minted at
     /// setup and only creator-signed invites can join.
     pub invite_only: bool,
+    /// Signing identity to speak under. `None` mints a fresh key at setup; a
+    /// caller that persisted one passes it so a restart is the same peer.
+    pub identity: Option<Identity>,
 }
 
 /// The join intent, before resolution.
@@ -48,6 +53,9 @@ pub struct JoinParams {
     /// Password for a passworded id; verified against the id's verifier in
     /// `resolve` (before any network).
     pub password: Option<Password>,
+    /// Signing identity to speak under. `None` mints a fresh key at setup; a
+    /// caller that persisted one passes it so a restart is the same peer.
+    pub identity: Option<Identity>,
 }
 
 /// A passworded id was joined without a password. Typed so callers can
@@ -72,6 +80,9 @@ pub struct TopicParams {
     pub string: String,
     /// `None` ⇒ a random `word-word` nickname is minted in `resolve`.
     pub nickname: Option<Nickname>,
+    /// Signing identity to speak under. `None` mints a fresh key at setup; a
+    /// caller that persisted one passes it so a restart is the same peer.
+    pub identity: Option<Identity>,
 }
 
 /// A resolved create/join, ready to hand to
@@ -82,6 +93,21 @@ pub struct Resolved {
     pub kind: SetupKind,
     pub author: Nickname,
     pub advertise_directory: Option<MeshName>,
+    /// The caller's injected signing identity, to hand on as
+    /// [`SetupParams::identity`](super::setup::SetupParams::identity).
+    pub identity: Option<Identity>,
+    /// Whether `author` was the caller's choice or minted here, to hand on as
+    /// [`SetupParams::nickname_source`](super::setup::SetupParams::nickname_source).
+    pub nickname_source: NicknameSource,
+}
+
+/// The caller's own nickname or one minted here.
+fn nickname_source(chosen: Option<&Nickname>) -> NicknameSource {
+    if chosen.is_some() {
+        NicknameSource::Chosen
+    } else {
+        NicknameSource::Minted
+    }
 }
 
 impl CreateParams {
@@ -102,8 +128,10 @@ impl CreateParams {
                 password: self.password,
                 invite_only: self.invite_only,
             },
+            nickname_source: nickname_source(self.nickname.as_ref()),
             author: self.nickname.unwrap_or_else(Nickname::random),
             advertise_directory,
+            identity: self.identity,
         })
     }
 }
@@ -155,8 +183,10 @@ impl JoinParams {
                 // same password (`None` for a passwordless id/invite).
                 password: self.password,
             },
+            nickname_source: nickname_source(self.nickname.as_ref()),
             author: self.nickname.unwrap_or_else(Nickname::random),
             advertise_directory: None,
+            identity: self.identity,
         })
     }
 }
@@ -265,8 +295,10 @@ impl TopicParams {
                 mesh,
                 topic_string: self.string,
             },
+            nickname_source: nickname_source(self.nickname.as_ref()),
             author: self.nickname.unwrap_or_else(Nickname::random),
             advertise_directory: None,
+            identity: self.identity,
         })
     }
 }
