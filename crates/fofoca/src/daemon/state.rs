@@ -637,6 +637,11 @@ pub(crate) struct StateInit {
     pub(crate) webrtc_ice: crate::transport::IceProfile,
 }
 
+/// One channel's encryption key, derived from the mesh key under `label`.
+fn channel_key(mesh_key: Option<&[u8; 32]>, label: &[u8]) -> Option<zeroize::Zeroizing<[u8; 32]>> {
+    mesh_key.map(|key| zeroize::Zeroizing::new(crate::protocol::crypto::derive_secret(key, label)))
+}
+
 impl EventLoopState {
     /// Build a fresh event-loop state. `now` is passed explicitly so
     /// tests can pin a deterministic instant. `secrets` is taken by value (not
@@ -662,15 +667,9 @@ impl EventLoopState {
         // Per-channel encryption keys, domain-separated from each other and from
         // every other seed-derived secret. `None` (passwordless) ⇒ the docs and
         // broadcast chat stay plaintext, exactly as before.
-        let state_key = mesh_key.as_deref().map(|key| {
-            zeroize::Zeroizing::new(crate::protocol::crypto::derive_secret(key, b"state-doc"))
-        });
-        let meta_key = mesh_key.as_deref().map(|key| {
-            zeroize::Zeroizing::new(crate::protocol::crypto::derive_secret(key, b"meta-doc"))
-        });
-        let broadcast_key = mesh_key.as_deref().map(|key| {
-            zeroize::Zeroizing::new(crate::protocol::crypto::derive_secret(key, b"broadcast"))
-        });
+        let state_key = channel_key(mesh_key.as_deref(), b"state-doc");
+        let meta_key = channel_key(mesh_key.as_deref(), b"meta-doc");
+        let broadcast_key = channel_key(mesh_key.as_deref(), b"broadcast");
         Self {
             linked_endpoints: HashSet::new(),
             direct: HashMap::new(),
@@ -1483,7 +1482,9 @@ impl EventLoopState {
     #[cfg(test)]
     pub(crate) fn expire_resume_floor_for_test(&mut self) {
         if let Some(floor) = self.resume_floor.as_mut() {
-            floor.until = Instant::now() - Duration::from_secs(1);
+            floor.until = Instant::now()
+                .checked_sub(Duration::from_secs(1))
+                .expect("the clock is past its first second");
         }
     }
 

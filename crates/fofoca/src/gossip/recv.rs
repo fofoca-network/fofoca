@@ -345,7 +345,7 @@ pub(crate) async fn ingest(
         // this function (they are not news to us), so keep them the way
         // `retain_own_broadcast` keeps a frame we just sent.
         if state.durable_identity {
-            retain_returning_own_frame(message, state, app, ctx).await;
+            retain_returning_own_frame(message, state, app, ctx);
         }
         return;
     }
@@ -391,18 +391,9 @@ pub(crate) async fn ingest(
     // write. Everything else under a held nickname from another key is kept for
     // anti-entropy and does nothing: not the roster, not what is shown, not the
     // holder's departure.
-    if !matches!(message.kind, MessageKind::State | MessageKind::Meta) {
-        let fresh = message.timestamp >= state.started_at;
-        let held_by_someone_else = if message.author == *ctx.author {
-            note_rival_of_our_nickname(&message, fresh, state, ctx).await;
-            true
-        } else {
-            !state.claims.admit(&message, fresh, Instant::now())
-        };
-        if held_by_someone_else {
-            retain_quietly(message, state, app, ctx).await;
-            return;
-        }
+    if held_by_someone_else(&message, state, ctx).await {
+        retain_quietly(message, state, app, ctx);
+        return;
     }
     // Identity is the signing key, not the nickname (p2panda-style): the
     // signature above authenticates the *key*; the `author` nickname is a
@@ -841,7 +832,7 @@ pub(crate) fn push_to_log(state: &mut EventLoopState, message: Message) {
 /// deduplicated and kept for anti-entropy exactly when a peer receiving it would
 /// keep it. Nothing else happens to it: no surfacing (we know what we sent), no
 /// membership, no fork or DAG indexing, no app dispatch.
-async fn retain_returning_own_frame(
+fn retain_returning_own_frame(
     message: Message,
     state: &mut EventLoopState,
     app: &mut dyn NodeApp,
@@ -869,7 +860,26 @@ async fn retain_returning_own_frame(
         feed_own_channel_event(channel, &message, state, ctx);
         return;
     }
-    retain_quietly(message, state, app, ctx).await;
+    retain_quietly(message, state, app, ctx);
+}
+
+/// Whether `message` comes from a key other than the one holding its nickname,
+/// ours included. A fresh frame from such a key is noted as a rival; a channel
+/// change is never held, since its doc decides what a signer may write.
+async fn held_by_someone_else(
+    message: &Message,
+    state: &mut EventLoopState,
+    ctx: &HandlerCtx<'_>,
+) -> bool {
+    if matches!(message.kind, MessageKind::State | MessageKind::Meta) {
+        return false;
+    }
+    let fresh = message.timestamp >= state.started_at;
+    if message.author == *ctx.author {
+        note_rival_of_our_nickname(message, fresh, state, ctx).await;
+        return true;
+    }
+    !state.claims.admit(message, fresh, Instant::now())
 }
 
 /// Keep a frame that is not to be acted on for anti-entropy only, exactly when
@@ -878,7 +888,7 @@ async fn retain_returning_own_frame(
 /// dedup of a node that has not logged it. The caller has verified it and marked
 /// it seen; nothing else happens to it: not the roster, not the surfaces, not
 /// the app.
-async fn retain_quietly(
+fn retain_quietly(
     mut message: Message,
     state: &mut EventLoopState,
     app: &mut dyn NodeApp,
@@ -2874,9 +2884,15 @@ mod returning_own_frame_tests {
         left.timestamp = at + 2;
         ingest(wire(&left.signed(&other)), &mut state, &mut app, &ctx).await;
         assert!(state.peers.contains("bob"), "still on the roster");
-        let mut left = Message::new_left(&rig.mesh, &nick("bob"));
-        left.timestamp = at + 3;
-        ingest(wire(&left.signed(&holder)), &mut state, &mut app, &ctx).await;
+        let mut holders_left = Message::new_left(&rig.mesh, &nick("bob"));
+        holders_left.timestamp = at + 3;
+        ingest(
+            wire(&holders_left.signed(&holder)),
+            &mut state,
+            &mut app,
+            &ctx,
+        )
+        .await;
         assert!(!state.peers.contains("bob"), "the holder's own left counts");
     }
 
