@@ -2873,6 +2873,37 @@ mod returning_own_frame_tests {
         rig.endpoint.close().await;
     }
 
+    /// L8 through `ingest`: after a goodbye, a replay of what the peer said
+    /// before it does not bring it back; its first newer frame does.
+    #[tokio::test]
+    async fn after_a_goodbye_a_replay_does_not_return_the_peer_and_a_newer_frame_does() {
+        let rig = Rig::new().await;
+        let ctx = rig.ctx();
+        let mut app = Chat::default();
+        let mut state = state_for_run(true, None);
+        let bob = Identity::generate();
+        let at = state.started_at;
+        let frame = |left: bool, stamp: i64| {
+            let mut frame = if left {
+                Message::new_left(&rig.mesh, &nick("bob"))
+            } else {
+                Message::new_joined(&rig.mesh, &nick("bob"))
+            };
+            frame.timestamp = stamp;
+            frame.signed(&bob)
+        };
+
+        ingest(wire(&frame(false, at + 10)), &mut state, &mut app, &ctx).await;
+        ingest(wire(&frame(true, at + 20)), &mut state, &mut app, &ctx).await;
+        assert!(!state.peers.contains("bob"), "gone after its goodbye");
+        ingest(wire(&frame(false, at + 15)), &mut state, &mut app, &ctx).await;
+        assert!(!state.peers.contains("bob"), "a replay from before it");
+        ingest(wire(&frame(false, at + 21)), &mut state, &mut app, &ctx).await;
+        assert!(state.peers.contains("bob"), "a newer frame is a return");
+        assert!(state.departed.is_empty(), "and ends the goodbye");
+        rig.endpoint.close().await;
+    }
+
     /// Frames under a nickname a key already holds: another key's do nothing,
     /// but they are kept so no peer re-serves them to us for good.
     fn joined_by(rig: &Rig, key: &Identity, author: &str, stamp: i64) -> Message {
