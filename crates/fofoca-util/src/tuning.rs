@@ -355,6 +355,8 @@ pub const IPC_IO_TIMEOUT_SECS: u64 = 10;
 /// cold daemon start (the file appears sub-second once the process is up).
 /// Client-side, so these are not part of the daemon `Tuning` struct.
 pub const READY_MAX_SECS: u64 = 30;
+// The nickname windows fit below it: at most 10 to answer, at least 1 alone.
+const _: () = assert!(READY_MAX_SECS >= 12);
 pub const READY_POLL_INTERVAL_MS: u64 = 100;
 
 /// How fresh a `ready: true` state-file write must be for the gate to trust

@@ -1419,8 +1419,12 @@ impl EventLoopState {
 
     /// Note that `author` said goodbye at `timestamp`, so that replays of what
     /// it said until then do not bring it back. Dropped by the first newer
-    /// frame from it, which is a return.
+    /// frame from it, which is a return. A goodbye stamped ahead of our clock
+    /// by more than [`LIVENESS_CLOCK_SLACK_SECS`] counts as said now: else it
+    /// would keep the nickname off the roster until wall time caught up.
     pub(crate) fn note_departed(&mut self, author: &Nickname, timestamp: i64) {
+        let timestamp = timestamp
+            .min(crate::util::clock::unix_secs().saturating_add(LIVENESS_CLOCK_SLACK_SECS));
         if self.departed.len() >= NEWEST_TS_CAP && !self.departed.contains_key(author) {
             self.departed.clear();
         }
@@ -1744,7 +1748,7 @@ mod tests {
     fn a_goodbye_makes_older_frames_replays_until_a_newer_one_returns() {
         let mut state = fresh_state();
         let bob = nick("bob");
-        let left_at = state.started_at + 10;
+        let left_at = state.started_at;
         state.note_departed(&bob, left_at);
         assert!(
             !state.is_live_frame(&bob, left_at),
@@ -1761,6 +1765,14 @@ mod tests {
         assert!(
             !state.is_live_frame(&bob, left_at),
             "a replayed older goodbye does not move it back"
+        );
+
+        let mut clockless = fresh_state();
+        let far_ahead = clockless.started_at + 3600;
+        clockless.note_departed(&bob, far_ahead);
+        assert!(
+            clockless.is_live_frame(&bob, clockless.started_at + LIVENESS_CLOCK_SLACK_SECS + 2),
+            "a goodbye from a clock far ahead holds no longer than the slack"
         );
 
         state.note_returned_after_departure(&bob, left_at);

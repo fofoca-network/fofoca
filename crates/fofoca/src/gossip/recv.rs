@@ -2882,14 +2882,16 @@ mod returning_own_frame_tests {
     }
 
     /// L8 through `ingest`: after a goodbye, a replay of what the peer said
-    /// before it does not bring it back; its first newer frame does.
+    /// before it does not bring it back nor claim its nickname, so a new key
+    /// can rejoin under it.
     #[tokio::test]
-    async fn after_a_goodbye_a_replay_does_not_return_the_peer_and_a_newer_frame_does() {
+    async fn after_a_goodbye_a_replay_claims_nothing_and_a_new_key_can_rejoin() {
         let rig = Rig::new().await;
         let ctx = rig.ctx();
         let mut app = Chat::default();
         let mut state = state_for_run(true, None);
         let bob = Identity::generate();
+        // Within the clock slack of now: a goodbye further ahead counts as said now.
         let at = state.started_at;
         let frame = |left: bool, stamp: i64| {
             let mut frame = if left {
@@ -2901,19 +2903,28 @@ mod returning_own_frame_tests {
             frame.signed(&bob)
         };
 
-        ingest(wire(&frame(false, at + 10)), &mut state, &mut app, &ctx).await;
-        ingest(wire(&frame(true, at + 20)), &mut state, &mut app, &ctx).await;
+        ingest(wire(&frame(false, at + 1)), &mut state, &mut app, &ctx).await;
+        ingest(wire(&frame(true, at + 4)), &mut state, &mut app, &ctx).await;
         assert!(!state.peers.contains("bob"), "gone after its goodbye");
-        ingest(wire(&frame(false, at + 15)), &mut state, &mut app, &ctx).await;
+        ingest(wire(&frame(false, at + 2)), &mut state, &mut app, &ctx).await;
         assert!(!state.peers.contains("bob"), "a replay from before it");
         assert_eq!(
             state.nickname_holder(&nick("bob")),
             None,
             "and claims nothing, so a new key may take the nickname"
         );
-        ingest(wire(&frame(false, at + 21)), &mut state, &mut app, &ctx).await;
-        assert!(state.peers.contains("bob"), "a newer frame is a return");
-        assert!(state.departed.is_empty(), "and ends the goodbye");
+        let carol = Identity::generate();
+        let mut rejoin = Message::new_joined(&rig.mesh, &nick("bob"));
+        rejoin.timestamp = at + 5;
+        ingest(wire(&rejoin.signed(&carol)), &mut state, &mut app, &ctx).await;
+        assert!(state.peers.contains("bob"), "a new key rejoins as bob");
+        assert!(state.departed.is_empty(), "which ends the goodbye");
+        let carol_key = encode_pubkey(&carol.public());
+        assert_eq!(
+            state.nickname_holder(&nick("bob")),
+            Some(carol_key.as_str()),
+            "and holds the nickname"
+        );
         rig.endpoint.close().await;
     }
 
