@@ -1358,6 +1358,15 @@ impl EventLoopState {
         self.multihop.as_ref()
     }
 
+    /// The signing key, lowercase hex, that holds `nickname` on the mesh, as
+    /// read off its fresh frames: the key whose frames under that nickname
+    /// reach the roster and the surfaces. `None` when no claim on it is live.
+    /// Our own nickname is never claimed here; its holder is this node.
+    #[must_use]
+    pub fn nickname_holder(&self, nickname: &Nickname) -> Option<&str> {
+        self.claims.holder(nickname, Instant::now())
+    }
+
     /// The Argon2id-derived broadcast key, for a password-protected mesh.
     #[must_use]
     pub fn broadcast_key(&self) -> Option<&[u8; 32]> {

@@ -177,6 +177,15 @@ impl Claims {
         true
     }
 
+    /// The key holding `nickname`, while its claim is live at `now`.
+    pub(crate) fn holder(&self, nickname: &Nickname, now: Instant) -> Option<&str> {
+        let alive = Duration::from_secs(alive_timeout_secs());
+        self.held
+            .get(nickname)
+            .filter(|claim| now.duration_since(claim.last_fresh) <= alive)
+            .map(|claim| claim.pubkey.as_str())
+    }
+
     /// Note a fresh frame from another key under our own nickname.
     pub(crate) fn note_rival(&mut self, message: &Message) -> RivalStep {
         if self.rivals.len() >= RIVALS_CAP && !self.rivals.contains_key(&message.pubkey) {
@@ -263,6 +272,25 @@ mod tests {
             claims.admit(&frame("bob", KEY_B), true, now),
             "another nickname"
         );
+    }
+
+    #[test]
+    fn the_holder_is_the_claiming_key_until_it_leaves_or_goes_quiet() {
+        let mut claims = Claims::default();
+        let now = Instant::now();
+        let alice = Nickname::from("alice");
+        assert_eq!(claims.holder(&alice, now), None, "nothing heard yet");
+        claims.admit(&frame("alice", KEY_A), true, now);
+        claims.admit(&frame("alice", KEY_B), true, now);
+        assert_eq!(
+            claims.holder(&alice, now),
+            Some(KEY_A),
+            "the first fresh key"
+        );
+        let quiet = now + Duration::from_secs(alive_timeout_secs() + 1);
+        assert_eq!(claims.holder(&alice, quiet), None, "past the alive timeout");
+        claims.admit(&left("alice", KEY_A), true, now);
+        assert_eq!(claims.holder(&alice, now), None, "after its own left");
     }
 
     #[test]
